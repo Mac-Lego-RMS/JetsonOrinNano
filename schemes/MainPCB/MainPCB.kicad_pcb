@@ -4510,7 +4510,7 @@
 		(at 168.5 18.14)
 		(descr "JST XH series connector, B3B-XH-A (http://www.jst-mfg.com/product/pdf/eng/eXH.pdf), generated with kicad-footprint-generator")
 		(tags "connector JST XH vertical")
-		(property "Reference" "J5"
+		(property "Reference" "Motor Driver Com"
 			(at 2.5 -3.55 0)
 			(layer "F.SilkS")
 			(uuid "1d720a34-f6f3-46ef-a839-3e39437053db")
@@ -6911,7 +6911,7 @@
 		(at 181 18.14)
 		(descr "JST XH series connector, B4B-XH-A (http://www.jst-mfg.com/product/pdf/eng/eXH.pdf), generated with kicad-footprint-generator")
 		(tags "connector JST XH vertical")
-		(property "Reference" "J7"
+		(property "Reference" "Lidar"
 			(at 3.75 -3.55 0)
 			(layer "F.SilkS")
 			(uuid "ce61add6-54ec-40ee-97fd-7dc23d3dde4a")
@@ -9852,7 +9852,7 @@
 		(at 156.5 18.14)
 		(descr "JST XH series connector, B3B-XH-A (http://www.jst-mfg.com/product/pdf/eng/eXH.pdf), generated with kicad-footprint-generator")
 		(tags "connector JST XH vertical")
-		(property "Reference" "J6"
+		(property "Reference" "Jetson Com"
 			(at 2.5 -3.55 0)
 			(layer "F.SilkS")
 			(uuid "3c0cc6ca-9967-4a9a-8ccd-7108943b984d")
@@ -16695,7 +16695,7 @@
 		(at 144.5 21)
 		(descr "Terminal Block Phoenix MKDS-1,5-2-5.08, 2 pins, pitch 5.08mm, size 10.2x9.8mm, drill diameter 1.3mm, pad diameter 2.6mm, http://www.farnell.com/datasheets/100425.pdf, script-generated using https://gitlab.com/kicad/libraries/kicad-footprint-generator/-/tree/master/scripts/TerminalBlock_Phoenix")
 		(tags "THT Terminal Block Phoenix MKDS-1,5-2-5.08 pitch 5.08mm size 10.2x9.8mm drill 1.3mm pad 2.6mm")
-		(property "Reference" "J2"
+		(property "Reference" "Jetson PWR"
 			(at 2.54 -6.32 0)
 			(layer "F.SilkS")
 			(uuid "c4c1b451-f146-461c-ac3b-2feef92d24f0")
@@ -17410,7 +17410,7 @@
 		(at 217 18.14)
 		(descr "JST XH series connector, B4B-XH-A (http://www.jst-mfg.com/product/pdf/eng/eXH.pdf), generated with kicad-footprint-generator")
 		(tags "connector JST XH vertical")
-		(property "Reference" "J8"
+		(property "Reference" "Motor Encoder"
 			(at 3.75 -3.55 0)
 			(layer "F.SilkS")
 			(uuid "f2d45bba-96ea-45d0-91cc-7023161bc384")
@@ -20888,7 +20888,7 @@
 		(at 195.5 18.14)
 		(descr "JST XH series connector, B2B-XH-A (http://www.jst-mfg.com/product/pdf/eng/eXH.pdf), generated with kicad-footprint-generator")
 		(tags "connector JST XH vertical")
-		(property "Reference" "J4"
+		(property "Reference" "Servo PWR"
 			(at 1.25 -3.55 0)
 			(layer "F.SilkS")
 			(uuid "0709e700-59a6-4c18-b89a-2ec93e7b7257")
@@ -21777,7 +21777,7 @@
 		(at 132.42 21)
 		(descr "Terminal Block Phoenix MKDS-1,5-2-5.08, 2 pins, pitch 5.08mm, size 10.2x9.8mm, drill diameter 1.3mm, pad diameter 2.6mm, http://www.farnell.com/datasheets/100425.pdf, script-generated using https://gitlab.com/kicad/libraries/kicad-footprint-generator/-/tree/master/scripts/TerminalBlock_Phoenix")
 		(tags "THT Terminal Block Phoenix MKDS-1,5-2-5.08 pitch 5.08mm size 10.2x9.8mm drill 1.3mm pad 2.6mm")
-		(property "Reference" "J9"
+		(property "Reference" "Motor PWR"
 			(at 2.54 -6.32 0)
 			(layer "F.SilkS")
 			(uuid "f9397c31-5ee1-4d0f-a255-2016faf8e351")
@@ -30489,6 +30489,18 @@
 			(font
 				(size 8 4)
 				(thickness 0.5)
+			)
+			(justify left bottom)
+		)
+	)
+	(gr_text "Servo Com"
+		(at 203.5 15 0)
+		(layer "F.SilkS")
+		(uuid "b7cdbe29-3b28-4434-918e-9d5660d81ef2")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.2)
 			)
 			(justify left bottom)
 		)
