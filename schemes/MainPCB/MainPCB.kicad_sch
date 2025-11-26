@@ -3840,7 +3840,7 @@
 	)
 	(global_label "Motor PWM"
 		(shape input)
-		(at 257.81 64.77 0)
+		(at 257.81 67.31 0)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -3850,7 +3850,7 @@
 		)
 		(uuid "a5f0d748-c430-45a3-8d28-003b2d237ab7")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 271.1969 64.77 0)
+			(at 271.1969 67.31 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -3950,7 +3950,7 @@
 	)
 	(global_label "Motor DIR"
 		(shape input)
-		(at 257.81 67.31 0)
+		(at 257.81 64.77 0)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -3960,7 +3960,7 @@
 		)
 		(uuid "bee4af96-4540-4e18-a4da-8ba8abe215d7")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 270.1689 67.31 0)
+			(at 270.1689 64.77 0)
 			(effects
 				(font
 					(size 1.27 1.27)
