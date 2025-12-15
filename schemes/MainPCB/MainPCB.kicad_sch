@@ -3496,12 +3496,6 @@
 		(uuid "231e7bfc-8f6f-4746-977e-64ef58296a71")
 	)
 	(junction
-		(at 55.88 97.79)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "2ca55436-85b7-48c0-9af1-ce1206c91b79")
-	)
-	(junction
 		(at 140.97 114.3)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -3514,28 +3508,16 @@
 		(uuid "405ad4da-ea0e-4a87-a57a-1c6d93ef5b7d")
 	)
 	(junction
-		(at 48.26 97.79)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "4135e1b7-f22c-4365-8702-638ab80d2215")
-	)
-	(junction
 		(at 120.65 114.3)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "492a902b-35df-4f5a-bade-a5877c4e6640")
 	)
 	(junction
-		(at 49.53 140.97)
+		(at 62.23 97.79)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "5911e3dc-38fe-46ff-8640-a4ed53cd37a0")
-	)
-	(junction
-		(at 63.5 140.97)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "5d44341c-a1ef-44cc-b163-0acf7615c9bc")
+		(uuid "6201f6cb-409d-438b-80bc-4d8eb5ccf8a7")
 	)
 	(junction
 		(at 40.64 97.79)
@@ -3556,22 +3538,10 @@
 		(uuid "8cb8df50-e71f-4bc6-b862-91a2170f1378")
 	)
 	(junction
-		(at 57.15 140.97)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "99fa53a9-fd56-4e0a-b809-d3ec592fe237")
-	)
-	(junction
 		(at 273.05 90.17)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "b01b3443-202b-4b3e-bf20-bd2ee432ed4b")
-	)
-	(junction
-		(at 156.21 114.3)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "b3b18ac3-6335-4358-ada2-8190d7da642a")
 	)
 	(junction
 		(at 27.94 22.86)
@@ -3598,12 +3568,6 @@
 		(uuid "d807ef20-ec7c-43d7-8b2e-96cd74aad530")
 	)
 	(junction
-		(at 62.23 97.79)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "edf00205-916b-4990-bc63-88f38dcba733")
-	)
-	(junction
 		(at 135.89 157.48)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -3616,16 +3580,16 @@
 		(uuid "f1e95d47-6b2a-4588-9541-e0a5f5889979")
 	)
 	(junction
+		(at 62.23 140.97)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "f200fb1b-8199-402f-b0d8-ec83abd14c80")
+	)
+	(junction
 		(at 121.92 157.48)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "f3165665-2efc-496a-adc7-381e805fbb21")
-	)
-	(junction
-		(at 148.59 114.3)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "f7da09b3-3a30-4c81-9348-987c4f8c5f8f")
 	)
 	(junction
 		(at 121.92 143.51)
@@ -3652,16 +3616,6 @@
 			(type default)
 		)
 		(uuid "01d3facc-7c83-41d9-926e-dbb9b4899529")
-	)
-	(wire
-		(pts
-			(xy 57.15 140.97) (xy 63.5 140.97)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "0d1cbdca-be2d-45d7-bf35-d7fed91b323c")
 	)
 	(wire
 		(pts
@@ -3712,6 +3666,16 @@
 			(type default)
 		)
 		(uuid "16481976-807a-42ed-a794-daa4fbe21d07")
+	)
+	(wire
+		(pts
+			(xy 62.23 140.97) (xy 71.12 140.97)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "17849903-0388-48b8-93f2-0552070e3a47")
 	)
 	(wire
 		(pts
@@ -3825,7 +3789,7 @@
 	)
 	(wire
 		(pts
-			(xy 62.23 97.79) (xy 69.85 97.79)
+			(xy 40.64 97.79) (xy 62.23 97.79)
 		)
 		(stroke
 			(width 0)
@@ -3845,16 +3809,6 @@
 	)
 	(wire
 		(pts
-			(xy 63.5 140.97) (xy 71.12 140.97)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "5b0baef3-2034-428d-b7c1-3e4cce6cf1e6")
-	)
-	(wire
-		(pts
 			(xy 276.86 92.71) (xy 276.86 95.25)
 		)
 		(stroke
@@ -3865,13 +3819,13 @@
 	)
 	(wire
 		(pts
-			(xy 48.26 97.79) (xy 55.88 97.79)
+			(xy 62.23 97.79) (xy 69.85 97.79)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "6a56e747-ecbc-42eb-83ca-d5ab6503a77d")
+		(uuid "72a720de-8ee5-49be-80a4-8e83f315b2cd")
 	)
 	(wire
 		(pts
@@ -3975,16 +3929,6 @@
 	)
 	(wire
 		(pts
-			(xy 55.88 97.79) (xy 62.23 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "9d08d2e2-b826-4fca-bdf8-e87789d43ea1")
-	)
-	(wire
-		(pts
 			(xy 121.92 128.27) (xy 121.92 143.51)
 		)
 		(stroke
@@ -4005,16 +3949,6 @@
 	)
 	(wire
 		(pts
-			(xy 40.64 97.79) (xy 48.26 97.79)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "a8f10b52-f607-43ee-b823-15fad838ed28")
-	)
-	(wire
-		(pts
 			(xy 69.85 146.05) (xy 69.85 128.27)
 		)
 		(stroke
@@ -4025,17 +3959,7 @@
 	)
 	(wire
 		(pts
-			(xy 41.91 140.97) (xy 49.53 140.97)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "bcbf2fd2-e990-4503-be06-45faa34b2726")
-	)
-	(wire
-		(pts
-			(xy 49.53 140.97) (xy 57.15 140.97)
+			(xy 41.91 140.97) (xy 62.23 140.97)
 		)
 		(stroke
 			(width 0)
@@ -4122,16 +4046,6 @@
 			(type default)
 		)
 		(uuid "e7b3f9fe-a0de-4c25-8aa5-4daee099436f")
-	)
-	(wire
-		(pts
-			(xy 156.21 114.3) (xy 148.59 114.3)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "f0a2295c-3438-454b-bba5-339eeab40dd0")
 	)
 	(wire
 		(pts
@@ -5402,6 +5316,76 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:C")
+		(at 62.23 101.6 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "1a4c0b85-0cda-4819-8bbd-b703543b65f0")
+		(property "Reference" "C2"
+			(at 66.04 100.9649 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "0.47uF"
+			(at 66.04 102.87 0)
+			(effects
+				(font
+					(size 0.635 0.635)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P2.50mm"
+			(at 63.1952 105.41 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 62.23 101.6 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 62.23 101.6 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "95ea3bde-93db-4493-a288-914a5a063f2b")
+		)
+		(pin "2"
+			(uuid "b6470b2a-7cc0-4766-a73f-64b28161e988")
+		)
+		(instances
+			(project ""
+				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
+					(reference "C2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 121.92 165.1 0)
 		(unit 1)
@@ -5468,6 +5452,73 @@
 		)
 	)
 	(symbol
+		(lib_id "power:GND")
+		(at 62.23 105.41 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "1db0a819-26a6-4904-af5a-8f56e4307d25")
+		(property "Reference" "#PWR016"
+			(at 62.23 111.76 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 62.23 110.49 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Footprint" ""
+			(at 62.23 105.41 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 62.23 105.41 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 62.23 105.41 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "c0f2be67-8b3c-41b0-8d42-58b018c0a860")
+		)
+		(instances
+			(project "MainPCB"
+				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
+					(reference "#PWR016")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:C_Polarized")
 		(at 135.89 161.29 0)
 		(unit 1)
@@ -5485,7 +5536,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "180uF 16V"
+		(property "Value" "220uF 35V"
 			(at 130.302 163.068 0)
 			(effects
 				(font
@@ -5494,7 +5545,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
+		(property "Footprint" "Capacitor_THT:CP_Radial_D8.0mm_P5.00mm"
 			(at 136.8552 165.1 0)
 			(effects
 				(font
@@ -5598,142 +5649,6 @@
 			(project ""
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "L1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C")
-		(at 63.5 144.78 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "2537657b-aba1-4db1-9dca-252d32f6303b")
-		(property "Reference" "C11"
-			(at 59.69 147.828 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "0.47uF"
-			(at 59.944 146.558 0)
-			(effects
-				(font
-					(size 0.635 0.635)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P2.50mm"
-			(at 64.4652 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 63.5 144.78 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Unpolarized capacitor"
-			(at 63.5 144.78 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "f271dd73-5a23-447d-a566-1e65fc11bd76")
-		)
-		(pin "2"
-			(uuid "17fd4eb7-6539-4c1b-9ec8-2c5e36289914")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "C11")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 49.53 148.59 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "2575176b-0deb-4bf2-8d7a-e703d1bb986e")
-		(property "Reference" "#PWR026"
-			(at 49.53 154.94 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 49.53 153.67 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Footprint" ""
-			(at 49.53 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 49.53 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 49.53 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "94f218e5-b3cb-4cbb-89c1-4cf5d0021544")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR026")
 					(unit 1)
 				)
 			)
@@ -6162,7 +6077,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "180uF 16V"
+		(property "Value" "220uF 35V"
 			(at 136.652 163.068 0)
 			(effects
 				(font
@@ -6171,7 +6086,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
+		(property "Footprint" "Capacitor_THT:CP_Radial_D8.0mm_P5.00mm"
 			(at 143.2052 165.1 0)
 			(effects
 				(font
@@ -7180,7 +7095,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "15uF 50V"
+		(property "Value" "470uF 35V"
 			(at 37.084 146.558 0)
 			(effects
 				(font
@@ -7189,7 +7104,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
+		(property "Footprint" "Capacitor_THT:CP_Radial_D8.0mm_P3.80mm"
 			(at 42.8752 148.59 0)
 			(effects
 				(font
@@ -7292,73 +7207,6 @@
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "#PWR024")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 48.26 105.41 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "675654fd-6de9-4abd-9d29-5f7be2428855")
-		(property "Reference" "#PWR016"
-			(at 48.26 111.76 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 48.26 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Footprint" ""
-			(at 48.26 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 48.26 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 48.26 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "d8a04d71-0120-4c20-9ea5-8aff7a582e85")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR016")
 					(unit 1)
 				)
 			)
@@ -7498,75 +7346,6 @@
 	)
 	(symbol
 		(lib_id "Device:C_Polarized")
-		(at 48.26 101.6 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board no)
-		(dnp no)
-		(uuid "74ef96e6-9574-44b3-a437-d551a6166b17")
-		(property "Reference" "C2"
-			(at 45.466 104.648 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "15uF 50V"
-			(at 43.434 103.378 0)
-			(effects
-				(font
-					(size 0.635 0.635)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
-			(at 49.2252 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 48.26 101.6 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Polarized capacitor"
-			(at 48.26 101.6 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "759d0da9-df68-4e38-99a1-e625a562cc38")
-		)
-		(pin "2"
-			(uuid "da169b5e-d50e-480b-b5c0-dfbd3c9ed39a")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "C2")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C_Polarized")
 		(at 134.62 118.11 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -7583,7 +7362,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "180uF 16V"
+		(property "Value" "220uF 15V"
 			(at 129.032 119.888 0)
 			(effects
 				(font
@@ -7592,7 +7371,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
+		(property "Footprint" "Capacitor_THT:C_Radial_D6.3mm_H7.0mm_P2.50mm"
 			(at 135.5852 121.92 0)
 			(effects
 				(font
@@ -7763,6 +7542,73 @@
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "#PWR030")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 62.23 148.59 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "78e6a413-31d9-4f24-8a58-7d8f405aa995")
+		(property "Reference" "#PWR017"
+			(at 62.23 154.94 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 62.23 153.67 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Footprint" ""
+			(at 62.23 148.59 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 62.23 148.59 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 62.23 148.59 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "3f324a85-edae-4637-9450-be1fed9de072")
+		)
+		(instances
+			(project "MainPCB"
+				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
+					(reference "#PWR017")
 					(unit 1)
 				)
 			)
@@ -8454,73 +8300,6 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 55.88 105.41 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "94664a67-cd4d-40c7-ba41-f089e5bca1a8")
-		(property "Reference" "#PWR017"
-			(at 55.88 111.76 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 55.88 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Footprint" ""
-			(at 55.88 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 55.88 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 55.88 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "df5c1c80-10f1-4240-924e-ffbc6988e34c")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR017")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
 		(at 205.74 21.59 0)
 		(unit 1)
 		(exclude_from_sim no)
@@ -8604,7 +8383,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "15uF 50V"
+		(property "Value" "470uF 35V"
 			(at 35.56 103.378 0)
 			(effects
 				(font
@@ -8613,7 +8392,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
+		(property "Footprint" "Capacitor_THT:CP_Radial_D8.0mm_P3.80mm"
 			(at 41.6052 105.41 0)
 			(effects
 				(font
@@ -8650,213 +8429,6 @@
 			(project ""
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "C1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C_Polarized")
-		(at 49.53 144.78 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "9ec10695-0a19-4bd3-93ec-713a6d1a8d6b")
-		(property "Reference" "C9"
-			(at 46.736 147.828 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "15uF 50V"
-			(at 44.704 146.558 0)
-			(effects
-				(font
-					(size 0.635 0.635)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
-			(at 50.4952 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 49.53 144.78 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Polarized capacitor"
-			(at 49.53 144.78 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "4340e6e4-626c-4bd3-ab2a-93ca251eb6d2")
-		)
-		(pin "2"
-			(uuid "fc33d4cd-238f-4747-9760-558233037876")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "C9")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C_Polarized")
-		(at 57.15 144.78 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board no)
-		(dnp no)
-		(uuid "a2ba4b3f-3750-4283-bf3d-37578af0c095")
-		(property "Reference" "C10"
-			(at 53.34 147.828 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "15uF 50V"
-			(at 52.324 146.558 0)
-			(effects
-				(font
-					(size 0.635 0.635)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
-			(at 58.1152 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 57.15 144.78 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Polarized capacitor"
-			(at 57.15 144.78 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "7adbc426-a2d9-4fa9-a1e7-3bec8b8d093b")
-		)
-		(pin "2"
-			(uuid "3d0273d3-7fac-4b06-a24f-4f28d99447f3")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "C10")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C")
-		(at 62.23 101.6 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "b23bdb24-37f3-4a54-a8e2-bcdb4f857e59")
-		(property "Reference" "C4"
-			(at 62.738 105.156 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "0.47uF"
-			(at 62.738 103.378 0)
-			(effects
-				(font
-					(size 0.635 0.635)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P2.50mm"
-			(at 63.1952 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 62.23 101.6 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Unpolarized capacitor"
-			(at 62.23 101.6 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "249ba68c-2476-4144-ab9f-65320945c9ba")
-		)
-		(pin "2"
-			(uuid "92c959ee-d3c2-407d-bb01-865b483d7c6e")
-		)
-		(instances
-			(project ""
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "C4")
 					(unit 1)
 				)
 			)
@@ -9066,73 +8638,6 @@
 		)
 	)
 	(symbol
-		(lib_id "power:GND")
-		(at 57.15 148.59 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "bffcd0c5-5c8f-48a2-beb9-3a3fdc4ef941")
-		(property "Reference" "#PWR027"
-			(at 57.15 154.94 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 57.15 153.67 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Footprint" ""
-			(at 57.15 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 57.15 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 57.15 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "f8576326-2246-4679-8ea1-597fb8751e51")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR027")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:C_Polarized")
 		(at 140.97 118.11 0)
 		(unit 1)
@@ -9150,7 +8655,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "180uF 16V"
+		(property "Value" "220uF 15V"
 			(at 135.636 119.888 0)
 			(effects
 				(font
@@ -9159,7 +8664,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
+		(property "Footprint" "Capacitor_THT:C_Radial_D6.3mm_H7.0mm_P2.50mm"
 			(at 141.9352 121.92 0)
 			(effects
 				(font
@@ -9196,72 +8701,6 @@
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "C6")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 63.5 148.59 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "c7e320a7-c805-4eed-8b24-3d49566c9581")
-		(property "Reference" "#PWR028"
-			(at 63.5 154.94 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 54.61 153.416 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Footprint" ""
-			(at 63.5 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 63.5 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 63.5 148.59 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "83d37b5a-72a9-4173-bf16-4f2cd61a7404")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR028")
 					(unit 1)
 				)
 			)
@@ -9472,73 +8911,6 @@
 		)
 	)
 	(symbol
-		(lib_id "power:GND")
-		(at 62.23 105.41 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "cf90ff00-6547-41da-8d58-24d91417ba7a")
-		(property "Reference" "#PWR018"
-			(at 62.23 111.76 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 62.23 110.49 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Footprint" ""
-			(at 62.23 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 62.23 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 62.23 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "f86d58d2-4fd1-48a1-b886-fbfb3e638748")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR018")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:L")
 		(at 125.73 157.48 90)
 		(unit 1)
@@ -9601,75 +8973,6 @@
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "L2")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C_Polarized")
-		(at 55.88 101.6 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board no)
-		(dnp no)
-		(uuid "dde19ee6-70a1-4479-8b1c-7f3af6554c99")
-		(property "Reference" "C3"
-			(at 53.086 104.648 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "15uF 50V"
-			(at 50.8 103.378 0)
-			(effects
-				(font
-					(size 0.635 0.635)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
-			(at 56.8452 105.41 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 55.88 101.6 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Polarized capacitor"
-			(at 55.88 101.6 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "ca8b1170-fe38-4899-bf5e-2eec891db042")
-		)
-		(pin "2"
-			(uuid "d1566e0c-9858-495a-8bfc-9aca606053f4")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "C3")
 					(unit 1)
 				)
 			)
@@ -9871,6 +9174,76 @@
 			(project ""
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "#PWR01")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 62.23 144.78 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "e5bde6e6-b79d-483a-8b8f-425ee11c4981")
+		(property "Reference" "C3"
+			(at 66.04 144.1449 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "0.47uF"
+			(at 66.04 146.05 0)
+			(effects
+				(font
+					(size 0.635 0.635)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P2.50mm"
+			(at 63.1952 148.59 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 62.23 144.78 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 62.23 144.78 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "8437ba22-2fab-405a-9804-93331c330f54")
+		)
+		(pin "2"
+			(uuid "b822c8fc-2402-48db-98ba-a0198308838c")
+		)
+		(instances
+			(project "MainPCB"
+				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
+					(reference "C3")
 					(unit 1)
 				)
 			)
