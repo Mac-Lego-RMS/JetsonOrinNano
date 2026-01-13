@@ -62,14 +62,6 @@
         [
           "lib_footprint_issues|102500000|143000000|8335107a-b33f-43fa-9446-d87017a3c4cd|00000000-0000-0000-0000-000000000000",
           ""
-        ],
-        [
-          "lib_footprint_mismatch|67000000|130500000|f51f644b-3361-4914-b8ea-dc219226f17e|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|89000000|109000000|3caee7de-6521-4ccb-b871-a0eb918a7f7d|00000000-0000-0000-0000-000000000000",
-          ""
         ]
       ],
       "meta": {
@@ -521,7 +513,7 @@
       "gencad": "",
       "idf": "",
       "netlist": "",
-      "plot": "gerber/",
+      "plot": "gerber/gerberV2/",
       "pos_files": "",
       "specctra_dsn": "",
       "step": "MainPCB.step",
