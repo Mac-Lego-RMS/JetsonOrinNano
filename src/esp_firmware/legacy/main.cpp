@@ -36,3 +36,5 @@ void loop() {
     // 3. Andere Hintergrundaufgaben...
     // delay() vermeiden für reaktives System!
 }
+
+//Pin 1
