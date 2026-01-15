@@ -17,6 +17,10 @@ void setup() {
   // 3. LED Setup
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW); // Start: Aus
+
+  digitalWrite(LED_PIN, HIGH);
+  delay(1000)
+  digitalWrite(LED_PIN, LOW);
 }
 
 void loop() {
