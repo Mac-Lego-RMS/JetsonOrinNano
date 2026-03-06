@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point
+from rclpy.qos import qos_profile_sensor_data
+import math
+
+class WallFollower(Node):
+    def __init__(self):
+        super().__init__('wall_follower')
+        self.sub_scan = self.create_subscription(LaserScan, '/ldlidar_node/scan', self.scan_callback, qos_profile_sensor_data)
+        self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
+        
+        self.pub_markers = self.create_publisher(MarkerArray, '/wall_follower_markers', 10)
+        self.rviz_frame = 'ldlidar_link' 
+
+        self.state = 'STARTUP'
+        self.locked_direction = None
+        self.turn_count = 0
+        self.target_turns = 12  
+        
+        self.start_time = self.get_clock().now()
+        self.turn_start_time = self.get_clock().now()
+        self.last_turn_end_time = self.get_clock().now()
+        self.turn_cooldown = 1.5 
+
+        self.target_pwm = 350.0  
+        self.turn_pwm = 350.0
+        
+        self.inner_wall_ratio = 0.30  
+        self.outer_wall_ratio = 1.0 - self.inner_wall_ratio
+        self.min_wall_dist = 0.25  
+        self.lookahead_dist = 0.45 
+        
+        self.pre_turn_dist = 0.40  
+        self.corner_jump_threshold = 0.30 
+        self.backup_turn_dist = 0.60 
+        
+        self.max_steering_pid = 0.50 
+        self.turn_steering_angle = 0.85 
+        self.track_width = 0.80      
+        self.turn_exit = 1.40       
+
+        self.kp = 2.0
+        self.kd = 1.0
+        self.last_error = 0.0
+
+        self.get_logger().info('>>> STABILER U-PROFIL MAPPER GESTARTET! <<<')
+
+    def publish_rviz_markers(self, pts_left, pts_right, pts_front, target_y):
+        marker_array = MarkerArray()
+        
+        def create_line(m_id, r, g, b, pts):
+            marker = Marker()
+            marker.header.frame_id = self.rviz_frame
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "walls"
+            marker.id = m_id
+            marker.type = Marker.LINE_STRIP
+            marker.action = Marker.ADD
+            marker.scale.x = 0.05 
+            marker.color.a = 1.0
+            marker.color.r, marker.color.g, marker.color.b = r, g, b
+            marker.pose.orientation.w = 1.0 
+            
+            if pts is not None:
+                p1 = Point()
+                p1.x = -float(pts[0][1])  
+                p1.y = float(pts[0][0])   
+                p1.z = 0.0
+                
+                p2 = Point()
+                p2.x = -float(pts[1][1])
+                p2.y = float(pts[1][0])
+                p2.z = 0.0
+                
+                marker.points = [p1, p2]
+            else:
+                marker.action = Marker.DELETE
+            return marker
+
+        marker_array.markers.append(create_line(0, 1.0, 0.0, 0.0, pts_left))   
+        marker_array.markers.append(create_line(1, 0.0, 0.5, 1.0, pts_right))  
+        marker_array.markers.append(create_line(2, 1.0, 1.0, 0.0, pts_front))  
+
+        target_marker = Marker()
+        target_marker.header.frame_id = self.rviz_frame
+        target_marker.header.stamp = self.get_clock().now().to_msg()
+        target_marker.ns = "target"
+        target_marker.id = 3
+        target_marker.type = Marker.SPHERE
+        target_marker.pose.orientation.w = 1.0 
+        
+        if target_y is not None:
+            target_marker.action = Marker.ADD
+            target_marker.scale.x, target_marker.scale.y, target_marker.scale.z = 0.15, 0.15, 0.15
+            target_marker.color.a, target_marker.color.r, target_marker.color.g, target_marker.color.b = 1.0, 0.0, 1.0, 0.0
+            target_marker.pose.position.x = -float(target_y)
+            target_marker.pose.position.y = float(self.lookahead_dist)
+            target_marker.pose.position.z = 0.0
+        else:
+            target_marker.action = Marker.DELETE
+            
+        marker_array.markers.append(target_marker)
+        self.pub_markers.publish(marker_array)
+
+    def get_cartesian_points_and_front(self, ranges, angle_min, angle_increment):
+        left_pts, right_pts, front_pts = [], [], []
+        raw_points = []
+        
+        for i, r in enumerate(ranges):
+            if math.isinf(r) or math.isnan(r) or r < 0.05 or r > 3.0:
+                continue
+
+            angle_raw = angle_min + i * angle_increment
+            angle_corrected = angle_raw - (math.pi / 2.0)
+            
+            x = r * math.cos(angle_corrected)
+            y = r * math.sin(angle_corrected)
+            raw_points.append((x, y))
+
+        # Stabiler Front-Tunnel (0.40m = exakt breit genug für die echte Wand, ohne Seitenpunkte zu klauen)
+        narrow_front = [x for x, y in raw_points if x > 0.1 and abs(y) < 0.40]
+        dist_front = 3.0
+        if narrow_front:
+            narrow_front.sort()
+            best_front = narrow_front[:max(1, len(narrow_front)//3)]
+            dist_front = sum(best_front) / len(best_front)
+
+        for x, y in raw_points:
+            # Sauberer Cutoff 30cm vor der Frontwand
+            if x > dist_front - 0.30: 
+                front_pts.append((x, y))
+            else:
+                # Wände dürfen jetzt wieder bis zu 2.5m lang sein (hilft bei Schräglage!)
+                if 0.1 < y < 1.5 and -0.5 < x < 2.5:
+                    left_pts.append((x, y))
+                elif -1.5 < y < -0.1 and -0.5 < x < 2.5:
+                    right_pts.append((x, y))
+
+        return left_pts, right_pts, front_pts, dist_front
+
+    def extract_wall_cluster(self, pts, axis='x'):
+        if not pts: return []
+        idx = 0 if axis == 'x' else 1
+        pts.sort(key=lambda p: p[idx])
+        
+        clusters = []
+        current_cluster = [pts[0]]
+        for p in pts[1:]:
+            last_p = current_cluster[-1]
+            # Stabiler Cluster-Abstand
+            dist = math.hypot(p[0] - last_p[0], p[1] - last_p[1])
+            if dist < 0.60: 
+                current_cluster.append(p)
+            else:
+                clusters.append(current_cluster)
+                current_cluster = [p]
+        clusters.append(current_cluster)
+        return max(clusters, key=len)
+
+    def fit_side_line(self, pts):
+        cluster = self.extract_wall_cluster(pts, axis='x')
+        if len(cluster) < 5: return None
+        
+        xs = [p[0] for p in cluster]
+        ys = [p[1] for p in cluster]
+        
+        x_mean = sum(xs) / len(xs)
+        y_mean = sum(ys) / len(ys)
+        denom = sum((x - x_mean)**2 for x in xs)
+        if denom == 0: return None
+        
+        m = sum((x - x_mean)*(y - y_mean) for x, y in zip(xs, ys)) / denom
+        if abs(m) > 1.0: return None 
+            
+        c = y_mean - m * x_mean     
+        return {'m': m, 'c': c, 'x_mean': x_mean, 'y_mean': y_mean, 'x_min': min(xs), 'x_max': max(xs)}
+
+    def fit_front_line(self, pts):
+        cluster = self.extract_wall_cluster(pts, axis='y')
+        if len(cluster) < 5: return None
+        
+        xs = [p[0] for p in cluster]
+        ys = [p[1] for p in cluster]
+        
+        x_mean = sum(xs) / len(xs)
+        y_mean = sum(ys) / len(ys)
+        denom = sum((y - y_mean)**2 for y in ys)
+        if denom == 0: return None
+        
+        m_y = sum((y - y_mean)*(x - x_mean) for x, y in zip(xs, ys)) / denom
+        if abs(m_y) > 1.5: return None 
+            
+        c_x = x_mean - m_y * y_mean     
+        return {'m_y': m_y, 'c_x': c_x, 'x_mean': x_mean, 'y_mean': y_mean, 'y_min': min(ys), 'y_max': max(ys)}
+
+    def get_wall_end_ahead(self, pts):
+        cluster = self.extract_wall_cluster(pts, axis='x')
+        if len(cluster) < 3: return 2.0
+        max_x = max(p[0] for p in cluster)
+        if max_x > 1.8: return 2.0
+        return max_x
+
+    def scan_callback(self, msg):
+        if self.state == 'STARTUP':
+            elapsed_sec = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
+            cmd = Twist()
+            cmd.linear.x = 0.0; cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+            if elapsed_sec > 1.0:
+                self.state = 'FOLLOW_BOTH'
+                self.last_turn_end_time = self.get_clock().now()
+                self.get_logger().warn('>>> GO! <<<')
+            return
+
+        left_pts, right_pts, front_pts, dist_front = self.get_cartesian_points_and_front(msg.ranges, msg.angle_min, msg.angle_increment)
+
+        left_res = self.fit_side_line(left_pts)
+        right_res = self.fit_side_line(right_pts)
+        front_res = self.fit_front_line(front_pts)
+
+        c_left, m_left = None, None
+        c_right, m_right = None, None
+
+        if left_res and right_res:
+            m_avg = (left_res['m'] + right_res['m']) / 2.0
+            m_left = m_right = m_avg
+            c_left = left_res['y_mean'] - m_avg * left_res['x_mean']
+            c_right = right_res['y_mean'] - m_avg * right_res['x_mean']
+        else:
+            if left_res: m_left, c_left = left_res['m'], left_res['c']
+            if right_res: m_right, c_right = right_res['m'], right_res['c']
+
+        pts_left_viz, pts_right_viz, pts_front_viz = None, None, None
+        
+        if front_res:
+            m_y = front_res['m_y']
+            c_x = front_res['c_x']
+            
+            if m_left is not None:
+                m_y = -m_left
+                c_x = front_res['x_mean'] - m_y * front_res['y_mean']
+
+            y_min_front = front_res['y_min']
+            y_max_front = front_res['y_max']
+            
+            if left_res and c_left is not None:
+                x_int_l = (m_y * c_left + c_x) / (1.0 - m_y * m_left) 
+                
+                # DER RETTENDE FIX: Schwellenwert auf 0.75m erhöht!
+                # Nur wenn fast 1 Meter Lücke ist, reißt die Innenbande ab.
+                # Die Außenbande bleibt jetzt immer verschweißt!
+                if abs(x_int_l - left_res['x_max']) > 0.75:
+                    pts_left_viz = (
+                        (left_res['x_min'], m_left * left_res['x_min'] + c_left),
+                        (left_res['x_max'], m_left * left_res['x_max'] + c_left) 
+                    )
+                else: 
+                    y_max_front = m_left * x_int_l + c_left               
+                    pts_left_viz = (
+                        (left_res['x_min'], m_left * left_res['x_min'] + c_left),
+                        (x_int_l, m_left * x_int_l + c_left)              
+                    )
+                
+            if right_res and c_right is not None:
+                x_int_r = (m_y * c_right + c_x) / (1.0 - m_y * m_right)
+                
+                # DER RETTENDE FIX: Schwellenwert auf 0.75m erhöht!
+                if abs(x_int_r - right_res['x_max']) > 0.75:
+                    pts_right_viz = (
+                        (right_res['x_min'], m_right * right_res['x_min'] + c_right),
+                        (right_res['x_max'], m_right * right_res['x_max'] + c_right) 
+                    )
+                else: 
+                    y_min_front = m_right * x_int_r + c_right             
+                    pts_right_viz = (
+                        (right_res['x_min'], m_right * right_res['x_min'] + c_right),
+                        (x_int_r, m_right * x_int_r + c_right)            
+                    )
+
+            pts_front_viz = (
+                (m_y * y_min_front + c_x, y_min_front),
+                (m_y * y_max_front + c_x, y_max_front)
+            )
+
+        else:
+            if left_res and c_left is not None:
+                pts_left_viz = (
+                    (left_res['x_min'], m_left * left_res['x_min'] + c_left),
+                    (left_res['x_max'], m_left * left_res['x_max'] + c_left)
+                )
+            if right_res and c_right is not None:
+                pts_right_viz = (
+                    (right_res['x_min'], m_right * right_res['x_min'] + c_right),
+                    (right_res['x_max'], m_right * right_res['x_max'] + c_right)
+                )
+
+        dist_left = c_left if c_left is not None else 2.0
+        dist_right = abs(c_right) if c_right is not None else 2.0
+
+        error, steering_output = 0.0, 0.0
+        current_pwm = self.target_pwm
+        viz_target_y = None
+
+        if self.turn_count >= self.target_turns and self.state != 'FINISHED':
+            if 1.0 <= dist_front <= 2.0 and dist_left < 1.2 and dist_right < 1.2:
+                self.state = 'FINISHED'
+                self.get_logger().warn('>>> ZIEL ERREICHT! ROBOTER STOPPT. <<<')
+
+        if self.state == 'FINISHED':
+            current_pwm, steering_output = 0.0, 0.0
+
+        elif self.state in ['FOLLOW_BOTH', 'FOLLOW_LEFT', 'FOLLOW_RIGHT']:
+            time_since_last_turn = (self.get_clock().now() - self.last_turn_end_time).nanoseconds / 1e9
+            can_trigger_turn = time_since_last_turn > self.turn_cooldown
+
+            if can_trigger_turn:
+                end_left = self.get_wall_end_ahead(left_pts)
+                end_right = self.get_wall_end_ahead(right_pts)
+                backup_triggered = dist_front < self.backup_turn_dist
+            else:
+                end_left, end_right, backup_triggered = 2.0, 2.0, False
+
+            turn_triggered = False
+
+            if self.locked_direction is None and can_trigger_turn:
+                if end_left < self.pre_turn_dist: self.locked_direction = 'LEFT'
+                elif end_right < self.pre_turn_dist: self.locked_direction = 'RIGHT'
+                elif backup_triggered: self.locked_direction = 'LEFT' if dist_left > dist_right else 'RIGHT'
+
+            if self.locked_direction == 'LEFT' and can_trigger_turn:
+                blind_pre_turn = (dist_left > 1.10 and dist_front < 1.00)
+                if end_left < self.pre_turn_dist or blind_pre_turn or backup_triggered:
+                    self.state = 'TURN_LEFT'
+                    self.turn_start_time = self.get_clock().now()
+                    turn_triggered = True
+                    
+            elif self.locked_direction == 'RIGHT' and can_trigger_turn:
+                blind_pre_turn = (dist_right > 1.10 and dist_front < 1.00)
+                if end_right < self.pre_turn_dist or blind_pre_turn or backup_triggered:
+                    self.state = 'TURN_RIGHT'
+                    self.turn_start_time = self.get_clock().now()
+                    turn_triggered = True
+
+            if not turn_triggered:
+                if self.locked_direction == 'LEFT':
+                    target_left_ratio, target_right_ratio = self.inner_wall_ratio, self.outer_wall_ratio
+                elif self.locked_direction == 'RIGHT':
+                    target_left_ratio, target_right_ratio = self.outer_wall_ratio, self.inner_wall_ratio
+                else:
+                    target_left_ratio, target_right_ratio = 0.5, 0.5
+
+                if c_left is not None and c_right is not None:
+                    self.state = 'FOLLOW_BOTH'
+                    current_width = min(c_left - c_right, 0.95) 
+                    
+                    target_left = current_width * target_left_ratio
+                    if target_left < self.min_wall_dist: target_left = self.min_wall_dist
+                    target_right = -(current_width - target_left) 
+                    
+                    y_pred_left = c_left + self.lookahead_dist * m_left
+                    y_pred_right = c_right + self.lookahead_dist * m_right
+                    
+                    error = ((y_pred_left - target_left) + (y_pred_right - target_right)) / 2.0
+                    viz_target_y = c_left - target_left 
+
+                elif c_right is not None:
+                    self.state = 'FOLLOW_RIGHT'
+                    target_right = -(max(self.min_wall_dist, self.track_width * target_right_ratio))
+                    y_pred_right = c_right + self.lookahead_dist * m_right
+                    error = y_pred_right - target_right
+                    viz_target_y = c_right - target_right 
+
+                elif c_left is not None:
+                    self.state = 'FOLLOW_LEFT'
+                    target_left = max(self.min_wall_dist, self.track_width * target_left_ratio)
+                    y_pred_left = c_left + self.lookahead_dist * m_left
+                    error = y_pred_left - target_left
+                    viz_target_y = c_left - target_left 
+                else:
+                    error = 0.0 
+
+        elif self.state == 'TURN_LEFT':
+            steering_output = self.turn_steering_angle 
+            current_pwm = self.turn_pwm
+            elapsed = (self.get_clock().now() - self.turn_start_time).nanoseconds / 1e9
+            
+            if dist_front > self.turn_exit or (dist_front > 0.80 and dist_right < 0.90) or elapsed > 2.5:
+                self.state = 'FOLLOW_BOTH'
+                self.turn_count += 1
+                self.last_error = 0.0
+                self.last_turn_end_time = self.get_clock().now() 
+
+        elif self.state == 'TURN_RIGHT':
+            steering_output = -self.turn_steering_angle 
+            current_pwm = self.turn_pwm
+            elapsed = (self.get_clock().now() - self.turn_start_time).nanoseconds / 1e9
+            
+            if dist_front > self.turn_exit or (dist_front > 0.80 and dist_left < 0.90) or elapsed > 2.5:
+                self.state = 'FOLLOW_BOTH'
+                self.turn_count += 1
+                self.last_error = 0.0
+                self.last_turn_end_time = self.get_clock().now() 
+
+        self.publish_rviz_markers(pts_left_viz, pts_right_viz, pts_front_viz, viz_target_y)
+
+        if 'FOLLOW' in self.state:
+            derivative = error - self.last_error
+            steering_output = (self.kp * error) + (self.kd * derivative)
+            self.last_error = error
+            steering_output = max(-self.max_steering_pid, min(self.max_steering_pid, steering_output))
+
+        steering_output = max(-1.0, min(1.0, steering_output))
+        cmd = Twist()
+        cmd.linear.x = float(current_pwm)
+        cmd.angular.z = float(steering_output)
+        self.pub_cmd_vel.publish(cmd)
+
+        self.get_logger().info(f'[{self.state}] L:{dist_left:.1f} R:{dist_right:.1f} F:{dist_front:.1f} | Lenkung:{steering_output:.2f}')
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = WallFollower()
+    try: rclpy.spin(node)
+    except KeyboardInterrupt: pass
+    finally:
+        stop_cmd = Twist(); stop_cmd.linear.x = 0.0; stop_cmd.angular.z = 0.0
+        node.pub_cmd_vel.publish(stop_cmd)
+        node.destroy_node(); rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

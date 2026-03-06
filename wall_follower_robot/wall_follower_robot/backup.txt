@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import Twist
+from rclpy.qos import qos_profile_sensor_data
+import math
+
+class WallFollower(Node):
+
+    def __init__(self):
+        super().__init__('wall_follower')
+        self.sub_scan = self.create_subscription(LaserScan, '/ldlidar_node/scan', self.scan_callback, qos_profile_sensor_data)
+        self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        # --- ZUSTANDSAUTOMAT & RUNDENZÄHLER ---
+        self.state = 'STARTUP'  # <--- NEU: Wir starten im Startup-Modus!
+        self.turn_count = 0
+        self.target_turns = 6
+        self.locked_direction = None
+
+        # NEU: Kurven-Cooldown für die Zielerkennung
+        self.last_turn_time = None
+        self.finish_cooldown_sec = 1.0  # 1 Sekunde lang nach der Kurve das Ziel ignorieren!
+
+        
+
+        # --- STARTUP TIMER ---
+        self.start_time = self.get_clock().now()
+        self.startup_duration = 2  # 0.5 Sekunden warten und Servo nullen
+
+        # --- PARAMETER --- 
+        self.target_pwm = 850.0
+        self.turn_pwm = self.target_pwm-100
+
+        self.track_width = 0.90
+        self.target_dist = self.track_width / 2.0
+        self.missing_wall_dist = 1.10
+        
+        self.finish_stop_dist = 1.80
+
+        if self.target_pwm <=500:
+            self.kp = 4
+            self.kd = 0.4
+            self.min_turn_duration = 1.5  
+            self.turn_trigger_dist = 0.6
+        elif self.target_pwm>500 and self.target_pwm <=650:
+            self.kp = 2.8
+            self.kd = 0.4
+            self.min_turn_duration = 1
+            self.turn_trigger_dist = 0.9
+        elif self.target_pwm > 650 and self.target_pwm <=850:
+            self.kp = 1.4
+            self.kd = 0
+            self.min_turn_duration = 0.7
+            self.turn_trigger_dist = 0.9
+        
+        elif self.target_pwm >850:
+            self.kp = 2.5
+            self.kd = 1.7
+            self.min_turn_duration = 0.6
+            self.turn_trigger_dist = 1.1
+
+        
+
+        
+        self.last_error = 0.0
+        self.turn_start_time = self.get_clock().now()  # Startwert, damit Python nicht meckert
+        
+
+        self.get_logger().info('Node gestartet. Nulle Servo für 0.5 Sekunden...')
+
+    def get_wall_distance(self, ranges, angle_min, angle_increment, target_angle_deg):
+        """
+        Sucht nach dem größten zusammenhängenden Cluster (Wand)
+        in einem 30°-Feld um den Zielwinkel.
+        """
+        target_rad = math.radians(target_angle_deg)
+        window_rad = math.radians(30.0)  # Größeres Sichtfeld für die Wandsuchen
+
+        center_idx = int((target_rad - angle_min) / angle_increment)
+        window_idx = int((window_rad / 2.0) / angle_increment)
+
+        start_idx = max(0, center_idx - window_idx)
+        end_idx = min(len(ranges), center_idx + window_idx)
+
+        clusters = []
+        current_cluster = []
+
+        # 1. Punkte gruppieren (Abstand unter 10 cm gilt als zusammenhängend)
+        for i in range(start_idx, end_idx):
+            dist = ranges[i]
+            if math.isinf(dist) or math.isnan(dist) or dist < 0.05:
+                if current_cluster:
+                    clusters.append(current_cluster)
+                    current_cluster = []
+                continue
+
+            if not current_cluster:
+                current_cluster.append(dist)
+            else:
+                # Prüfen, ob der neue Punkt zum aktuellen Cluster passt
+                if abs(dist - current_cluster[-1]) < 0.10:
+                    current_cluster.append(dist)
+                else:
+                    clusters.append(current_cluster)
+                    current_cluster = [dist]
+
+        if current_cluster:
+            clusters.append(current_cluster)
+
+        # 2. Den größten Cluster (die stabilste Wand) finden
+        valid_clusters = [c for c in clusters if len(c) >= 5]
+
+        if not valid_clusters:
+            return 2.0  # Fallback-Wert (Wand weit weg)
+
+        # Wir nehmen den Cluster mit den meisten Punkten
+        best_cluster = max(valid_clusters, key=len)
+
+        return sum(best_cluster) / len(best_cluster)
+
+    def get_average_distance(self, ranges, angle_min, angle_increment, target_angle_deg, window_deg=10):
+        target_rad = math.radians(target_angle_deg)
+        window_rad = math.radians(window_deg)
+
+        center_idx = int((target_rad - angle_min) / angle_increment)
+        window_idx = int((window_rad / 2.0) / angle_increment)
+
+        start_idx = max(0, center_idx - window_idx)
+        end_idx = min(len(ranges), center_idx + window_idx)
+
+        min_valid_dist = 0.05  # <--- ÄNDERUNG 1: Auf 5cm reduzieren!
+
+        valid_ranges = [
+            r for r in ranges[start_idx:end_idx]
+            if not math.isinf(r) and not math.isnan(r) and r > min_valid_dist
+        ]
+
+        if len(valid_ranges) == 0:
+            return 2.0
+
+        return sum(valid_ranges) / len(valid_ranges)
+
+    def scan_callback(self, msg):
+        # ==========================================
+        # STARTUP-PHASE (Servo nullen)
+        # ==========================================
+        if self.state == 'STARTUP':
+            current_time = self.get_clock().now()
+            elapsed_sec = (current_time - self.start_time).nanoseconds / 1e9
+
+            # Sende Stopp & Lenkung Mitte
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+
+            if elapsed_sec > self.startup_duration:
+                self.state = 'FOLLOW_BOTH'
+                self.get_logger().warn('>>> STARTUP BEENDET. FAHRE LOS! <<<')
+            return
+
+        # ==========================================
+        # SENSOR-DATEN AUSLESEN
+        # ==========================================
+        dist_right = self.get_wall_distance(msg.ranges, msg.angle_min, msg.angle_increment, 0.0)
+        dist_front = self.get_wall_distance(msg.ranges, msg.angle_min, msg.angle_increment, 90.0)
+        dist_left = self.get_wall_distance(msg.ranges, msg.angle_min, msg.angle_increment, 180.0)
+
+        error = 0.0
+        steering_output = 0.0
+
+        # ==========================================
+        # LAUNCH CONTROL (Start-Drosselung)
+        # ==========================================
+        if self.turn_count == 0:
+            active_straight_pwm = self.target_pwm *0.4  # <--- HIER: Drosselung für Gerade 1
+            active_turn_pwm = self.turn_pwm * 0.4      # <--- HIER: Drosselung für Kurve 1
+        else:
+            active_straight_pwm = self.target_pwm  # Ab Kurve 1: Vollgas! (550.0)
+            active_turn_pwm = self.turn_pwm        # Ab Kurve 1: Vollgas-Kurve! (550.0)
+
+        # Standardmäßig nehmen wir erstmal die Straight-Geschwindigkeit an
+        current_pwm = active_straight_pwm
+
+        # ==========================================
+        # ZIEL-LINIEN LOGIK (Das absolute Ende)
+        # ==========================================
+        if self.turn_count >= self.target_turns and self.state != 'FINISHED':
+            cooldown_active = False
+            if self.last_turn_time is not None:
+                current_time = self.get_clock().now()
+                elapsed_since_turn = (current_time - self.last_turn_time).nanoseconds / 1e9
+                if elapsed_since_turn < self.finish_cooldown_sec:
+                    cooldown_active = True
+
+            if not cooldown_active:
+                is_straight = False
+                if dist_left < 1.0 and dist_right < 1.0:
+                    if abs(dist_left - dist_right) < 0.30:
+                        is_straight = True
+
+                if is_straight and dist_front <= self.finish_stop_dist:
+                    self.state = 'FINISHED'
+                    self.get_logger().warn('ZIEL ERREICHT! Roboter steht gerade und stoppt.')
+
+        # ==========================================
+        # STATE MACHINE LOGIK
+        # ==========================================
+        if self.state == 'FINISHED':
+            current_pwm = 0.0
+            steering_output = 0.0
+
+        elif self.state == 'FOLLOW_BOTH':
+            
+            # --- 1. SEITEN-TRIGGER (Die Innenkurve - Wand verschwindet seitlich!) ---
+            if self.locked_direction == 'LEFT' and dist_left > 1.20:
+                self.state = 'TURN_LEFT'
+                self.turn_start_time = self.get_clock().now()
+                current_pwm = active_turn_pwm 
+                steering_output = 0.85
+                self.get_logger().warn('>>> INNENKURVE LINKS ERKANNT! <<<')
+                
+            elif self.locked_direction == 'RIGHT' and dist_right > 1.20:
+                self.state = 'TURN_RIGHT'
+                self.turn_start_time = self.get_clock().now()
+                current_pwm = active_turn_pwm 
+                steering_output = -0.85
+                self.get_logger().warn('>>> INNENKURVE RECHTS ERKANNT! <<<')
+
+            # --- 2. FRONT-TRIGGER (Die Außenkurve - Wand direkt voraus) ---
+            elif dist_front < self.turn_trigger_dist:
+                
+                # --- SPERRE FÜR ENGE FLURE (Wird NUR HIER geprüft!) ---
+                if dist_left < 0.7 and dist_right < 0.70:
+                    error = dist_left - dist_right
+                    self.get_logger().warn(f'Fake-Kurve blockiert! (Zu eng: L{dist_left:.2f} R{dist_right:.2f})')
+                else:
+                    # Platz ist da, also ECHTE Kurve einleiten!
+                    if self.locked_direction is None:
+                        self.locked_direction = 'LEFT' if dist_left > dist_right else 'RIGHT'
+                        self.get_logger().warn(f'>>> RICHTUNG EINGELOGGT: {self.locked_direction} <<<')
+
+                    self.state = 'TURN_' + self.locked_direction
+                    self.turn_start_time = self.get_clock().now()
+                    current_pwm = active_turn_pwm 
+                    steering_output = 0.85 if 'LEFT' in self.state else -0.85
+
+            # --- 3. NORMALE WANDVERFOLGUNG ---
+            elif dist_left > self.missing_wall_dist and dist_right < self.missing_wall_dist:
+                self.state = 'FOLLOW_RIGHT'
+            elif dist_right > self.missing_wall_dist and dist_left < self.missing_wall_dist:
+                self.state = 'FOLLOW_LEFT'
+            else:
+                error = dist_left - dist_right
+
+        elif self.state == 'FOLLOW_LEFT':
+            # Front-Trigger
+            if dist_front < self.turn_trigger_dist:
+                self.state = 'TURN_' + (self.locked_direction if self.locked_direction else 'RIGHT')
+                self.turn_start_time = self.get_clock().now()
+                current_pwm = active_turn_pwm 
+                steering_output = 0.85 if 'LEFT' in self.state else -0.85
+                
+            # NEU: Seiten-Trigger für Rechtskurven
+            elif self.locked_direction == 'RIGHT' and dist_right > 1.40:
+                self.state = 'TURN_RIGHT'
+                self.turn_start_time = self.get_clock().now()
+                current_pwm = active_turn_pwm 
+                steering_output = -0.85
+                self.get_logger().warn('>>> INNENKURVE RECHTS ERKANNT! <<<')
+                
+            elif dist_right < self.missing_wall_dist:
+                self.state = 'FOLLOW_BOTH'
+            else:
+                error = (dist_left - self.target_dist) * 2.0
+
+        elif self.state == 'FOLLOW_RIGHT':
+            # Front-Trigger
+            if dist_front < self.turn_trigger_dist:
+                self.state = 'TURN_' + (self.locked_direction if self.locked_direction else 'LEFT')
+                self.turn_start_time = self.get_clock().now()
+                current_pwm = active_turn_pwm 
+                steering_output = 0.85 if 'LEFT' in self.state else -0.85
+                
+            # NEU: Seiten-Trigger für Linkskurven
+            elif self.locked_direction == 'LEFT' and dist_left > 1.40:
+                self.state = 'TURN_LEFT'
+                self.turn_start_time = self.get_clock().now()
+                current_pwm = active_turn_pwm 
+                steering_output = 0.85
+                self.get_logger().warn('>>> INNENKURVE LINKS ERKANNT! <<<')
+                
+            elif dist_left < self.missing_wall_dist:
+                self.state = 'FOLLOW_BOTH'
+            else:
+                error = (self.target_dist - dist_right) * 2.0
+
+        elif self.state == 'TURN_LEFT':
+            if dist_front > 1.45:
+                current_time = self.get_clock().now()
+                elapsed_turn = (current_time - self.turn_start_time).nanoseconds / 1e9
+
+                if elapsed_turn >= self.min_turn_duration:
+                    self.state = 'FOLLOW_RIGHT'
+                    self.turn_count += 1
+                    self.last_turn_time = current_time
+                    self.get_logger().info(f'--> ECHTE KURVE GEMEISTERT! ({self.turn_count}/{self.target_turns})')
+                else:
+                    self.state = 'FOLLOW_BOTH'
+                    self.get_logger().warn('--> Phantom-Kurve ignoriert (zu kurz)!')
+            else:
+                steering_output = 0.85
+                current_pwm = active_turn_pwm  # <--- HIER: Drosselung wird in der Kurve genutzt!
+                self.last_error = 0.0
+
+        elif self.state == 'TURN_RIGHT':
+            if dist_front > 1.45:
+                current_time = self.get_clock().now()
+                elapsed_turn = (current_time - self.turn_start_time).nanoseconds / 1e9
+
+                if elapsed_turn >= self.min_turn_duration:
+                    self.state = 'FOLLOW_LEFT'
+                    self.turn_count += 1
+                    self.last_turn_time = current_time
+                    self.get_logger().info(f'--> ECHTE KURVE GEMEISTERT! ({self.turn_count}/{self.target_turns})')
+                else:
+                    self.state = 'FOLLOW_BOTH'
+                    self.get_logger().warn('--> Phantom-Kurve ignoriert (zu kurz)!')
+            else:
+                steering_output = -0.85
+                current_pwm = active_turn_pwm  # <--- HIER: Drosselung wird in der Kurve genutzt!
+                self.last_error = 0.0
+
+        # --- PID BERECHNUNG ---
+        if self.state in ['FOLLOW_BOTH', 'FOLLOW_LEFT', 'FOLLOW_RIGHT']:
+            derivative = error - self.last_error
+            steering_output = (self.kp * error) + (self.kd * derivative)
+            self.last_error = error
+            
+            steering_output = max(-1.0, min(1.0, steering_output))
+
+        # --- BEFEHLE SENDEN ---
+        cmd = Twist()
+        cmd.linear.x = float(current_pwm)  # <--- Sicherstellen, dass es ein Float ist
+        cmd.angular.z = float(steering_output)
+        self.pub_cmd_vel.publish(cmd)
+
+        self.get_logger().info(f'[{self.state}] Lock:{self.locked_direction} | Kurven: {self.turn_count}/{self.target_turns} | V:{dist_front:.1f} L:{dist_left:.1f} R:{dist_right:.1f} | PWM:{current_pwm} | Lenkung:{steering_output:.2f}')
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = WallFollower()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_cmd = Twist()
+        stop_cmd.linear.x = 0.0
+        stop_cmd.angular.z = 0.0
+        node.pub_cmd_vel.publish(stop_cmd)
+        node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
