@@ -56,15 +56,16 @@ class EspSerialBridge(Node):
         # Symmetrische Formel: 
         # Wenn steering_target = -1.0 (Rechts), wird 500 - (-1.0 * 220) = 720
         # Wenn steering_target = 1.0 (Links), wird 500 - (1.0 * 220) = 280
-        servo_pos = int(500 + (steering_target * 300))
+        servo_pos = int(500 + (steering_target * 250))
             
         # Absolute physikalische Grenzen erzwingen (280 bis 720)
-        servo_pos = max(200, min(800, servo_pos))
+        servo_pos = max(250, min(750, servo_pos))
         
         servo_packet = bytearray([0xA5, 0x20, 1, (servo_pos >> 8) & 0xFF, servo_pos & 0xFF])
 
         # --- SENDEN ---
         if self.ser.is_open:
+            self.get_logger().info(f'-> Motor: {"Vorwärts" if direction == 0x00 else "Rückwärts"}, PWM={pwm_val} | Servo: {steering_target:.2f} -> Pos={servo_pos}')
             self.ser.write(motor_packet)
             self.ser.write(servo_packet)
             self.ser.flush()

@@ -23,7 +23,32 @@ class WallFollower(Node):
         self.rviz_frame = 'ldlidar_link'  # Muss in RViz als "Fixed Frame" stehen
         self.get_logger().info('>>> WallFollower Template gestartet. Warte auf LiDAR... <<<')
 
-        self.fahrtrichtung = None        
+        # --- STATE MACHINE & PFADPLANUNG ---
+        self.state = 'FOLLOW_LANE'    # Startzustand
+        self.fahrtrichtung = None     # Wird automatisch erkannt
+
+        self.target_turns = 6
+        self.turn_count = 0
+
+        self.front_wall = None
+        
+        # Karotten-Parameter
+        self.lookahead_dist = 0.60    # Wie weit schaut der Roboter voraus? (60 cm)
+        self.target_wall_dist = 0.30  # Gewünschter Abstand zur Bande (45 cm)        
+
+        # --- PID-REGLER PARAMETER ---
+        self.kp = 3.5   # Lenkt hart zur Karotte
+        self.kd = 0   # Verhindert das Schlingern (Dämpfung)
+        self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
+        
+        self.prev_error = 0.0
+        self.integral_error = 0.0
+        
+        # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
+        self.base_speed = 500.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 350.0  # Leicht reduzierter Speed in der Kurve
+
+        self.max_turn_angle = 0.3  # Maximaler Lenkwinkel in Grad (für Sicherheit)
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -47,6 +72,48 @@ class WallFollower(Node):
         marker.points = [point1, point2]
         marker_array.markers.append(marker)
 
+    def send_text(self, marker_array, m_id, text, x, y, color=(1.0, 1.0, 1.0)):
+        """Hilfsfunktion zum Erstellen von schwebendem Text in RViz."""
+        marker = Marker()
+        marker.header.frame_id = self.rviz_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "labels"  # Eigener Namespace, damit es nicht mit den Linien crasht
+        marker.id = m_id
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.action = Marker.ADD
+        
+        # Position des Textes (Z leicht erhöht, damit es über dem Lidar schwebt)
+        marker.pose.position.x = float(x)
+        marker.pose.position.y = float(y)
+        marker.pose.position.z = 0.3 
+        
+        marker.scale.z = 0.15  # Textgröße
+        
+        marker.color.r, marker.color.g, marker.color.b = color
+        marker.color.a = 1.0
+        marker.text = text
+        
+        marker_array.markers.append(marker)
+
+    def send_sphere(self, marker_array, m_id, x, y, color=(0.0, 1.0, 1.0)):
+        """Zeichnet eine leuchtende Kugel (die 'Karotte') in RViz."""
+        marker = Marker()
+        marker.header.frame_id = self.rviz_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "target"
+        marker.id = m_id
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position.x = float(x)
+        marker.pose.position.y = float(y)
+        marker.pose.position.z = 0.05 # Leicht über dem Boden
+        marker.scale.x = 0.15 # 15 cm Durchmesser
+        marker.scale.y = 0.15
+        marker.scale.z = 0.15
+        marker.color.r, marker.color.g, marker.color.b = color
+        marker.color.a = 1.0
+        marker_array.markers.append(marker)
+    
     def validate_clusters(self, clusters):
         # Wir nutzen while, da sich die Liste verkleinern kann
         while len(clusters) >= 3:
@@ -112,14 +179,7 @@ class WallFollower(Node):
         # Wenn die Schleife abbricht (Liste hat weniger als 3 Cluster)
         self.get_logger().warn(f"Kein gültiges U-Profil gefunden. Nur noch {len(clusters)} Cluster übrig.")
         return [None, None, None]
-                
-
-               
-            
-            
-        
-
-
+    
     def sort_clusters_right_to_left(self, clusters):
         """
         Nimmt eine Liste von Clustern und sortiert sie räumlich von rechts nach links.
@@ -250,8 +310,7 @@ class WallFollower(Node):
         clusters.sort(key=len, reverse=True)
         
         return clusters
-
-    
+ 
     def get_cluster_angle(self, cluster):
         """
         Berechnet den Durchschnittswinkel aller Punkte im Cluster (Ausgleichsgerade).
@@ -294,60 +353,6 @@ class WallFollower(Node):
         return angle_deg
 
 
-
-    def process_my_logic(self, point_data):
-        # 1. IMMER GANZ OBEN: Den Sammelkorb erstellen, damit er überall in der Funktion existiert!
-        marker_array = MarkerArray()
-
-        # 2. Punktwolke in Cluster (Wände) aufteilen
-        all_clusters = self.get_all_clusters_sorted(point_data)
-
-
-        validated_clusters = self.validate_clusters(all_clusters)
-        # --- AB HIER IST ALLES SICHER ---
-        # 5. Wir haben ein perfektes U-Profil!
-        self.get_logger().info(f"Anzahl cluster {len(all_clusters)}")
-        kandidaten = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
-        #kandidaten = self.validate_clusters(all_clusters)
-
-        # Feste Farben: Rechts=Rot, Front=Grün, Links=Blau
-        colors = [
-            (1.0, 0.0, 0.0),    # Rot (Original)
-            (0.0, 1.0, 0.0),    # Grün (Original)
-            (0.0, 0.5, 1.0),    # Azurblau (Original)
-            (1.0, 0.5, 0.0),    # Orange
-            (0.5, 0.0, 1.0),    # Violett
-            (0.0, 1.0, 1.0),    # Cyan
-            (1.0, 0.0, 1.0),    # Magenta
-            (1.0, 1.0, 0.0),    # Gelb
-            (0.5, 0.5, 0.5),    # Grau
-            (0.6, 0.3, 0.0)     # Braun
-        ]
-
-        # 6. Die drei Wände durchgehen und an RViz senden
-        for i, cluster in enumerate(kandidaten):
-            # Info in der Konsole ausgeben
-            angle = self.get_cluster_angle(cluster)
-
-            if angle is None:
-                self.get_logger().warn(f"Wand {i+1}: Winkel konnte nicht berechnet werden.")
-                continue # Überspringt diesen Cluster und macht mit dem nächsten weiter
-            self.get_logger().info(f"Wand {i+1} (ID {i}): {len(cluster)} Punkte, Winkel: {angle:.2f}°")
-            self.get_logger().info(f"Erster Punkt: (X={cluster[0][1]:.2f}, Y={cluster[0][2]:.2f}), Letzter Punkt: (X={cluster[-1][1]:.2f}, Y={cluster[-1][2]:.2f})")
-
-            # Ein Cluster braucht mindestens 2 Punkte für eine Linie
-            if len(cluster) >= 2:
-                # Start- und Endpunkt (Index 1 = X, Index 2 = Y)
-                start_p = (cluster[0][1], cluster[0][2])
-                ende_p = (cluster[-1][1], cluster[-1][2])
-                
-                # Linie zeichnen: ID entspricht dem Index (0, 1, oder 2)
-                self.send_line(marker_array, m_id=i, p1=start_p, p2=ende_p, color=colors[i])
-
-        # Alles veröffentlichen, damit es in RViz2 auftaucht!
-        self.pub_markers.publish(marker_array)
-
-    # --- HILFSFUNKTION ZUM LÖSCHEN (damit keine Geisterwände stehen bleiben) ---
     def delete_marker(self, marker_array, m_id):
         marker = Marker()
         marker.header.frame_id = self.rviz_frame
@@ -355,7 +360,6 @@ class WallFollower(Node):
         marker.id = m_id
         marker.action = Marker.DELETE
         marker_array.markers.append(marker)
-
 
     def scan_callback(self, msg):
         # Das ist dein Array an Tupeln: (Grad, Distanz, X, Y)
@@ -486,7 +490,338 @@ class WallFollower(Node):
 
         return validated_clusters
 
+    def get_target_point(self, innenbande, aussenbande):
+        """
+        Berechnet den Lookahead-Zielpunkt (die Karotte) vor dem Roboter.
+        Angepasst an das Lidar-System: Y ist VORNE, X ist LINKS/RECHTS.
+        """
+        target_y = self.lookahead_dist  # Wir schauen 60 cm nach VORNE
+        target_x = 0.0                  # Start in der Mitte
+
+        # Hilfsfunktion, um die seitliche Position (X) der Wand auf Höhe target_y zu berechnen
+        def get_x_at_y(wall, target_y):
+            angle = self.get_cluster_angle(wall)
+            mean_x = sum(p[1] for p in wall) / len(wall)
+            mean_y = sum(p[2] for p in wall) / len(wall)
             
+            if angle is None:
+                return mean_x # Fallback
+            
+            # Da get_cluster_angle den Winkel zur Y-Achse berechnet, ist tan(angle) exakt dx/dy!
+            angle_rad = math.radians(angle)
+            dy = target_y - mean_y
+            dx = dy * math.tan(angle_rad)
+            return mean_x + dx
+
+        # Fall 1: Wir sehen BEIDE Banden -> Wir nehmen exakt die Mitte!
+        if innenbande and aussenbande:
+            x_innen = get_x_at_y(innenbande, target_y)
+            x_aussen = get_x_at_y(aussenbande, target_y)
+            target_x = (x_innen + x_aussen) / 2.0
+            
+        # Fall 2: Wir sehen NUR die Innenbande -> Wir halten Abstand
+        elif innenbande:
+            x_innen = get_x_at_y(innenbande, target_y)
+            # Wenn die Bande links ist (X negativ), muss das Ziel nach rechts (+)
+            if x_innen < 0:
+                target_x = x_innen + self.target_wall_dist
+            else:
+                target_x = x_innen - self.target_wall_dist
+                
+        # Fall 3: Wir sehen NUR die Außenbande -> Wir halten Abstand
+        elif aussenbande:
+            x_aussen = get_x_at_y(aussenbande, target_y)
+            if x_aussen < 0:
+                target_x = x_aussen + self.target_wall_dist
+            else:
+                target_x = x_aussen - self.target_wall_dist
+                
+        # Fall 4: Notfall - Keine Wand da
+        else:
+            target_x = 0.0  # Stur geradeaus
+
+        return (target_x, target_y)
+
+    def track_front_wall(self, point_data, last_front_wall):
+        """
+        Trackt die Frontwand während der Kurve durch ein mitwanderndes Suchfenster (ROI).
+        Gibt die aktualisierte Wand und einen Boolean (turn_finished) zurück.
+        """
+        if not last_front_wall or not point_data:
+            return None
+
+        # 1. Wo war die Wand im letzten Frame? (Min/Max Winkel finden)
+        angles = [p[0] for p in last_front_wall]
+        min_angle = min(angles)
+        max_angle = max(angles)
+
+        # 2. Das dynamische Suchfenster (ROI) definieren
+        # Wir geben in Bewegungsrichtung mehr Toleranz (z.B. +30 Grad), 
+        # weil sich die Wand dorthin bewegt. Gegen die Bewegungsrichtung weniger (-10 Grad).
+        
+        if self.fahrtrichtung == 'links':
+            # Wand wandert nach RECHTS (Winkel werden positiver)
+            roi_min = min_angle - 10.0
+            roi_max = max_angle + 30.0
+        else:
+            # Wand wandert nach LINKS (Winkel werden negativer)
+            roi_min = min_angle - 30.0
+            roi_max = max_angle + 10.0
+
+        # 3. Scheuklappen aufsetzen: Punktewolke filtern!
+        roi_points = []
+        for p in point_data:
+            angle = p[0]
+            if roi_min <= angle <= roi_max:
+                roi_points.append(p)
+
+        # 4. Nur diese gefilterten Punkte in Cluster aufteilen
+        roi_clusters = self.get_all_clusters_sorted(roi_points)
+
+        # 5. Tracking überprüfen
+        if not roi_clusters:
+            self.get_logger().warn("ACHTUNG: Getrackte Wand im ROI verloren!")
+            return None
+            
+        # Da wir alle anderen Wände weggefiltert haben, ist das größte Cluster 
+        # (Index 0) in diesem Bereich zu 99,9% unsere gesuchte Wand!
+        tracked_wall = roi_clusters[0]
+
+        return tracked_wall
+
+
+    def process_my_logic(self, point_data):
+        # 1. IMMER GANZ OBEN: Den Sammelkorb erstellen, damit er überall in der Funktion existiert!
+        marker_array = MarkerArray()
+        cmd = Twist()
+
+        innenbande = None
+        aussenbande = None
+
+        # 2. Punktwolke in Cluster (Wände) aufteilen
+        if self.state == 'FOLLOW_LANE':
+            if self.turn_count >= self.target_turns:
+                if self.get_closest_point_in_cluster(self.front_wall) is not None and self.get_closest_point_in_cluster(self.front_wall)[3] < 1.50:
+                    self.state = 'STOPPED'
+                    return
+            
+            all_clusters = self.get_all_clusters_sorted(point_data)
+
+
+            validated_clusters = self.validate_clusters(all_clusters)
+            # 5. Wir haben ein perfektes U-Profil!
+            #self.get_logger().info(f"Anzahl cluster {len(all_clusters)}")
+            kandidaten = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
+
+            right_wall = kandidaten[2]
+            self.front_wall = kandidaten[1]
+            left_wall  = kandidaten[0]
+        
+            if self.fahrtrichtung == 'links':
+                innenbande = left_wall
+                aussenbande = right_wall
+            elif self.fahrtrichtung == 'rechts':
+                innenbande = right_wall
+                aussenbande = left_wall
+
+        if self.state in ['TURN_LINKS', 'TURN_RECHTS']:
+            # Während der Kurve tracken wir die Frontwand mit einem dynamischen Suchfenster (ROI)
+            self.front_wall = self.track_front_wall(point_data, self.front_wall)
+            kandidaten = [None, self.front_wall, None]  # Wir haben nur die Frontwand, die wir tracken
+            angle_to_front_wall = self.get_cluster_angle(self.front_wall)
+            self.get_logger().info(f"Tracke Frontwand... Winkel zur Fahrtrichtung: {angle_to_front_wall:.1f}°")
+
+            if abs(angle_to_front_wall) > 10:
+                if self.state == 'TURN_LINKS':
+                    cmd.linear.x = self.turn_speed
+                    cmd.angular.z = self.max_turn_angle
+                else:
+                    cmd.linear.x = self.turn_speed
+                    cmd.angular.z = - self.max_turn_angle
+                
+            else:
+                self.get_logger().warn(">>> KURVE FAST FERTIG! Wechsel zurück in FOLLOW_LANE <<<")
+                self.state = 'FOLLOW_LANE'
+                self.front_wall = None
+                self.turn_count += 1
+
+        elif self.state == 'STOPPED':
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+            self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
+            return
+
+
+        else:
+            ##Hier die neue logik für außenbande verfolgung
+            pass
+        
+
+        # Fahrtrichtung erkennen: Wir vergleichen die physikalische Länge der beiden Seitenwände (nicht die Anzahl der Punkte, da sie unterschiedlich dicht sein können).
+        if self.fahrtrichtung is None:
+            # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
+            if left_wall and right_wall:
+                # Echte physikalische Länge in Metern berechnen (Satz des Pythagoras)
+                left_len = math.hypot(left_wall[0][1] - left_wall[-1][1], left_wall[0][2] - left_wall[-1][2])
+                right_len = math.hypot(right_wall[0][1] - right_wall[-1][1], right_wall[0][2] - right_wall[-1][2])
+                
+                self.get_logger().info(f"Scanne Strecke... Länge Links: {left_len:.2f}m, Länge Rechts: {right_len:.2f}m")
+                
+                # Wir brauchen einen deutlichen Unterschied (z.B. 40 cm), um sicher zu sein!
+                if left_len > right_len + 0.40:
+                    self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
+                    self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
+                elif right_len > left_len + 0.40:
+                    self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
+                    self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
+
+        
+        
+
+        # ==========================================
+        # PFADPLANUNG, PID & STATE MACHINE 
+        # ==========================================
+        
+        target_x, target_y = self.get_target_point(innenbande, aussenbande)
+        
+        # Twist-Nachricht für den ESP initialisieren
+        
+        # --- ZUSTAND 1: GERADEAUS FAHREN ---
+        if self.state == 'FOLLOW_LANE':
+            
+            # 1. WECHSEL-BEDINGUNG PRÜFEN
+            if self.front_wall is not None and self.fahrtrichtung is not None:
+                front_dist = self.get_closest_point_in_cluster(self.front_wall)[3]
+                
+                max_y_innen = 0.0
+                if innenbande and len(innenbande) > 0:
+                    max_y_innen = max(p[2] for p in innenbande)
+                
+                if front_dist < 1.30 and max_y_innen < 0.20:
+                    self.state = f"TURN_{self.fahrtrichtung.upper()}"
+                    self.get_logger().warn(f">>> KURVE EINGELEITET: Wechsel in {self.state} <<<")
+                    
+                    # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
+                    self.prev_error = 0.0
+                    self.integral_error = 0.0
+                else:
+                    if front_dist < 1.30:
+                        self.get_logger().info(f"Warte auf Ecke... (Innenbande ragt noch {max_y_innen:.2f}m nach vorne)")
+            
+            # 2. PID-REGLER BERECHNEN
+            # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
+            error = -target_x 
+            
+            # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
+            self.integral_error += error
+            self.integral_error = max(-1.0, min(1.0, self.integral_error))
+            
+            # Derivative berechnen (Veränderung zum letzten Frame)
+            derivative = error - self.prev_error
+            self.prev_error = error
+            
+            # Stellgröße (Lenkbefehl) berechnen
+            steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
+            
+            # Auf ROS-Grenzen (-1.0 bis 1.0) kappen
+            steering_cmd = max(-1.0, min(1.0, steering_cmd))
+            
+            # 3. BEFEHLE AN ESP SETZEN
+            cmd.linear.x = self.base_speed
+            cmd.angular.z = float(steering_cmd)
+
+        # --- ZUSTAND 2: LINKSKURVE ---
+        elif self.state == 'TURN_LINKS':
+            pass
+
+        # --- ZUSTAND 3: RECHTSKURVE ---
+        elif self.state == 'TURN_RECHTS':
+            pass
+
+
+        # --- OUTPUT AN HARDWARE & RVIZ ---
+        
+        # Befehle an den ESP senden! (Erstmal aufgebockt testen!)
+        self.pub_cmd_vel.publish(cmd)
+        
+        if self.state == 'FOLLOW_LANE':
+            self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
+        else:
+            self.delete_marker(marker_array, 99)
+            
+        self.pub_markers.publish(marker_array)
+
+
+
+
+
+
+
+        # Feste Farben: Rechts=Rot, Front=Grün, Links=Blau
+        colors = [
+            (1.0, 0.0, 0.0),    # Rot (Original)
+            (0.0, 1.0, 0.0),    # Grün (Original)
+            (0.0, 0.5, 1.0),    # Azurblau (Original)
+            (1.0, 0.5, 0.0),    # Orange
+            (0.5, 0.0, 1.0),    # Violett
+            (0.0, 1.0, 1.0),    # Cyan
+            (1.0, 0.0, 1.0),    # Magenta
+            (1.0, 1.0, 0.0),    # Gelb
+            (0.5, 0.5, 0.5),    # Grau
+            (0.6, 0.3, 0.0)     # Braun
+        ]
+
+
+        # --- RVIZ TEXT-MARKER FÜR DIE FAHRTRICHTUNG UND BANDEN ---
+        if self.fahrtrichtung is not None:
+            # 1. Zeige die gelockte Fahrtrichtung direkt über dem Roboter an (X=0, Y=0)
+            richtung_text = f"LOCKED: {self.fahrtrichtung.upper()}"
+            self.send_text(marker_array, m_id=10, text=richtung_text, x=0.0, y=0.0, color=(1.0, 1.0, 0.0)) # Gelb
+
+            # 2. Beschrifte die Innenbande
+            if innenbande and len(innenbande) > 0:
+                # Wir platzieren den Text in der Mitte der Wand
+                mitte_x = sum(p[1] for p in innenbande) / len(innenbande)
+                mitte_y = sum(p[2] for p in innenbande) / len(innenbande)
+                self.send_text(marker_array, m_id=11, text="INNEN", x=mitte_x, y=mitte_y, color=(1.0, 0.5, 0.0)) # Orange
+
+            # 3. Beschrifte die Außenbande
+            if aussenbande and len(aussenbande) > 0:
+                mitte_x = sum(p[1] for p in aussenbande) / len(aussenbande)
+                mitte_y = sum(p[2] for p in aussenbande) / len(aussenbande)
+                self.send_text(marker_array, m_id=12, text="AUSSEN", x=mitte_x, y=mitte_y, color=(1.0, 0.0, 1.0)) # Magenta
+        else:
+            # Solange er noch scannt, zeige das an
+            self.send_text(marker_array, m_id=10, text="SCANNING DIRECTION...", x=0.0, y=0.0, color=(1.0, 1.0, 1.0)) # Weiß
+
+
+        # 6. Die drei Wände durchgehen und an RViz senden
+        for i, cluster in enumerate(kandidaten):
+            # Info in der Konsole ausgeben
+            angle = self.get_cluster_angle(cluster)
+
+            if angle is None:
+                #self.get_logger().warn(f"Wand {i+1}: Winkel konnte nicht berechnet werden.")
+                continue # Überspringt diesen Cluster und macht mit dem nächsten weiter
+            #self.get_logger().info(f"Wand {i+1} (ID {i}): {len(cluster)} Punkte, Winkel: {angle:.2f}°")
+            #self.get_logger().info(f"Erster Punkt: (X={cluster[0][1]:.2f}, Y={cluster[0][2]:.2f}), Letzter Punkt: (X={cluster[-1][1]:.2f}, Y={cluster[-1][2]:.2f})")
+            if cluster is None or len(cluster) < 2:
+                self.delete_marker(marker_array, m_id=i)
+                continue # Gehe sofort zum nächsten Element im Array über
+
+            # Ein Cluster braucht mindestens 2 Punkte für eine Linie
+            if len(cluster) >= 2:
+                # Start- und Endpunkt (Index 1 = X, Index 2 = Y)
+                start_p = (cluster[0][1], cluster[0][2])
+                ende_p = (cluster[-1][1], cluster[-1][2])
+                
+                # Linie zeichnen: ID entspricht dem Index (0, 1, oder 2)
+                self.send_line(marker_array, m_id=i, p1=start_p, p2=ende_p, color=colors[i])
+
+        # Alles veröffentlichen, damit es in RViz2 auftaucht!
+        self.pub_markers.publish(marker_array)
+
 
 def main(args=None):
     rclpy.init(args=args)
