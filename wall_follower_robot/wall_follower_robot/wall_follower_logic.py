@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from platform import node
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
@@ -27,17 +29,24 @@ class WallFollower(Node):
         self.state = 'FOLLOW_LANE'    # Startzustand
         self.fahrtrichtung = None     # Wird automatisch erkannt
 
-        self.target_turns = 6
+        self.target_turns = 12
         self.turn_count = 0
 
         self.front_wall = None
         
         # Karotten-Parameter
         self.lookahead_dist = 0.60    # Wie weit schaut der Roboter voraus? (60 cm)
-        self.target_wall_dist = 0.30  # Gewünschter Abstand zur Bande (45 cm)        
+        self.target_wall_dist = 0.30  # Gewünschter Abstand zur Bande (45 cm) 
+        self.min_wall_dist = 0.30       
+
+        self.lane_ratio = 0.40       # 30% Abstand zur Innenbande (Ideallinie)
+        self.assumed_lane_width = 0.60 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
+        self.turn_exit_angle = 25
+        self.max_wall_lenght_for_turn = 0.25
+        
 
         # --- PID-REGLER PARAMETER ---
-        self.kp = 3.5   # Lenkt hart zur Karotte
+        self.kp = 3   # Lenkt hart zur Karotte
         self.kd = 0   # Verhindert das Schlingern (Dämpfung)
         self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
         
@@ -45,10 +54,10 @@ class WallFollower(Node):
         self.integral_error = 0.0
         
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 500.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 350.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 800.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 750.0  # Leicht reduzierter Speed in der Kurve
 
-        self.max_turn_angle = 0.3  # Maximaler Lenkwinkel in Grad (für Sicherheit)
+        self.max_turn_angle = 0.7  # Maximaler Lenkwinkel in Grad (für Sicherheit)
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -213,7 +222,7 @@ class WallFollower(Node):
 
         # --- PARAMETER ---
         # Max Gap etwas höher setzen, da Manhattan-Werte (dx+dy) größer sind als euklidische
-        max_gap = 0.40      
+        max_gap = 0.10      
         outlier_limit = 2
         # Ab welcher Streckenlänge trauen wir der Ecke? (Filtert Sensor-Rauschen)
         corner_sensitivity = 0.05 
@@ -239,9 +248,9 @@ class WallFollower(Node):
             
             if dist_manhattan < max_gap:
                 # 2. NEUE ECKEN-ERKENNUNG (Über echte Vektor-Winkel)
-                if len(current_cluster) >= 5:
-                    p_start = current_cluster[-5] # Punkt vor der Kurve
-                    p_mid = current_cluster[-3]   # Punkt am Scheitel
+                if len(current_cluster) >= 20:
+                    p_start = current_cluster[5] # Punkt vor der Kurve
+                    p_mid = current_cluster[-10]   # Punkt am Scheitel
                     
                     # Vektor 1 (Trend vor der Kurve)
                     dx1 = p_mid[1] - p_start[1]
@@ -262,8 +271,8 @@ class WallFollower(Node):
                     # Filter: Hat sich der Punkt auch ausreichend bewegt? (Rauschen ignorieren)
                     dist_moved = math.hypot(dx2, dy2)
                     
-                    # Eine echte Parcours-Ecke knickt stark ab (z.B. > 45 Grad)
-                    if diff_deg > 45.0 and dist_moved > corner_sensitivity:
+                    # Eine echte Parcours-Ecke knickt stark ab (z.B. > 70 Grad)
+                    if diff_deg > 25.0 and dist_moved > corner_sensitivity:
                         # ECKE ERKANNT! Wir zerschneiden das Cluster genau hier.
                         clusters.append(current_cluster)
                         current_cluster = [p_curr]
@@ -353,10 +362,11 @@ class WallFollower(Node):
         return angle_deg
 
 
-    def delete_marker(self, marker_array, m_id):
+    def delete_marker(self, marker_array, m_id, ns="walls"):
+        """Löscht einen Marker in einem bestimmten Namespace."""
         marker = Marker()
         marker.header.frame_id = self.rviz_frame
-        marker.ns = "walls"
+        marker.ns = ns  # Jetzt flexibel! Standardmäßig aber "walls"
         marker.id = m_id
         marker.action = Marker.DELETE
         marker_array.markers.append(marker)
@@ -492,53 +502,70 @@ class WallFollower(Node):
 
     def get_target_point(self, innenbande, aussenbande):
         """
-        Berechnet den Lookahead-Zielpunkt (die Karotte) vor dem Roboter.
-        Angepasst an das Lidar-System: Y ist VORNE, X ist LINKS/RECHTS.
+        Berechnet den Zielpunkt (Karotte) im perfekten Verhältnis zur Innenbande.
+        Mit absolutem Mindestabstand (Kraftfeld-Logik).
         """
-        target_y = self.lookahead_dist  # Wir schauen 60 cm nach VORNE
-        target_x = 0.0                  # Start in der Mitte
+        target_y = self.lookahead_dist  
+        target_x = 0.0                  
 
-        # Hilfsfunktion, um die seitliche Position (X) der Wand auf Höhe target_y zu berechnen
         def get_x_at_y(wall, target_y):
             angle = self.get_cluster_angle(wall)
             mean_x = sum(p[1] for p in wall) / len(wall)
             mean_y = sum(p[2] for p in wall) / len(wall)
-            
-            if angle is None:
-                return mean_x # Fallback
-            
-            # Da get_cluster_angle den Winkel zur Y-Achse berechnet, ist tan(angle) exakt dx/dy!
+            if angle is None: return mean_x
             angle_rad = math.radians(angle)
             dy = target_y - mean_y
-            dx = dy * math.tan(angle_rad)
-            return mean_x + dx
+            return mean_x + (dy * math.tan(angle_rad))
 
-        # Fall 1: Wir sehen BEIDE Banden -> Wir nehmen exakt die Mitte!
+        # --- FALL 1: WIR SEHEN BEIDE BANDEN ---
         if innenbande and aussenbande:
             x_innen = get_x_at_y(innenbande, target_y)
             x_aussen = get_x_at_y(aussenbande, target_y)
-            target_x = (x_innen + x_aussen) / 2.0
             
-        # Fall 2: Wir sehen NUR die Innenbande -> Wir halten Abstand
+            lane_width = abs(x_aussen - x_innen)
+            
+            if x_innen < 0: # Innenbande links
+                target_x = x_innen + (lane_width * self.lane_ratio)
+            else:           # Innenbande rechts
+                target_x = x_innen - (lane_width * self.lane_ratio)
+                
+        # --- FALL 2: WIR SEHEN NUR DIE INNENBANDE ---
         elif innenbande:
             x_innen = get_x_at_y(innenbande, target_y)
-            # Wenn die Bande links ist (X negativ), muss das Ziel nach rechts (+)
             if x_innen < 0:
-                target_x = x_innen + self.target_wall_dist
+                target_x = x_innen + (self.assumed_lane_width * self.lane_ratio)
             else:
-                target_x = x_innen - self.target_wall_dist
+                target_x = x_innen - (self.assumed_lane_width * self.lane_ratio)
                 
-        # Fall 3: Wir sehen NUR die Außenbande -> Wir halten Abstand
+        # --- FALL 3: WIR SEHEN NUR DIE AUSSENBANDE ---
         elif aussenbande:
             x_aussen = get_x_at_y(aussenbande, target_y)
-            if x_aussen < 0:
-                target_x = x_aussen + self.target_wall_dist
+            inv_ratio = 1.0 - self.lane_ratio 
+            if x_aussen < 0: 
+                target_x = x_aussen + (self.assumed_lane_width * inv_ratio)
             else:
-                target_x = x_aussen - self.target_wall_dist
+                target_x = x_aussen - (self.assumed_lane_width * inv_ratio)
                 
-        # Fall 4: Notfall - Keine Wand da
+        # Notfall
         else:
-            target_x = 0.0  # Stur geradeaus
+            target_x = 0.0  
+
+        # ==========================================
+        # NEU: KRAFTFELD (MINDESTABSTAND ERZWINGEN)
+        # ==========================================
+        if innenbande:
+            # Wir prüfen, wo die Innenbande ist
+            x_innen_check = get_x_at_y(innenbande, target_y)
+            
+            if x_innen_check < 0:  
+                # Innenbande ist LINKS. Ziel MUSS mindestens +min_wall_dist entfernt sein
+                if target_x < x_innen_check + self.min_wall_dist:
+                    target_x = x_innen_check + self.min_wall_dist
+                    
+            else:                  
+                # Innenbande ist RECHTS. Ziel MUSS mindestens -min_wall_dist entfernt sein
+                if target_x > x_innen_check - self.min_wall_dist:
+                    target_x = x_innen_check - self.min_wall_dist
 
         return (target_x, target_y)
 
@@ -554,6 +581,7 @@ class WallFollower(Node):
         angles = [p[0] for p in last_front_wall]
         min_angle = min(angles)
         max_angle = max(angles)
+        self.get_logger().info(f"Tracking-ROI: Min Winkel {min_angle:.1f}°, Max Winkel {max_angle:.1f}°")
 
         # 2. Das dynamische Suchfenster (ROI) definieren
         # Wir geben in Bewegungsrichtung mehr Toleranz (z.B. +30 Grad), 
@@ -561,12 +589,12 @@ class WallFollower(Node):
         
         if self.fahrtrichtung == 'links':
             # Wand wandert nach RECHTS (Winkel werden positiver)
-            roi_min = min_angle - 10.0
+            roi_min = min_angle - 5.0
             roi_max = max_angle + 30.0
         else:
             # Wand wandert nach LINKS (Winkel werden negativer)
             roi_min = min_angle - 30.0
-            roi_max = max_angle + 10.0
+            roi_max = max_angle + 5.0
 
         # 3. Scheuklappen aufsetzen: Punktewolke filtern!
         roi_points = []
@@ -598,10 +626,12 @@ class WallFollower(Node):
         innenbande = None
         aussenbande = None
 
+       
+
         # 2. Punktwolke in Cluster (Wände) aufteilen
         if self.state == 'FOLLOW_LANE':
             if self.turn_count >= self.target_turns:
-                if self.get_closest_point_in_cluster(self.front_wall) is not None and self.get_closest_point_in_cluster(self.front_wall)[3] < 1.50:
+                if self.get_closest_point_in_cluster(self.front_wall) is not None and self.get_closest_point_in_cluster(self.front_wall)[3] < 1.80:
                     self.state = 'STOPPED'
                     return
             
@@ -616,6 +646,27 @@ class WallFollower(Node):
             right_wall = kandidaten[2]
             self.front_wall = kandidaten[1]
             left_wall  = kandidaten[0]
+
+            if self.fahrtrichtung is None:
+            # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
+                if left_wall and right_wall:
+                    # Echte physikalische Länge in Metern berechnen (Satz des Pythagoras)
+                    left_len = math.hypot(left_wall[0][1] - left_wall[-1][1], left_wall[0][2] - left_wall[-1][2])
+                    right_len = math.hypot(right_wall[0][1] - right_wall[-1][1], right_wall[0][2] - right_wall[-1][2])
+                    
+                    self.get_logger().info(f"Scanne Strecke... Länge Links: {left_len:.2f}m, Länge Rechts: {right_len:.2f}m")
+                    
+                    # Wir brauchen einen deutlichen Unterschied (z.B. 40 cm), um sicher zu sein!
+                    if left_len > right_len + 0.30:
+                        self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
+                        self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
+                    elif right_len > left_len + 0.30:
+                        self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
+                        self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
+                
+                else:
+                    self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
+                    return
         
             if self.fahrtrichtung == 'links':
                 innenbande = left_wall
@@ -623,6 +674,8 @@ class WallFollower(Node):
             elif self.fahrtrichtung == 'rechts':
                 innenbande = right_wall
                 aussenbande = left_wall
+        
+            
 
         if self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             # Während der Kurve tracken wir die Frontwand mit einem dynamischen Suchfenster (ROI)
@@ -631,13 +684,13 @@ class WallFollower(Node):
             angle_to_front_wall = self.get_cluster_angle(self.front_wall)
             self.get_logger().info(f"Tracke Frontwand... Winkel zur Fahrtrichtung: {angle_to_front_wall:.1f}°")
 
-            if abs(angle_to_front_wall) > 10:
+            if abs(angle_to_front_wall) > self.turn_exit_angle:
                 if self.state == 'TURN_LINKS':
                     cmd.linear.x = self.turn_speed
                     cmd.angular.z = self.max_turn_angle
                 else:
                     cmd.linear.x = self.turn_speed
-                    cmd.angular.z = - self.max_turn_angle
+                    cmd.angular.z = -self.max_turn_angle
                 
             else:
                 self.get_logger().warn(">>> KURVE FAST FERTIG! Wechsel zurück in FOLLOW_LANE <<<")
@@ -650,31 +703,18 @@ class WallFollower(Node):
             cmd.angular.z = 0.0
             self.pub_cmd_vel.publish(cmd)
             self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
+            node.destroy_node()
+            rclpy.shutdown()
             return
 
 
         else:
-            ##Hier die neue logik für außenbande verfolgung
+        
             pass
         
 
         # Fahrtrichtung erkennen: Wir vergleichen die physikalische Länge der beiden Seitenwände (nicht die Anzahl der Punkte, da sie unterschiedlich dicht sein können).
-        if self.fahrtrichtung is None:
-            # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
-            if left_wall and right_wall:
-                # Echte physikalische Länge in Metern berechnen (Satz des Pythagoras)
-                left_len = math.hypot(left_wall[0][1] - left_wall[-1][1], left_wall[0][2] - left_wall[-1][2])
-                right_len = math.hypot(right_wall[0][1] - right_wall[-1][1], right_wall[0][2] - right_wall[-1][2])
-                
-                self.get_logger().info(f"Scanne Strecke... Länge Links: {left_len:.2f}m, Länge Rechts: {right_len:.2f}m")
-                
-                # Wir brauchen einen deutlichen Unterschied (z.B. 40 cm), um sicher zu sein!
-                if left_len > right_len + 0.40:
-                    self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
-                    self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
-                elif right_len > left_len + 0.40:
-                    self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
-                    self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
+       
 
         
         
@@ -698,7 +738,7 @@ class WallFollower(Node):
                 if innenbande and len(innenbande) > 0:
                     max_y_innen = max(p[2] for p in innenbande)
                 
-                if front_dist < 1.30 and max_y_innen < 0.20:
+                if front_dist < 1.20 and max_y_innen < self.max_wall_lenght_for_turn:
                     self.state = f"TURN_{self.fahrtrichtung.upper()}"
                     self.get_logger().warn(f">>> KURVE EINGELEITET: Wechsel in {self.state} <<<")
                     
@@ -748,7 +788,7 @@ class WallFollower(Node):
         if self.state == 'FOLLOW_LANE':
             self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
         else:
-            self.delete_marker(marker_array, 99)
+            self.delete_marker(marker_array, 99, ns="target")
             
         self.pub_markers.publish(marker_array)
 
