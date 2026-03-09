@@ -4,7 +4,7 @@ from platform import node
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, Imu
 from geometry_msgs.msg import Twist, Point
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.qos import qos_profile_sensor_data
@@ -16,28 +16,39 @@ class WallFollower(Node):
         
         # Subscriber für LiDAR-Daten 
         self.sub_scan = self.create_subscription(LaserScan, '/ldlidar_node/scan', self.scan_callback, qos_profile_sensor_data)
+        self.sub_imu = self.create_subscription(Imu, '/bno055/imu', self.imu_callback, 10)
         
         # Publisher für Bewegung und RViz [cite: 1, 19]
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pub_markers = self.create_publisher(MarkerArray, '/wall_follower_markers', 10)
+
+        self.yaw_offset = 0.0
+        self.current_yaw = 0.0
+        self.imu_ready = False  # <--- NEU: Ist der Gyro schon wach?
+        self.target_yaw = 0.0      # Zielwinkel für die Kurve
+        self.last_raw_yaw = None
+        self.start_turn_yaw = None
+        self.start_straight_yaw = 0.0
+        
         
         # Konfiguration
         self.rviz_frame = 'ldlidar_link'  # Muss in RViz als "Fixed Frame" stehen
         self.get_logger().info('>>> WallFollower Template gestartet. Warte auf LiDAR... <<<')
 
         # --- STATE MACHINE & PFADPLANUNG ---
-        self.state = 'FOLLOW_LANE'    # Startzustand
+        self.state = 'STARTING'    # Startzustand
         self.fahrtrichtung = None     # Wird automatisch erkannt
 
         self.target_turns = 12
         self.turn_count = 0
 
         self.front_wall = None
+        self.last_valid_front_wall = None
         
         # Karotten-Parameter
         self.lookahead_dist = 0.60    # Wie weit schaut der Roboter voraus? (60 cm)
         self.target_wall_dist = 0.30  # Gewünschter Abstand zur Bande (45 cm) 
-        self.min_wall_dist = 0.30       
+        self.min_wall_dist = 0.40       
 
         self.lane_ratio = 0.40       # 30% Abstand zur Innenbande (Ideallinie)
         self.assumed_lane_width = 0.60 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
@@ -54,10 +65,10 @@ class WallFollower(Node):
         self.integral_error = 0.0
         
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 800.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 750.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 400.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 400.0  # Leicht reduzierter Speed in der Kurve
 
-        self.max_turn_angle = 0.7  # Maximaler Lenkwinkel in Grad (für Sicherheit)
+        self.max_turn_angle = 0.75  # Maximaler Lenkwinkel in Grad (für Sicherheit)
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -81,6 +92,41 @@ class WallFollower(Node):
         marker.points = [point1, point2]
         marker_array.markers.append(marker)
 
+    def imu_callback(self, msg):
+        """
+        Wandelt Quaternionen in einen UNENDLICHEN, sprungfreien Winkel um.
+        (Kein Zurückspringen bei 180° oder 360°!)
+        """
+        self.imu_ready = True
+        q = msg.orientation
+        
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+        
+        # Das ist der rohe Wert mit dem blöden Sprung bei 180 / -180
+        raw_yaw = math.degrees(yaw_rad)
+        
+        # Beim allerersten Datenpaket initialisieren wir einfach
+        if self.last_raw_yaw is None:
+            self.last_raw_yaw = raw_yaw
+            self.current_yaw = raw_yaw
+            return
+
+        # Wie weit haben wir uns seit der letzten Millisekunde gedreht?
+        delta = raw_yaw - self.last_raw_yaw
+        
+        # ==========================================
+        # DIE MAGIE: Den 360°-Sprung abfangen!
+        # ==========================================
+        if delta > 180.0:
+            delta -= 360.0
+        elif delta < -180.0:
+            delta += 360.0
+            
+        # Wir addieren nur das saubere Delta zu unserem unendlichen Winkel
+        self.current_yaw += delta
+        self.last_raw_yaw = raw_yaw
     def send_text(self, marker_array, m_id, text, x, y, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen von schwebendem Text in RViz."""
         marker = Marker()
@@ -581,7 +627,7 @@ class WallFollower(Node):
         angles = [p[0] for p in last_front_wall]
         min_angle = min(angles)
         max_angle = max(angles)
-        self.get_logger().info(f"Tracking-ROI: Min Winkel {min_angle:.1f}°, Max Winkel {max_angle:.1f}°")
+        #self.get_logger().info(f"Tracking-ROI: Min Winkel {min_angle:.1f}°, Max Winkel {max_angle:.1f}°")
 
         # 2. Das dynamische Suchfenster (ROI) definieren
         # Wir geben in Bewegungsrichtung mehr Toleranz (z.B. +30 Grad), 
@@ -623,18 +669,29 @@ class WallFollower(Node):
         marker_array = MarkerArray()
         cmd = Twist()
 
+        self.get_logger().info(f"IMU Winkel: {(self.current_yaw - self.yaw_offset):.1f}°")
+            
+                            
         innenbande = None
         aussenbande = None
+        kandidaten = [None, None, None]
 
        
 
         # 2. Punktwolke in Cluster (Wände) aufteilen
         if self.state == 'FOLLOW_LANE':
-            if self.turn_count >= self.target_turns:
+            total_gedreht = abs(self.current_yaw - self.yaw_offset)
+            if self.turn_count >= self.target_turns or total_gedreht > 1060:  # 1080° = 3 volle Umdrehungen
                 if self.get_closest_point_in_cluster(self.front_wall) is not None and self.get_closest_point_in_cluster(self.front_wall)[3] < 1.80:
                     self.state = 'STOPPED'
                     return
-            
+
+            if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
+                self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
+                self.start_straight_yaw = self.current_yaw
+                self.turn_count += 1
+                return
+                
             all_clusters = self.get_all_clusters_sorted(point_data)
 
 
@@ -647,6 +704,93 @@ class WallFollower(Node):
             self.front_wall = kandidaten[1]
             left_wall  = kandidaten[0]
 
+            # Hier war vorher die Wahl der Fahrtrichtung, aber wir haben sie jetzt schon in der Startphase festgelegt.
+        
+            if self.fahrtrichtung == 'links':
+                innenbande = left_wall
+                aussenbande = right_wall
+            elif self.fahrtrichtung == 'rechts':
+                innenbande = right_wall
+                aussenbande = left_wall
+        
+            
+
+        if self.state in ['TURN_LINKS', 'TURN_RECHTS']:
+            
+            turned_so_far = abs(self.current_yaw - self.start_turn_yaw)
+
+            # ==========================================
+            # 1. TRACKING MIT GEDÄCHTNIS
+            # ==========================================
+            # Wir suchen IMMER um die letzte bekannte Position herum!
+            tracked_wall = self.track_front_wall(point_data, self.front_wall)
+            
+            if tracked_wall is not None and len(tracked_wall) > 0:
+                self.get_logger().info(f"Frontwand getrackt! Punkte im Cluster: {len(tracked_wall)}")
+                self.front_wall = tracked_wall
+                self.last_valid_front_wall = tracked_wall  # Gedächtnis sofort updaten!
+            else:
+                self.front_wall = self.last_valid_front_wall  # Lidar blind? Notfall-Gedächtnis nutzen!'''
+                
+            kandidaten = [None, self.front_wall, None]
+
+            # ==========================================
+            # 2. WINKEL ABSTURZSICHER BERECHNEN
+            # ==========================================
+            angle_to_front_wall = 999.0  # Dummy-Wert (verhindert Abstürze)
+            if self.front_wall is not None:
+                ang = self.get_cluster_angle(self.front_wall)
+                if ang is not None:
+                    angle_to_front_wall = abs(ang) # Nur abs() rufen, wenn wir eine echte Zahl haben!
+
+            self.get_logger().info(f"Kurve... Gedreht: {turned_so_far:.1f}°, Wand-Winkel: {angle_to_front_wall:.1f}°")
+
+            # ==========================================
+            # 3. KONTROLL-LOGIK (Sensor Fusion)
+            # ==========================================
+            lidar_turn_finished = (angle_to_front_wall < self.turn_exit_angle)
+            
+            # ABBRUCH BEDINGUNG: Lidar ist happy UND mind. 75° gedreht -- ODER -- Gyro Not-Stopp bei > 110°
+            if (lidar_turn_finished and turned_so_far > 75.0) or (turned_so_far > 110.0):
+                self.get_logger().warn(f">>> KURVE ABGESCHLOSSEN! (Gedreht: {turned_so_far:.1f}°) <<<")
+                self.state = 'FOLLOW_LANE'
+                self.start_straight_yaw = self.current_yaw
+                self.front_wall = None
+                self.turn_count += 1
+                self.get_logger().warn(f">>> Aktuelle Kurven-Anzahl: {self.turn_count} <<<")
+                cmd.angular.z = 0.0  # Lenkung gerade
+                
+            # AUTO MUSS WEITER DREHEN (Keine Dead Zone mehr!)
+            else:
+                cmd.linear.x = self.turn_speed
+                if self.state == 'TURN_LINKS':
+                    cmd.angular.z = self.max_turn_angle
+                else:
+                    cmd.angular.z = -self.max_turn_angle
+
+        elif self.state == 'STOPPED':
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+            self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
+            self.destroy_node()
+            rclpy.shutdown()
+            return
+
+        elif self.state == 'STARTING':
+            self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
+
+            all_clusters = self.get_all_clusters_sorted(point_data)
+
+
+            validated_clusters = self.validate_clusters(all_clusters)
+            # 5. Wir haben ein perfektes U-Profil!
+            #self.get_logger().info(f"Anzahl cluster {len(all_clusters)}")
+            kandidaten = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
+
+            right_wall = kandidaten[2]
+            self.front_wall = kandidaten[1]
+            left_wall  = kandidaten[0]
             if self.fahrtrichtung is None:
             # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
                 if left_wall and right_wall:
@@ -667,58 +811,19 @@ class WallFollower(Node):
                 else:
                     self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                     return
-        
-            if self.fahrtrichtung == 'links':
-                innenbande = left_wall
-                aussenbande = right_wall
-            elif self.fahrtrichtung == 'rechts':
-                innenbande = right_wall
-                aussenbande = left_wall
-        
-            
 
-        if self.state in ['TURN_LINKS', 'TURN_RECHTS']:
-            # Während der Kurve tracken wir die Frontwand mit einem dynamischen Suchfenster (ROI)
-            self.front_wall = self.track_front_wall(point_data, self.front_wall)
-            kandidaten = [None, self.front_wall, None]  # Wir haben nur die Frontwand, die wir tracken
-            angle_to_front_wall = self.get_cluster_angle(self.front_wall)
-            self.get_logger().info(f"Tracke Frontwand... Winkel zur Fahrtrichtung: {angle_to_front_wall:.1f}°")
+            if not self.imu_ready:
+                self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
+                return  # Brich hier ab, mach noch nichts!   
+            self.yaw_offset = self.current_yaw
+            self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen
 
-            if abs(angle_to_front_wall) > self.turn_exit_angle:
-                if self.state == 'TURN_LINKS':
-                    cmd.linear.x = self.turn_speed
-                    cmd.angular.z = self.max_turn_angle
-                else:
-                    cmd.linear.x = self.turn_speed
-                    cmd.angular.z = -self.max_turn_angle
-                
-            else:
-                self.get_logger().warn(">>> KURVE FAST FERTIG! Wechsel zurück in FOLLOW_LANE <<<")
-                self.state = 'FOLLOW_LANE'
-                self.front_wall = None
-                self.turn_count += 1
-
-        elif self.state == 'STOPPED':
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            self.pub_cmd_vel.publish(cmd)
-            self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
-            node.destroy_node()
-            rclpy.shutdown()
-            return
-
-
+            self.state = 'FOLLOW_LANE'
         else:
         
             pass
         
-
-        # Fahrtrichtung erkennen: Wir vergleichen die physikalische Länge der beiden Seitenwände (nicht die Anzahl der Punkte, da sie unterschiedlich dicht sein können).
-       
-
-        
-        
-
+    
         # ==========================================
         # PFADPLANUNG, PID & STATE MACHINE 
         # ==========================================
@@ -740,8 +845,9 @@ class WallFollower(Node):
                 
                 if front_dist < 1.20 and max_y_innen < self.max_wall_lenght_for_turn:
                     self.state = f"TURN_{self.fahrtrichtung.upper()}"
-                    self.get_logger().warn(f">>> KURVE EINGELEITET: Wechsel in {self.state} <<<")
-                    
+                    self.start_turn_yaw = self.current_yaw
+                    self.last_valid_front_wall = self.front_wall
+                    self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
                     # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
                     self.prev_error = 0.0
                     self.integral_error = 0.0
@@ -861,7 +967,6 @@ class WallFollower(Node):
 
         # Alles veröffentlichen, damit es in RViz2 auftaucht!
         self.pub_markers.publish(marker_array)
-
 
 def main(args=None):
     rclpy.init(args=args)
