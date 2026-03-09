@@ -43,7 +43,6 @@ class WallFollower(Node):
         self.turn_count = 0
 
         self.front_wall = None
-        self.last_valid_front_wall = None
         
         # Karotten-Parameter
         self.lookahead_dist = 0.60    # Wie weit schaut der Roboter voraus? (60 cm)
@@ -65,8 +64,8 @@ class WallFollower(Node):
         self.integral_error = 0.0
         
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 400.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 400.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 1023.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 1023.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.75  # Maximaler Lenkwinkel in Grad (für Sicherheit)
 
@@ -715,50 +714,26 @@ class WallFollower(Node):
             
 
         if self.state in ['TURN_LINKS', 'TURN_RECHTS']:
-            
             turned_so_far = abs(self.current_yaw - self.start_turn_yaw)
-
-            # ==========================================
-            # 1. TRACKING MIT GEDÄCHTNIS
-            # ==========================================
-            # Wir suchen IMMER um die letzte bekannte Position herum!
+            # Während der Kurve tracken wir die Frontwand mit einem dynamischen Suchfenster (ROI)
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
-            self.get_logger().info(f"Frontwand getrackt! Punkte im Cluster: {len(self.front_wall)}")
-                
-            kandidaten = [None, self.front_wall, None]
+            kandidaten = [None, self.front_wall, None]  # Wir haben nur die Frontwand, die wir tracken
+            angle_to_front_wall = self.get_cluster_angle(self.front_wall)
+            self.get_logger().info(f"Tracke Frontwand... Winkel zur Fahrtrichtung: {angle_to_front_wall:.1f}°")
 
-            # ==========================================
-            # 2. WINKEL ABSTURZSICHER BERECHNEN
-            # ==========================================
-            angle_to_front_wall = 999.0  # Dummy-Wert (verhindert Abstürze)
-            if self.front_wall is not None:
-                ang = self.get_cluster_angle(self.front_wall)
-                if ang is not None:
-                    angle_to_front_wall = abs(ang) # Nur abs() rufen, wenn wir eine echte Zahl haben!
-
-            self.get_logger().info(f"Kurve... Gedreht: {turned_so_far:.1f}°, Wand-Winkel: {angle_to_front_wall:.1f}°")
-
-            # ==========================================
-            # 3. KONTROLL-LOGIK (Sensor Fusion)
-            # ==========================================
-            lidar_turn_finished = (angle_to_front_wall < self.turn_exit_angle)
-            
-            # ABBRUCH BEDINGUNG: Lidar ist happy UND mind. 75° gedreht -- ODER -- Gyro Not-Stopp bei > 110°
-            if (lidar_turn_finished and turned_so_far > 75.0) or (turned_so_far > 110.0):
-                self.get_logger().warn(f">>> KURVE ABGESCHLOSSEN! (Gedreht: {turned_so_far:.1f}°) <<<")
+            if abs(angle_to_front_wall) < self.turn_exit_angle or turned_so_far > 95.0:
+                self.get_logger().warn(">>> KURVE FAST FERTIG! Wechsel zurück in FOLLOW_LANE <<<")
                 self.state = 'FOLLOW_LANE'
-                self.start_straight_yaw = self.current_yaw
                 self.front_wall = None
                 self.turn_count += 1
-                self.get_logger().warn(f">>> Aktuelle Kurven-Anzahl: {self.turn_count} <<<")
-                cmd.angular.z = 0.0  # Lenkung gerade
-                
-            # AUTO MUSS WEITER DREHEN (Keine Dead Zone mehr!)
+                self.start_straight_yaw = self.current_yaw
+
             else:
-                cmd.linear.x = self.turn_speed
                 if self.state == 'TURN_LINKS':
+                    cmd.linear.x = self.turn_speed
                     cmd.angular.z = self.max_turn_angle
                 else:
+                    cmd.linear.x = self.turn_speed
                     cmd.angular.z = -self.max_turn_angle
 
         elif self.state == 'STOPPED':
@@ -839,7 +814,6 @@ class WallFollower(Node):
                 if front_dist < 1.20 and max_y_innen < self.max_wall_lenght_for_turn:
                     self.state = f"TURN_{self.fahrtrichtung.upper()}"
                     self.start_turn_yaw = self.current_yaw
-                    self.last_valid_front_wall = self.front_wall
                     self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
                     # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
                     self.prev_error = 0.0
