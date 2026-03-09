@@ -655,7 +655,7 @@ class WallFollower(Node):
         # 5. Tracking überprüfen
         if not roi_clusters:
             self.get_logger().warn("ACHTUNG: Getrackte Wand im ROI verloren!")
-            return None
+            return last_front_wall
             
         # Da wir alle anderen Wände weggefiltert haben, ist das größte Cluster 
         # (Index 0) in diesem Bereich zu 99,9% unsere gesuchte Wand!
@@ -690,7 +690,6 @@ class WallFollower(Node):
                 self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
                 self.start_straight_yaw = self.current_yaw
                 self.turn_count += 1
-                return
                 
             all_clusters = self.get_all_clusters_sorted(point_data)
 
@@ -723,14 +722,8 @@ class WallFollower(Node):
             # 1. TRACKING MIT GEDÄCHTNIS
             # ==========================================
             # Wir suchen IMMER um die letzte bekannte Position herum!
-            tracked_wall = self.track_front_wall(point_data, self.front_wall)
-            
-            if tracked_wall is not None and len(tracked_wall) > 0:
-                self.get_logger().info(f"Frontwand getrackt! Punkte im Cluster: {len(tracked_wall)}")
-                self.front_wall = tracked_wall
-                self.last_valid_front_wall = tracked_wall  # Gedächtnis sofort updaten!
-            else:
-                self.front_wall = self.last_valid_front_wall  # Lidar blind? Notfall-Gedächtnis nutzen!'''
+            self.front_wall = self.track_front_wall(point_data, self.front_wall)
+            self.get_logger().info(f"Frontwand getrackt! Punkte im Cluster: {len(self.front_wall)}")
                 
             kandidaten = [None, self.front_wall, None]
 
