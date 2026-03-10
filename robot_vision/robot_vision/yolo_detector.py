@@ -59,8 +59,18 @@ class YoloObstacleDetector(Node):
         if self.last_scan is None: return
 
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        image_width = cv_image.shape[1]
+        image_width = cv_image.shape[1]     
         results = self.model(cv_image, verbose=False)
+
+        # --- NEU: HIER WIRD DAS DEBUG-BILD ERSTELLT UND PUBLIZIERT ---
+        # 1. Bounding Boxes und Labels auf das Bild zeichnen
+        annotated_frame = results[0].plot()
+
+        # 2. Das OpenCV-Bild zurück in eine ROS-Message konvertieren
+        debug_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+        # 3. Das Bild auf dem Topic /camera/yolo_debug veröffentlichen
+        self.pub_debug_img.publish(debug_msg)
+        # -------------------------------------------------------------
         
         for r in results:
             for box in r.boxes:
