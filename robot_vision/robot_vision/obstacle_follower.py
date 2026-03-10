@@ -4,11 +4,18 @@ from platform import node
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan, Imu
+from sensor_msgs.msg import LaserScan, Imu, Image
 from geometry_msgs.msg import Twist, Point
 from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import String
 from rclpy.qos import qos_profile_sensor_data
 import math
+
+# YOLO Imports 
+from cv_bridge import CvBridge
+import cv2
+from ultralytics import YOLO
+import numpy as np
 
 class WallFollower(Node):
     def __init__(self):
@@ -16,11 +23,13 @@ class WallFollower(Node):
         
         # Subscriber für LiDAR-Daten 
         self.sub_scan = self.create_subscription(LaserScan, '/ldlidar_node/scan', self.scan_callback, qos_profile_sensor_data)
+        self.last_point_data = []  # Hier speichern wir die rohen LiDAR-Punkte für die Kamera-Fusion
         self.sub_imu = self.create_subscription(Imu, '/bno055/imu', self.imu_callback, 10)
         
         # Publisher für Bewegung und RViz [cite: 1, 19]
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pub_markers = self.create_publisher(MarkerArray, '/wall_follower_markers', 10)
+        
 
         self.yaw_offset = 0.0
         self.current_yaw = 0.0
@@ -41,8 +50,11 @@ class WallFollower(Node):
 
         self.target_turns = 4
         self.turn_count = 0
+        self.locked_turn_count = 0  # Merkt sich, in welcher "Runde" das Hindernis stand
 
         self.front_wall = None
+        self.left_wall = None
+        self.right_wall = None
         
         # Karotten-Parameter
         self.lookahead_dist = 0.60    # Wie weit schaut der Roboter voraus? (60 cm)
@@ -52,6 +64,14 @@ class WallFollower(Node):
         self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
         self.turn_exit_angle = 25
         self.max_wall_lenght_for_turn = 0.25
+
+        # Object Detection Parameter
+        self.sub_cmd = self.create_subscription(String, '/obstacle_cmd', self.cmd_callback, 10)
+        self.current_obstacle_cmd = "CLEAR"
+
+        # Standard-Werte für die Ideallinie (z.B. Außenbahn)
+        self.default_lane_ratio = 0.85 
+        self.default_max_turn = 0.635
         
 
         # --- PID-REGLER PARAMETER ---
@@ -63,10 +83,54 @@ class WallFollower(Node):
         self.integral_error = 0.0
         
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 600.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 600.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 450.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 450.0  # Leicht reduzierter Speed in der Kurve
 
-        self.max_turn_angle = 0.435  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
+        self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
+
+        # --------------------------------
+        # --- YOLO - Global Parameters ---
+        # --------------------------------
+
+        self.bridge = CvBridge()
+        
+        # 1. Das YOLO-Modell laden (TensorRT .engine)
+        self.get_logger().info('Lade YOLO TensorRT Engine...')
+        self.model = YOLO('/workspace/best.engine', task='detect')
+        self.get_logger().info('Modell erfolgreich geladen!')
+        # In der __init__ Klasse hinzufügen:
+        self.angle_calibration = 0.0  # In Grad: Korrigiert, wenn Lidar/Kamera verdreht sind
+        self.lidar_height_offset = 0.05 # In Metern: Hebt/Senkt den Marker in RViz
+        self.camera_to_lidar_dist = 0.03 # Falls die Kamera 3cm vor dem Lidar sitzt
+
+        # 2. Subscriptions
+        # Kamera-Bild   
+        self.last_image_msg = None  # Hier speichern wir das letzte Bild für die Fusion
+        self.image_width = None  # Breite des Kamerabildes (wird beim ersten Bild gesetzt)
+        self.img_sub = self.create_subscription(
+            Image, 
+            '/camera/image_raw', 
+            self.camera_sub_callback, 
+            qos_profile_sensor_data
+        )
+        # Lidar-Scan hinzufügen
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            '/ldlidar_node/scan',
+            self.scan_callback,
+            qos_profile_sensor_data
+        )
+        
+        # 3. Publisher
+        self.marker_pub = self.create_publisher(Marker, '/detected_obstacles', 10)
+        self.pub_debug_img = self.create_publisher(Image, '/camera/yolo_debug', 10)
+        self.avoid_trigger_dist = 0.85 # Schwellenwert: Ab 85cm vor dem Hindernis ausweichen
+        
+        # Variablen für die Fusion
+        self.camera_fov = 115.0  # Dein Sichtfeld
+        self.get_logger().info('YOLO Lidar Fusion Node gestartet.')
+
+        self.turn_start_time = 0.0
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -89,6 +153,36 @@ class WallFollower(Node):
         
         marker.points = [point1, point2]
         marker_array.markers.append(marker)
+
+    def publish_marker(self, x, y, name, class_id):
+        marker = Marker()
+        marker.header.frame_id = self.rviz_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "yolo_obstacles"
+        marker.id = class_id
+        marker.type = Marker.CYLINDER
+        marker.action = Marker.ADD
+        
+        # --- DER MAGISCHE FIX ---
+        # Keine Winkelrechnungen mehr! Wir nehmen 1:1 die Lidar-Koordinaten.
+        marker.pose.position.x = float(x)
+        marker.pose.position.y = float(y)
+        
+        marker.pose.position.z = self.lidar_height_offset
+        
+        marker.scale.x, marker.scale.y, marker.scale.z = 0.15, 0.15, 0.3
+        
+        marker.color.a = 1.0
+        if "red" in name:
+            marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0
+        else:
+            marker.color.r, marker.color.g, marker.color.b = 0.0, 1.0, 0.0
+            
+        marker.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
+        self.marker_pub.publish(marker)
+    
+    def cmd_callback(self, msg):
+        self.current_obstacle_cmd = msg.data
 
     def imu_callback(self, msg):
         """
@@ -125,6 +219,10 @@ class WallFollower(Node):
         # Wir addieren nur das saubere Delta zu unserem unendlichen Winkel
         self.current_yaw += delta
         self.last_raw_yaw = raw_yaw
+    
+    def camera_sub_callback(self, msg):
+        self.last_image_msg = msg
+
     def send_text(self, marker_array, m_id, text, x, y, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen von schwebendem Text in RViz."""
         marker = Marker()
@@ -405,7 +503,6 @@ class WallFollower(Node):
 
         return angle_deg
 
-
     def delete_marker(self, marker_array, m_id, ns="walls"):
         """Löscht einen Marker in einem bestimmten Namespace."""
         marker = Marker()
@@ -443,6 +540,7 @@ class WallFollower(Node):
             # Als Tupel speichern: (Angepasster Winkel, Roh-Distanz, X, Y) [cite: 10]
             point_data.append((angle_user_deg, x, y, dist))
         
+        self.last_point_data = point_data  # Für die Kamera-Fusion speichern
         self.process_my_logic(point_data)
         #self.get_logger().info(f"Winkel 0: {self.get_closest_measure(point_data, target_angle=0)} Winkel 105: {self.get_closest_measure(point_data, target_angle=105)} Winkel -105: {self.get_closest_measure(point_data, target_angle=-105)}")  # Beispiel: Finde den Punkt direkt vor dem Roboter (0°)
 
@@ -561,7 +659,23 @@ class WallFollower(Node):
             dy = target_y - mean_y
             return mean_x + (dy * math.tan(angle_rad))
 
-        # --- FALL 1: WIR SEHEN BEIDE BANDEN ---
+        # ==========================================
+        # NEU: DER "WAND-KUSCHLER" FIX (Single-Wall Tracking)
+        # ==========================================
+        # Wenn wir einem Hindernis ausweichen, verlassen wir uns NUR noch auf 
+        # die Bande, an der wir gerade entlangfahren. Das verhindert, dass 
+        # das passierte Hindernis die Spurbreiten-Rechnung zerschießt!
+        if self.current_obstacle_cmd != "CLEAR":
+            if self.lane_ratio < 0.5:
+                # Wir wollen ganz nah an die Innenbande (Ratio z.B. 0.20)
+                # -> Wir ignorieren die Außenbande (und das Hindernis dort) komplett!
+                aussenbande = None
+            else:
+                # Wir wollen ganz nah an die Außenbande (Ratio z.B. 0.85)
+                # -> Wir ignorieren die Innenbande komplett!
+                innenbande = None
+
+        # --- FALL 1: WIR SEHEN BEIDE BANDEN (Normalfall auf freier Strecke) ---
         if innenbande and aussenbande:
             x_innen = get_x_at_y(innenbande, target_y)
             x_aussen = get_x_at_y(aussenbande, target_y)
@@ -573,7 +687,7 @@ class WallFollower(Node):
             else:           # Innenbande rechts
                 target_x = x_innen - (lane_width * self.lane_ratio)
                 
-        # --- FALL 2: WIR SEHEN NUR DIE INNENBANDE ---
+        # --- FALL 2: WIR SEHEN NUR DIE INNENBANDE (Oder haben Außen ignoriert) ---
         elif innenbande:
             x_innen = get_x_at_y(innenbande, target_y)
             if x_innen < 0:
@@ -581,13 +695,13 @@ class WallFollower(Node):
             else:
                 target_x = x_innen - (self.assumed_lane_width * self.lane_ratio)
                 
-        # --- FALL 3: WIR SEHEN NUR DIE AUSSENBANDE ---
+        # --- FALL 3: WIR SEHEN NUR DIE AUSSENBANDE (Oder haben Innen ignoriert) ---
         elif aussenbande:
             x_aussen = get_x_at_y(aussenbande, target_y)
             inv_ratio = 1.0 - self.lane_ratio 
-            if x_aussen < 0: 
+            if x_aussen < 0: # Außenbande ist links
                 target_x = x_aussen + (self.assumed_lane_width * inv_ratio)
-            else:
+            else:            # Außenbande ist rechts
                 target_x = x_aussen - (self.assumed_lane_width * inv_ratio)
                 
         # Notfall
@@ -595,7 +709,7 @@ class WallFollower(Node):
             target_x = 0.0  
 
         # ==========================================
-        # NEU: KRAFTFELD (MINDESTABSTAND ERZWINGEN)
+        # KRAFTFELD (MINDESTABSTAND ERZWINGEN)
         # ==========================================
         if innenbande:
             # Wir prüfen, wo die Innenbande ist
@@ -661,28 +775,216 @@ class WallFollower(Node):
 
         return tracked_wall
 
+    def update_avoidance_settings(self):
+        """Passt Spur, Kurvenradius und Karotten-Distanz dynamisch an."""
+        
+        # --- STANDARD-WERTE (Kein Hindernis) ---
+        if self.current_obstacle_cmd == "CLEAR" or self.fahrtrichtung is None:
+            self.lane_ratio = 0.85 
+            self.max_turn_angle = 0.635
+            self.lookahead_dist = 0.60  # Entspannt vorausschauen
+            
+            # WICHTIG: Das hier lieber auskommentieren, sonst spammt es dein Terminal voll!
+            # self.get_logger().info("Keine Hindernisse erkannt. Fahre mit Standardparametern.")
+            return
+
+        # --- AUSWEICH-WERTE (Adrenalin-Modus) ---
+        # Karotte näher ranholen, um viel direkter und schärfer zu lenken!
+        self.lookahead_dist = 0.35 
+
+        # Logik-Matrix
+        if self.fahrtrichtung == 'links': # Innenbande links
+            if self.current_obstacle_cmd == "RED":       # (Vorher AVOID_RIGHT) Rechts vorbei
+                self.lane_ratio = 0.85
+                self.max_turn_angle = 0.635 # Weite Kurve (Außen)
+            elif self.current_obstacle_cmd == "GREEN":   # (Vorher AVOID_LEFT) Links vorbei
+                self.lane_ratio = 0.20
+                self.max_turn_angle = 0.800 # Enge Kurve (Innen)
+
+        elif self.fahrtrichtung == 'rechts': # Innenbande rechts
+            if self.current_obstacle_cmd == "RED":       # (Vorher AVOID_RIGHT) Rechts vorbei
+                self.lane_ratio = 0.20
+                self.max_turn_angle = 0.800 # Enge Kurve (Innen)
+            elif self.current_obstacle_cmd == "GREEN":   # (Vorher AVOID_LEFT) Links vorbei
+                self.lane_ratio = 0.85  
+                self.max_turn_angle = 0.635 # Weite Kurve (Außen)
+
+    # -----------------------
+    # --- YOLO - Function ---
+    # -----------------------
+
+    def image_callback(self, msg):
+        if self.last_point_data is None: return
+
+        cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        self.image_width = cv_image.shape[1]     
+        results = self.model(cv_image, verbose=False)
+
+        # --- NEU: HIER WIRD DAS DEBUG-BILD ERSTELLT UND PUBLIZIERT ---
+        # 1. Bounding Boxes und Labels auf das Bild zeichnen
+        annotated_frame = results[0].plot()
+
+        # 2. Das OpenCV-Bild zurück in eine ROS-Message konvertieren
+        debug_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+        # 3. Das Bild auf dem Topic /camera/yolo_debug veröffentlichen
+        self.pub_debug_img.publish(debug_msg)
+        # -------------------------------------------------------------
+        
+        return results
+        
+
+    def get_lidar_distance(self, camera_angle_rad, clusters):
+        walls = [self.front_wall, self.left_wall, self.right_wall]
+        clusters_without_walls = [c for c in clusters if c not in walls and c is not None]
+        
+        if not clusters_without_walls: 
+            return None
+            
+        best_closest_point = None
+        min_dist = 4.0  # WICHTIG: Wir suchen zwingend das NÄCHSTE Objekt!
+        best_angle_deg = 0.0
+        
+        for cluster in clusters_without_walls:
+            # FILTER 1: Punkte-Anzahl (Mindestens 2, max 25 für nahe Hindernisse)
+            if len(cluster) < 2 or len(cluster) > 25:
+                continue
+                
+            # FILTER 2: Breiten-Filter (WRO-Blöcke sind klein, max 35 cm)
+            c_start = cluster[0]   
+            c_end = cluster[-1]    
+            width = math.hypot(c_start[1] - c_end[1], c_start[2] - c_end[2])
+            if width > 0.35:
+                continue
+
+            angle_deg = self.middle_of_cluster(cluster)
+            if angle_deg is None: continue
+            angle_rad = math.radians(angle_deg)
+            
+            # FILTER 3: Ist das Cluster im 15-Grad-Sichtfeld der Kamera?
+            diff = abs(self.angle_diff(angle_rad, camera_angle_rad))
+            if diff < math.radians(15.0):
+                
+                closest_point = self.get_closest_point_in_cluster(cluster)
+                if closest_point is not None:
+                    dist = closest_point[3]
+                    
+                    # FILTER 4: VORDERGRUND-PRINZIP! (Verhindert das Springen)
+                    # Wir nehmen von allen Clustern im Sichtfeld immer das, das am nächsten ist.
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_closest_point = closest_point
+                        best_angle_deg = angle_deg
+                        
+        # Reparierter Log-Output (Druckt jetzt die echten Werte des Sieger-Clusters!)
+        if best_closest_point is not None:
+            self.get_logger().info(f"MATCH: Kamera {math.degrees(camera_angle_rad):.1f}° -> Lidar {best_angle_deg:.1f}° (Distanz: {min_dist:.2f}m)")
+            return best_closest_point
+            
+        return None
+
+    def middle_of_cluster(self, cluster):
+        """Berechnet den Winkel des Mittelpunktes des Clusters zum Lidar."""
+        sum = 0
+        for c in cluster:
+            sum += c[0]  # Winkel des Punktes
+        return sum / len(cluster)
+
+
+    def angle_diff(self, a, b):
+        """Berechnet den kleinsten Unterschied zwischen zwei Winkeln (Rad)."""
+        # Sorgt dafür, dass der Unterschied auch über die 0/360° Grenze korrekt bleibt
+        return math.atan2(math.sin(a - b), math.cos(a - b))
 
     def process_my_logic(self, point_data):
         # 1. IMMER GANZ OBEN: Den Sammelkorb erstellen, damit er überall in der Funktion existiert!
         marker_array = MarkerArray()
         cmd = Twist()
 
-        self.get_logger().info(f"IMU Winkel: {(self.current_yaw - self.yaw_offset):.1f}°")
+        #self.get_logger().info(f"IMU Winkel: {(self.current_yaw - self.yaw_offset):.1f}°")
             
                             
         innenbande = None
         aussenbande = None
         kandidaten = [None, None, None]
 
+        if self.last_image_msg is None:
+            self.get_logger().info("Warte auf Kamera-Bild...", throttle_duration_sec=1.0)
+            return
+        results = self.image_callback(self.last_image_msg)
+        if results is None: return
+
+        detected_obstacles = []
+
+        for r in results:
+            for box in r.boxes:
+                if float(box.conf[0]) > 0.8:
+                    self.get_logger().info(f'Objekt erkannt: {self.model.names[int(box.cls[0])]} mit Konfidenz {box.conf[0]:.2f}')
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    center_x = (x1 + x2) / 2.0
+
+                    # 1. Nullpunkt in die Mitte des Bildes schieben
+                    # center_x ist 0 (ganz links) bis image_width (ganz rechts)
+                    pixel_from_center = center_x - (self.image_width / 2.0)
+                    
+                    # 2. Pixel in Grad umrechnen (Kamera FOV auf die Breite verteilen)
+                    cam_angle_deg = pixel_from_center * (self.camera_fov / self.image_width)
+                    
+                    # 3. Kalibrierung dazurechnen und in Bogenmaß (Radian) umwandeln
+                    cam_angle_rad = math.radians(cam_angle_deg + self.angle_calibration)
+                    
+                    self.get_logger().info(f'Kamerawinkel: {cam_angle_deg:.1f}° (nach Kalibrierung: {cam_angle_deg + self.angle_calibration:.1f}°)')
+
+                    # Lidar nach diesem Winkel durchsuchen
+                    result = self.get_lidar_distance(cam_angle_rad, self.get_all_clusters_sorted(self.last_point_data))
+
+                    if result is not None:
+                        # result enthält jetzt: (angle_deg, x, y, dist)
+                        _, obj_x, obj_y, obj_dist = result 
+                        class_name = self.model.names[int(box.cls[0])].lower()
+                        
+                        # publish_marker bekommt jetzt direkt die rohen X- und Y-Werte!
+                        self.publish_marker(obj_x, obj_y, class_name, int(box.cls[0]))
+                        
+                        detected_obstacles.append((obj_dist, class_name))
+
+        self.current_obstacle_cmd = "CLEAR"  # Standardmäßig kein Hindernis
+
+        current_min_obs_dist = 999.0
+        if detected_obstacles:
+            # Sortieren nach Distanz (das nächste Objekt kommt auf Index 0)
+            detected_obstacles.sort(key=lambda x: x[0])
+            closest_dist, closest_name = detected_obstacles[0]
+
+            current_min_obs_dist = closest_dist
+
+            # Timing: Sind wir nah genug dran für das Manöver?
+            if closest_dist < self.avoid_trigger_dist:
+                
+                # Nur überschreiben, wenn wir aktuell auf CLEAR (mittig) stehen
+                if self.current_obstacle_cmd == "CLEAR":
+                    if "red" in closest_name:
+                        self.current_obstacle_cmd = "RED"
+                    elif "green" in closest_name:
+                        self.current_obstacle_cmd = "GREEN"
+                        
+                    # HIER: Wir merken uns, in welchem Streckenabschnitt wir das gelockt haben!
+                    self.locked_turn_count = self.turn_count
+                    
+                    self.get_logger().warn(f'+++ SPUR EINGELOGGT: {self.current_obstacle_cmd} ({closest_dist:.2f}m) +++')
+
        
 
         # 2. Punktwolke in Cluster (Wände) aufteilen
         if self.state == 'FOLLOW_LANE':
             total_gedreht = abs(self.current_yaw - self.yaw_offset)
-            if self.turn_count >= self.target_turns or total_gedreht > 1060:  # 1080° = 3 volle Umdrehungen
-                if self.get_closest_point_in_cluster(self.front_wall) is not None and self.get_closest_point_in_cluster(self.front_wall)[3] < 1.80:
-                    self.state = 'STOPPED'
-                    return
+
+            min_total_rotation = self.target_turns * 85.0
+            if self.turn_count >= self.target_turns and total_gedreht >= min_total_rotation:
+                if self.front_wall is not None:
+                    closest_f = self.get_closest_point_in_cluster(self.front_wall)
+                    if closest_f is not None and closest_f[3] < 1.80:
+                        self.state = 'STOPPED'
+                        return
 
             if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
                 self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
@@ -697,19 +999,20 @@ class WallFollower(Node):
             #self.get_logger().info(f"Anzahl cluster {len(all_clusters)}")
             kandidaten = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
 
-            right_wall = kandidaten[2]
+            self.right_wall = kandidaten[2]
             self.front_wall = kandidaten[1]
-            left_wall  = kandidaten[0]
+            self.left_wall  = kandidaten[0]
 
             # Hier war vorher die Wahl der Fahrtrichtung, aber wir haben sie jetzt schon in der Startphase festgelegt.
         
             if self.fahrtrichtung == 'links':
-                innenbande = left_wall
-                aussenbande = right_wall
+                innenbande = self.left_wall
+                aussenbande = self.right_wall
             elif self.fahrtrichtung == 'rechts':
-                innenbande = right_wall
-                aussenbande = left_wall
-        
+                innenbande = self.right_wall
+                aussenbande = self.left_wall
+
+            self.update_avoidance_settings()
             
 
         if self.state in ['TURN_LINKS', 'TURN_RECHTS']:
@@ -717,23 +1020,47 @@ class WallFollower(Node):
             # Während der Kurve tracken wir die Frontwand mit einem dynamischen Suchfenster (ROI)
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             kandidaten = [None, self.front_wall, None]  # Wir haben nur die Frontwand, die wir tracken
-            angle_to_front_wall = self.get_cluster_angle(self.front_wall)
-            self.get_logger().info(f"Tracke Frontwand... Winkel zur Fahrtrichtung: {angle_to_front_wall:.1f}°")
+            
+            # --- 1. DER NEUE NOTFALL-ABBRUCH ---
+            # Steht ein Objekt am Kurvenausgang extrem nah (< 50cm)?
 
-            if abs(angle_to_front_wall) < self.turn_exit_angle or turned_so_far > 95.0:
-                self.get_logger().warn(">>> KURVE FAST FERTIG! Wechsel zurück in FOLLOW_LANE <<<")
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            time_in_turn = current_time - self.turn_start_time
+
+            if current_min_obs_dist < 0.50 and time_in_turn > 1: # Kurven Cooldown für Notfall Abbruch
+                self.get_logger().warn(f">>> NOTFALL-ABBRUCH DER KURVE! Hindernis bei {current_min_obs_dist:.2f}m. <<<")
                 self.state = 'FOLLOW_LANE'
                 self.front_wall = None
                 self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
-
+                
+                # EXTREM WICHTIG: Damit der Speicher im nächsten Frame nicht gelöscht wird,
+                # aktualisieren wir den Lock auf die "neue" Gerade!
+                self.locked_turn_count = self.turn_count
+            
             else:
-                if self.state == 'TURN_LINKS':
-                    cmd.linear.x = self.turn_speed
-                    cmd.angular.z = self.max_turn_angle
+                angle_to_front_wall = self.get_cluster_angle(self.front_wall)
+                self.get_logger().info(f"Tracke Frontwand... Winkel zur Fahrtrichtung: {angle_to_front_wall:.1f}°")
+
+                if abs(angle_to_front_wall) < self.turn_exit_angle or turned_so_far > 95.0:
+                    self.get_logger().warn(">>> KURVE FAST FERTIG! Wechsel zurück in FOLLOW_LANE <<<")
+                    self.state = 'FOLLOW_LANE'
+                    self.front_wall = None
+                    if turned_so_far > 45.0:
+                        self.get_logger().warn(">>> KURVE NORMAL FERTIG! Wechsel zurück in FOLLOW_LANE <<<")
+                        self.turn_count += 1
+                    else:
+                        self.get_logger().warn(f">>> FAKE-KURVE ERKANNT ({turned_so_far:.1f}°). Zähler ignoriert! <<<")
+                        
+                    self.start_straight_yaw = self.current_yaw
+
                 else:
-                    cmd.linear.x = self.turn_speed
-                    cmd.angular.z = -self.max_turn_angle
+                    if self.state == 'TURN_LINKS':
+                        cmd.linear.x = self.turn_speed
+                        cmd.angular.z = self.max_turn_angle
+                    else:
+                        cmd.linear.x = self.turn_speed
+                        cmd.angular.z = -self.max_turn_angle
 
         elif self.state == 'STOPPED':
             cmd.linear.x = 0.0
@@ -755,15 +1082,15 @@ class WallFollower(Node):
             #self.get_logger().info(f"Anzahl cluster {len(all_clusters)}")
             kandidaten = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
 
-            right_wall = kandidaten[2]
+            self.right_wall = kandidaten[2]
             self.front_wall = kandidaten[1]
-            left_wall  = kandidaten[0]
+            self.left_wall  = kandidaten[0]
             if self.fahrtrichtung is None:
             # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
-                if left_wall and right_wall:
+                if self.left_wall and self.right_wall:
                     # Echte physikalische Länge in Metern berechnen (Satz des Pythagoras)
-                    left_len = math.hypot(left_wall[0][1] - left_wall[-1][1], left_wall[0][2] - left_wall[-1][2])
-                    right_len = math.hypot(right_wall[0][1] - right_wall[-1][1], right_wall[0][2] - right_wall[-1][2])
+                    left_len = math.hypot(self.left_wall[0][1] - self.left_wall[-1][1], self.left_wall[0][2] - self.left_wall[-1][2])
+                    right_len = math.hypot(self.right_wall[0][1] - self.right_wall[-1][1], self.right_wall[0][2] - self.right_wall[-1][2])
                     
                     self.get_logger().info(f"Scanne Strecke... Länge Links: {left_len:.2f}m, Länge Rechts: {right_len:.2f}m")
                     
@@ -794,9 +1121,15 @@ class WallFollower(Node):
         # ==========================================
         # PFADPLANUNG, PID & STATE MACHINE 
         # ==========================================
+        if self.current_obstacle_cmd != "CLEAR" and self.turn_count > self.locked_turn_count:
+            self.current_obstacle_cmd = "CLEAR"
+            self.get_logger().warn(">>> KURVE BEENDET: Ausweich-Speicher gelöscht, fahre wieder mittig! <<<")
+
+        self.update_avoidance_settings()
+
         
         target_x, target_y = self.get_target_point(innenbande, aussenbande)
-        
+
         # Twist-Nachricht für den ESP initialisieren
         
         # --- ZUSTAND 1: GERADEAUS FAHREN ---
@@ -817,6 +1150,8 @@ class WallFollower(Node):
                     # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
                     self.prev_error = 0.0
                     self.integral_error = 0.0
+
+                    self.turn_start_time = self.get_clock().now().nanoseconds / 1e9
                 else:
                     if front_dist < 1.30:
                         self.get_logger().info(f"Warte auf Ecke... (Innenbande ragt noch {max_y_innen:.2f}m nach vorne)")
