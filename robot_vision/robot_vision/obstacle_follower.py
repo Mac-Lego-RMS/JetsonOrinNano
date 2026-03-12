@@ -82,9 +82,13 @@ class WallFollower(Node):
         self.prev_error = 0.0
         self.integral_error = 0.0
         
+        # --- KURVEN PID-REGLER PARAMETER ---
+        self.turn_kp = 1.0  # Aggressiveres Lenken in der Kurve
+        self.turn_kd = 0.0  # Dämpfung in der Kurve (kann höher sein als auf der Geraden)
+        
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 450.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 450.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 250.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 250.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -289,7 +293,7 @@ class WallFollower(Node):
             diff_r_l = get_angle_diff(angles[0], angles[2])
 
             if diff_r_f > 70 and diff_f_l > 70 and diff_r_l < 10:
-                self.get_logger().info("Perfektes U-Profil gefunden!")
+                #self.get_logger().info("Perfektes U-Profil gefunden!")
                 self.last_u_profil = [list(c) for c in ordered]  # Als Kopie speichern
                 return ordered
 
@@ -663,60 +667,69 @@ class WallFollower(Node):
 
         return validated_clusters
 
+    def _get_x_at_y(self, wall, y_coord):
+        if not wall: return None
+        angle = self.get_cluster_angle(wall)
+        if angle is None: return None
+        
+        mean_x = sum(p[1] for p in wall) / len(wall)
+        mean_y = sum(p[2] for p in wall) / len(wall)
+        
+        angle_rad = math.radians(angle)
+        # Verhindere Division durch Null bei fast senkrechten Wänden
+        if abs(math.cos(angle_rad)) < 1e-6:
+            return mean_x
+
+        # tan(angle) = dx/dy -> dx = dy * tan(angle)
+        # Wichtig: Winkel ist relativ zur Y-Achse, daher tan(angle_rad)
+        dy = y_coord - mean_y
+        return mean_x + (dy * math.tan(angle_rad))
+
     def get_target_point(self, innenbande, aussenbande):
         """
         Berechnet den Zielpunkt (Karotte) im perfekten Verhältnis zur Innenbande.
         Mit absolutem Mindestabstand (Kraftfeld-Logik).
-        Diese Funktion ist "kugelsicher": Wenn eine Bande verloren geht, wird die Position
-        anhand der verbleibenden Bande und der bekannten Spurbreite (1m) berechnet.
         """
         target_y = self.lookahead_dist  
         target_x = 0.0                  
 
-        def get_x_at_y(wall, y_coord):
-            if not wall: return None
-            angle = self.get_cluster_angle(wall)
-            if angle is None: return None
-            
-            mean_x = sum(p[1] for p in wall) / len(wall)
-            mean_y = sum(p[2] for p in wall) / len(wall)
-            
-            angle_rad = math.radians(angle)
-            # Verhindere Division durch Null bei fast senkrechten Wänden
-            if abs(math.cos(angle_rad)) < 1e-6:
-                return mean_x
-
-            # tan(angle) = dx/dy -> dx = dy * tan(angle)
-            # Wichtig: Winkel ist relativ zur Y-Achse, daher tan(angle_rad)
-            dy = y_coord - mean_y
-            return mean_x + (dy * math.tan(angle_rad))
-
-        # --- Positionen der Banden auf Höhe der Karotte berechnen ---
-        x_innen_proj = get_x_at_y(innenbande, target_y)
-        x_aussen_proj = get_x_at_y(aussenbande, target_y)
 
         # --- "WAND-KUSCHLER"-LOGIK bei Hindernissen ---
         # Wenn wir ausweichen, ignorieren wir die Bande, auf deren Seite das Hindernis ist,
         # um eine Verfälschung der Spurbreite zu verhindern.
-        is_avoiding = self.current_obstacle_cmd != "CLEAR"
-        if is_avoiding:
-            if self.lane_ratio < 0.5: # Ausweichen zur Innenbande
-                self.get_logger().info("Ausweichen: Ignoriere Außenbande.", throttle_duration_sec=2.0)
-                x_aussen_proj = None # Ignoriere Außenbande
-            else: # Ausweichen zur Außenbande
-                self.get_logger().info("Ausweichen: Ignoriere Innenbande.", throttle_duration_sec=2.0)
-                x_innen_proj = None # Ignoriere Innenbande
+
+        # --- Positionen der Banden auf Höhe der Karotte berechnen ---
+        x_innen_proj = self._get_x_at_y(innenbande, target_y)
+        x_aussen_proj = self._get_x_at_y(aussenbande, target_y)
+
+        if self.current_obstacle_cmd != "CLEAR":
+            if self.current_obstacle_cmd == "GREEN": # Ausweichen zur Innenbande
+                if self.fahrtrichtung == 'links': # Hindernis auf der Außenbande (rechts)
+                    self.get_logger().info("Ausweichen: Ignoriere Außenbande.", throttle_duration_sec=2.0)
+                    x_aussen_proj = None # Ignoriere Außenbande
+                else: # Fahrtrichtung "rechts"
+                    self.get_logger().info("Ausweichen: Ignoriere Innenbande.", throttle_duration_sec=2.0)
+                    x_innen_proj = None # Ignoriere Innenbande
+            else: # current_obstacle_cmd == "RED"
+                if self.fahrtrichtung == 'links': # Hindernis auf der Innenbande (links)
+                    self.get_logger().info("Ausweichen: Ignoriere Innenbande.", throttle_duration_sec=2.0)
+                    x_innen_proj = None # Ignoriere Innenbande
+                else: # Fahrtrichtung "rechts"
+                    self.get_logger().info("Ausweichen: Ignoriere Außenbande.", throttle_duration_sec=2.0)
+                    x_aussen_proj = None # Ignoriere Außenbande
+
+
 
         # --- FALL 1: BEIDE BANDEN SIND SICHTBAR (Höchste Präzision) ---
         if x_innen_proj is not None and x_aussen_proj is not None:
             self.get_logger().info("Banden-Logik: Nutze beide Banden.", throttle_duration_sec=2.0)
-            lane_width = abs(x_aussen_proj - x_innen_proj)
+            lane_width = 1.0
             
             # Sicherheitscheck: Wenn die Banden unrealistisch weit (>1.3m) oder nah (<0.7m) sind,
             # vertraue der Breiten-Annahme mehr als den Sensordaten.
-            if not (0.7 < lane_width < 1.3):
+            '''if not (0.7 < lane_width < 1.3):
                 self.get_logger().warn(f"Unrealistische Spurbreite ({lane_width:.2f}m)! Nutze assumed_lane_width.")
-                lane_width = self.assumed_lane_width
+                lane_width = self.assumed_lane_width'''
 
             if self.fahrtrichtung == 'links': # Innenbande links
                 target_x = x_innen_proj + (lane_width * self.lane_ratio)
@@ -724,45 +737,27 @@ class WallFollower(Node):
                 target_x = x_innen_proj - (lane_width * self.lane_ratio)
 
         # --- FALL 2: NUR INNENBANDE SICHTBAR ---
-        elif x_innen_proj is not None:
+        elif x_innen_proj is not None: #0.2
             self.get_logger().info("Banden-Logik: Nur Innenbande sichtbar.", throttle_duration_sec=2.0)
             if self.fahrtrichtung == 'links': # Innenbande links
-                target_x = x_innen_proj + (self.assumed_lane_width * self.lane_ratio)
+                target_x = x_innen_proj + self.lane_ratio
             else: # Innenbande rechts
-                target_x = x_innen_proj - (self.assumed_lane_width * self.lane_ratio)
+                target_x = x_innen_proj - self.lane_ratio
 
         # --- FALL 3: NUR AUSSENBANDE SICHTBAR ---
-        elif x_aussen_proj is not None:
+        elif x_aussen_proj is not None: # 0.85
             self.get_logger().info("Banden-Logik: Nur Außenbande sichtbar.", throttle_duration_sec=2.0)
             inv_ratio = 1.0 - self.lane_ratio 
             if self.fahrtrichtung == 'links': # Außenbande rechts
-                target_x = x_aussen_proj - (self.assumed_lane_width * inv_ratio)
+                target_x = x_aussen_proj - inv_ratio
             else: # Außenbande links
-                target_x = x_aussen_proj + (self.assumed_lane_width * inv_ratio)
+                target_x = x_aussen_proj + inv_ratio
         
         # --- FALL 4: KEINE BANDE SICHTBAR (Notfall) ---
         else:
             #self.get_logger().error("Keine Seitenbanden für Pfadplanung sichtbar! Halte Kurs.")
             target_x = 0.0
 
-        # ==========================================
-        # KRAFTFELD (MINDESTABSTAND ZU ALLEN SEITEN ERZWINGEN)
-        # ==========================================
-        if x_innen_proj is not None:
-            if self.fahrtrichtung == 'links': # Innenbande links
-                if target_x < x_innen_proj + self.min_wall_dist:
-                    target_x = x_innen_proj + self.min_wall_dist
-            else: # Innenbande rechts
-                if target_x > x_innen_proj - self.min_wall_dist:
-                    target_x = x_innen_proj - self.min_wall_dist
-        
-        if x_aussen_proj is not None:
-            if self.fahrtrichtung == 'links': # Außenbande rechts
-                if target_x > x_aussen_proj - self.min_wall_dist:
-                    target_x = x_aussen_proj - self.min_wall_dist
-            else: # Außenbande links
-                if target_x < x_aussen_proj + self.min_wall_dist:
-                    target_x = x_aussen_proj + self.min_wall_dist
 
         return (target_x, target_y)
 
@@ -853,18 +848,18 @@ class WallFollower(Node):
         if self.fahrtrichtung == 'links': # Innenbande links
             if self.current_obstacle_cmd == "RED":       # (Vorher AVOID_RIGHT) Rechts vorbei
                 self.lane_ratio = 0.85
-                self.max_turn_angle = 0.635 # Weite Kurve (Außen)
+                #self.max_turn_angle = 0.635 # Weite Kurve (Außen)
             elif self.current_obstacle_cmd == "GREEN":   # (Vorher AVOID_LEFT) Links vorbei
                 self.lane_ratio = 0.20
-                self.max_turn_angle = 0.800 # Enge Kurve (Innen)
+                #self.max_turn_angle = 0.800 # Enge Kurve (Innen)
 
         elif self.fahrtrichtung == 'rechts': # Innenbande rechts
             if self.current_obstacle_cmd == "RED":       # (Vorher AVOID_RIGHT) Rechts vorbei
                 self.lane_ratio = 0.20
-                self.max_turn_angle = 0.800 # Enge Kurve (Innen)
+                #self.max_turn_angle = 0.800 # Enge Kurve (Innen)
             elif self.current_obstacle_cmd == "GREEN":   # (Vorher AVOID_LEFT) Links vorbei
                 self.lane_ratio = 0.85  
-                self.max_turn_angle = 0.635 # Weite Kurve (Außen)
+                #self.max_turn_angle = 0.635 # Weite Kurve (Außen)
 
     # -----------------------
     # --- YOLO - Function ---
@@ -1108,14 +1103,33 @@ class WallFollower(Node):
                         self.get_logger().warn(f">>> FAKE-KURVE ERKANNT ({turned_so_far:.1f}°). Zähler ignoriert! <<<")
                         
                     self.start_straight_yaw = self.current_yaw
-
                 else:
-                    if self.state == 'TURN_LINKS':
-                        cmd.linear.x = self.turn_speed
-                        cmd.angular.z = self.max_turn_angle
-                    else:
-                        cmd.linear.x = self.turn_speed
-                        cmd.angular.z = -self.max_turn_angle
+                    # --- NEU: Aktive Pfadplanung in der Kurve ---
+                    target_y = 0.30  # Kürzerer Vorausschauen in der Kurve
+                    turn_offset = 1.0 - self.lane_ratio     # Zielabstand zur Frontwand (ca. Mitte der nächsten Spur)
+
+                    target_x = 0.0
+                    if self.front_wall:
+                        x_front_proj = self._get_x_at_y(self.front_wall, target_y)
+                        if x_front_proj is not None:
+                            if self.state == 'TURN_RECHTS':
+                                # Frontwand ist links, wir wollen rechts davon sein
+                                target_x = x_front_proj + turn_offset
+                            else: # TURN_LINKS
+                                # Frontwand ist rechts, wir wollen links davon sein
+                                target_x = x_front_proj - turn_offset
+                    
+                    # PID-Regler für die Kurve (gleiche Logik wie auf der Geraden)
+                    error = target_x
+                    derivative = error - self.prev_error
+                    self.prev_error = error
+                    steering_cmd = (self.turn_kp * error) + (self.turn_kd * derivative)
+                    steering_cmd = max(-1.0, min(1.0, steering_cmd))
+                    
+                    cmd.linear.x = self.turn_speed
+                    cmd.angular.z = float(steering_cmd)
+                    
+                    self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(1.0, 0.0, 1.0)) # Magenta Karotte
 
         elif self.state == 'STOPPED':
             cmd.linear.x = 0.0
@@ -1192,12 +1206,11 @@ class WallFollower(Node):
             # Standard ist 1.20m (Früh abbiegen für Innenbahn)
             turn_entry_dist = 1.20 
 
-            if self.current_obstacle_cmd != "CLEAR":
+            ''' if self.current_obstacle_cmd != "CLEAR":
                 # Rechtsrum + ROT (Außenbahn) oder Linksrum + GRÜN (Außenbahn) = LATE TURN
-                if (self.fahrtrichtung == 'rechts' and self.current_obstacle_cmd == "RED") or \
-                   (self.fahrtrichtung == 'links' and self.current_obstacle_cmd == "GREEN"):
+                if (self.fahrtrichtung == 'rechts' and self.current_obstacle_cmd == "RED") or (self.fahrtrichtung == 'links' and self.current_obstacle_cmd == "GREEN"):
                     turn_entry_dist = 0.75 # Erst sehr spät abbiegen
-                    self.get_logger().info("Strategie: LATE TURN (Warte auf 0.75m)", throttle_duration_sec=1.0)
+                    self.get_logger().info("Strategie: LATE TURN (Warte auf 0.75m)", throttle_duration_sec=1.0)'''
 
 
             # --- WECHSEL-BEDINGUNG 1: Standard-Kurve (Frontwand nah, Innenbande kurz) ---
@@ -1271,6 +1284,7 @@ class WallFollower(Node):
                 # BEFEHLE AN ESP SETZEN
                 cmd.linear.x = self.base_speed
                 cmd.angular.z = float(steering_cmd)
+                self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
 
         # --- ZUSTAND 2: LINKSKURVE ---
         elif self.state == 'TURN_LINKS':
@@ -1285,16 +1299,9 @@ class WallFollower(Node):
         
         # Befehle an den ESP senden! (Erstmal aufgebockt testen!)
         self.pub_cmd_vel.publish(cmd)
-        
-        if self.state == 'FOLLOW_LANE':
-            self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
-        else:
+
+        if self.state not in ['FOLLOW_LANE', 'TURN_LINKS', 'TURN_RECHTS']:
             self.delete_marker(marker_array, 99, ns="target")
-
-
-
-
-
 
 
         # Feste Farben: Rechts=Rot, Front=Grün, Links=Blau
