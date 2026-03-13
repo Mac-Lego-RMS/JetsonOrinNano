@@ -56,20 +56,19 @@ class WallFollower(Node):
         self.left_wall = None
         self.right_wall = None
         
-        # Karotten-Parameter
-        self.lookahead_dist = 0.60    # Wie weit schaut der Roboter voraus? (60 cm)
+        # Karotten-Parameter Geradeausfahrt
+        self.lookahead_dist_straight = 0.60    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.10       
 
         self.lane_ratio = 0.85       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
         self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
         self.turn_exit_angle = 25
-        self.max_wall_lenght_for_turn = 0.10
+        self.max_wall_lenght_for_turn = 0.25
 
         # Object Detection Parameter
-        self.sub_cmd = self.create_subscription(String, '/obstacle_cmd', self.cmd_callback, 10)
         self.current_obstacle_cmd = "CLEAR"
 
-        # Standard-Werte für die Ideallinie (z.B. Außenbahn)
+        # Standard-Werte für die Ideallinie auf der Geraden(z.B. Außenbahn)
         self.default_lane_ratio = 0.85 
         self.default_max_turn = 0.635
         
@@ -81,14 +80,18 @@ class WallFollower(Node):
         
         self.prev_error = 0.0
         self.integral_error = 0.0
-        
-        # --- KURVEN PID-REGLER PARAMETER ---
-        self.turn_kp = 1.0  # Aggressiveres Lenken in der Kurve
-        self.turn_kd = 0.0  # Dämpfung in der Kurve (kann höher sein als auf der Geraden)
-        
+
+        # Karotten-Parameter Kurve
+        self.lookahead_dist_turn = 0.25
+
+        # --- TURN PID-REGLER PARAMETER ---
+        self.turn_kp = 1.0
+        self.turn_kd = 0.0
+        self.turn_ki = 0.0
+
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 250.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 250.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 450.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 450.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -135,8 +138,6 @@ class WallFollower(Node):
         self.get_logger().info('YOLO Lidar Fusion Node gestartet.')
 
         self.turn_start_time = 0.0
-
-        self.last_u_profil =[None, None, None] # Speichert die letzten validierten U-Profile (Rechts, Front, Links)
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -186,9 +187,6 @@ class WallFollower(Node):
             
         marker.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
         self.marker_pub.publish(marker)
-    
-    def cmd_callback(self, msg):
-        self.current_obstacle_cmd = msg.data
 
     def imu_callback(self, msg):
         """
@@ -271,90 +269,178 @@ class WallFollower(Node):
         marker.color.a = 1.0
         marker_array.markers.append(marker)
     
-    def validate_clusters(self, clusters):
-        # Hilfsfunktion, um den kleinsten Schnittwinkel zwischen zwei Geraden zu finden (0-90°)
-        def get_angle_diff(a1, a2):
-            diff = abs(a1 - a2) % 180
-            return min(diff, 180 - diff)
-
-        # --- PHASE 1: Suche nach einem perfekten U-Profil mit 3 Clustern ---
-        temp_clusters = [c for c in clusters]  # Arbeitskopie
-        while len(temp_clusters) >= 3:
-            ordered = self.sort_clusters_right_to_left(temp_clusters[:3])
+    def validate_clusters_straight(self, clusters):
+        # Wir nutzen while, da sich die Liste verkleinern kann
+        while len(clusters) >= 3:
+            
+            # 1. Die aktuell größten 3 nehmen und von rechts nach links sortieren
+            ordered = self.sort_clusters_right_to_left(clusters[:3])
+            
+            # 2. Winkel berechnen
             angles = [self.get_cluster_angle(c) for c in ordered]
 
             if any(angle is None for angle in angles):
-                bad_idx = angles.index(None)
-                temp_clusters.remove(ordered[bad_idx])
+                self.get_logger().warn("Fehler bei der Winkelberechnung. Überspringe...")
+                return [None, None, None]
+
+            # --- HILFSFUNKTION FÜR WINKEL-DIFFERENZ ---
+            # Berechnet den kleinsten Schnittwinkel zwischen zwei Geraden (0° bis 90°)
+            def get_angle_diff(a1, a2):
+                diff = abs(a1 - a2) % 180
+                if diff > 90:
+                    diff = 180 - diff
+                return diff
+
+            # Differenzen berechnen (0=Rechts, 1=Front, 2=Links)
+            diff_0_1 = get_angle_diff(angles[0], angles[1]) # Sollte ~90° sein (orthogonal)
+            diff_1_2 = get_angle_diff(angles[1], angles[2]) # Sollte ~90° sein (orthogonal)
+            diff_0_2 = get_angle_diff(angles[0], angles[2]) # Sollte ~0° sein (parallel)
+
+            # --- ÜBERPRÜFUNG ---
+            # Toleranz: Wir erlauben bis zu 20° Abweichung von der perfekten Geometrie
+            
+            # Check A: Sind Rechts und Front orthogonal? (Differenz sollte > 70° sein)
+            if diff_0_1 < 70:
+                self.get_logger().warn(f"Rechts und Front nicht orthogonal! Diff: {diff_0_1:.1f}°")
+                # Finde das kleinere der beiden Cluster in 'ordered' und lösche es aus 'clusters'
+                if len(ordered[0]) < len(ordered[1]):
+                    clusters.remove(ordered[0])
+                else:
+                    clusters.remove(ordered[1])
+                continue # Schleife sofort mit der bereinigten Liste neu starten
+
+            # Check B: Sind Front und Links orthogonal?
+            elif diff_1_2 < 70:
+                self.get_logger().warn(f"Front und Links nicht orthogonal! Diff: {diff_1_2:.1f}°")
+                if len(ordered[1]) < len(ordered[2]):
+                    clusters.remove(ordered[1])
+                else:
+                    clusters.remove(ordered[2])
                 continue
 
-            diff_r_f = get_angle_diff(angles[0], angles[1])
-            diff_f_l = get_angle_diff(angles[1], angles[2])
-            diff_r_l = get_angle_diff(angles[0], angles[2])
+            # Check C: Sind Rechts und Links parallel? (Differenz sollte < 20° sein)
+            elif diff_0_2 > 10:
+                self.get_logger().warn(f"Rechts und Links nicht parallel! Diff: {diff_0_2:.1f}°")
+                if len(ordered[0]) < len(ordered[2]):
+                    clusters.remove(ordered[0])
+                else:
+                    clusters.remove(ordered[2])
+                continue
 
-            if diff_r_f > 70 and diff_f_l > 70 and diff_r_l < 10:
-                #self.get_logger().info("Perfektes U-Profil gefunden!")
-                self.last_u_profil = [list(c) for c in ordered]  # Als Kopie speichern
-                return ordered
-
-            # Wenn kein perfektes U, das fehlerhafteste Cluster entfernen und erneut versuchen
-            if diff_r_f <= 70: temp_clusters.remove(ordered[0] if len(ordered[0]) < len(ordered[1]) else ordered[1])
-            elif diff_f_l <= 70: temp_clusters.remove(ordered[1] if len(ordered[1]) < len(ordered[2]) else ordered[2])
-            elif diff_r_l >= 10: temp_clusters.remove(ordered[0] if len(ordered[0]) < len(ordered[2]) else ordered[2])
-            else: break # Sollte nicht passieren, aber zur Sicherheit
-
-        # --- PHASE 2: Rettungsversuch, wenn nur 2 Cluster übrig sind ---
-        if len(clusters) >= 2 and self.last_u_profil[0] is not None:
-            self.get_logger().warn(f"Nur {len(clusters)} Cluster. Starte Rettungsversuch mit letztem Profil...")
+            # --- ERFOLG ---
             
-            new_profile = [None, None, None]
-            unmatched_current = self.sort_clusters_right_to_left(clusters[:2])
-            
-            # Gehe die Slots des LETZTEN Profils durch (0=Rechts, 1=Front, 2=Links)
-            for i, last_wall in enumerate(self.last_u_profil):
-                if last_wall is None: continue
-
-                last_angle = self.get_cluster_angle(last_wall)
-                if last_angle is None: continue
-
-                last_mean_x = sum(p[1] for p in last_wall) / len(last_wall)
-                last_mean_y = sum(p[2] for p in last_wall) / len(last_wall)
-
-                best_match, min_score = None, float('inf')
-
-                # Finde den besten Partner in den aktuellen Clustern
-                for current_wall in unmatched_current:
-                    current_angle = self.get_cluster_angle(current_wall)
-                    if current_angle is None: continue
-                    
-                    current_mean_x = sum(p[1] for p in current_wall) / len(current_wall)
-                    current_mean_y = sum(p[2] for p in current_wall) / len(current_wall)
-
-                    angle_similarity = get_angle_diff(last_angle, current_angle)
-                    pos_similarity = math.hypot(current_mean_x - last_mean_x, current_mean_y - last_mean_y)
-                    
-                    score = angle_similarity + pos_similarity * 20
-
-                    if angle_similarity < 25 and pos_similarity < 0.40 and score < min_score:
-                        min_score = score
-                        best_match = current_wall
-                
-                if best_match is not None:
-                    new_profile[i] = best_match
-                    unmatched_current.remove(best_match)
-                    self.get_logger().info(f"Match gefunden: Alte Wand {i} -> Neue Wand (Score: {min_score:.2f})")
-
-            if any(c is not None for c in new_profile):
-                self.get_logger().info(f"Rettungsergebnis: {[c is not None for c in new_profile]}")
-                # Aktualisiere das letzte Profil nur mit den neu gefundenen Teilen
-                for i in range(3):
-                    if new_profile[i] is not None:
-                        self.last_u_profil[i] = new_profile[i]
-                return new_profile
-        
-        # --- PHASE 3: Totalausfall ---
-        self.get_logger().error(f"U-Profil Validierung komplett fehlgeschlagen. {len(clusters)} Cluster übrig.")
+            # Gibt exakt zugeordnet zurück: (Rechte Bande, Frontwand, Linke Bande)
+            return ordered
+        # Wenn die Schleife abbricht (Liste hat weniger als 3 Cluster)
+        self.get_logger().warn(f"Kein gültiges U-Profil gefunden. Nur noch {len(clusters)} Cluster übrig.")
         return [None, None, None]
+    
+
+    def validate_clusters_turn(self, front_wall, point_data):
+        '''Überprüft die Cluster in der Kurve. Es muss eine Frontwand geben, aber die Banden können auch fehlen (z.B. bei der ersten Kurve).
+        Gibt die Cluster von rechts nach links zurück mit der Reihenfolge: [Rechte Bande, Frontwand, Linke Bande]. Fehlende Banden werden mit None ersetzt.'''
+
+        if front_wall is None:
+            self.get_logger().warn("Keine Frontwand gefunden. Kann Kurvenprofil nicht validieren.")
+            return [None, None, None]
+
+        all_clusters = self.get_all_clusters_sorted(point_data)
+        clusters = self.get_unshadowed_leftovers(all_clusters, [front_wall])
+        clusters.append(front_wall) # Wir fügen die Frontwand wieder hinzu, damit sie in der Sortierung berücksichtigt wird
+
+        if len(clusters) >= 2:
+            minimal_cluster_size = 15
+            ordered = self.sort_clusters_right_to_left(clusters)
+
+            u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
+            if front_wall in ordered:
+                u_profile[1] = front_wall
+                fw_index = ordered.index(front_wall)
+            else: 
+                self.get_logger().warn("Frontwand nicht in den Clustern gefunden. Kann Kurvenprofil nicht validieren.")
+                return [None, None, None]
+                
+            # Der Cluster LINKS von der Frontwand hat einen KLEINEREN Index
+            while u_profile[0] is None and fw_index > 0:
+                if len(ordered[fw_index - 1]) > minimal_cluster_size:
+                    u_profile[0] = ordered[fw_index - 1]
+                    self.get_logger().info(f"Cluster links von der Frontwand gefunden. Größe: {len(ordered[fw_index - 1])} Punkte.")
+                else: 
+                    ordered.pop(fw_index - 1)
+                    fw_index -= 1
+
+            # Der Cluster RECHTS von der Frontwand hat einen GRÖSSEREN Index
+            while u_profile[2] is None and fw_index < len(ordered) - 1:
+                if len(ordered[fw_index + 1]) > minimal_cluster_size:
+                    u_profile[2] = ordered[fw_index + 1]
+                    self.get_logger().info(f"Cluster rechts von der Frontwand gefunden. Größe: {len(ordered[fw_index + 1])} Punkte.")
+                else: 
+                    ordered.pop(fw_index + 1)
+
+            angles = [self.get_cluster_angle(c) for c in u_profile]
+            if angles[1] is None:
+                self.get_logger().warn("Fehler bei der Winkelberechnung der Frontwand. Überspringe...")
+                return [None, None, None]
+
+            # --- HILFSFUNKTION FÜR WINKEL-DIFFERENZ ---
+            # Berechnet den kleinsten Schnittwinkel zwischen zwei Geraden (0° bis 90°)
+            def get_angle_diff(a1, a2):
+                    diff = abs(a1 - a2) % 180
+                    if diff > 90:
+                        diff = 180 - diff
+                    return diff
+
+                # Differenzen berechnen (0=Rechts, 1=Front, 2=Links)
+            if angles[0] is not None:
+                diff_0_1 = get_angle_diff(angles[0], angles[1]) # Sollte ~90° sein (orthogonal)
+            else: 
+                diff_0_1 = None
+            if angles[2] is not None:
+                diff_1_2 = get_angle_diff(angles[1], angles[2]) # Sollte ~90° sein (orthogonal)
+            else:
+                diff_1_2 = None
+            if angles[0] is not None and angles[2] is not None:
+                diff_0_2 = get_angle_diff(angles[0], angles[2]) # Sollte ~0° sein (parallel)
+            else:
+                diff_0_2 = None
+
+
+                # --- ÜBERPRÜFUNG ---
+                # Toleranz: Wir erlauben bis zu 20° Abweichung von der perfekten Geometrie
+                
+                # Check A: Sind Rechts und Front orthogonal? (Differenz sollte > 70° sein)
+            if diff_0_1 is not None and diff_0_1 < 70:
+                self.get_logger().warn(f"Rechts und Front nicht orthogonal! Diff: {diff_0_1:.1f}°")
+                u_profile[0] = None
+
+
+                # Check B: Sind Front und Links orthogonal?
+            elif diff_1_2 is not None and diff_1_2 < 70:
+                self.get_logger().warn(f"Front und Links nicht orthogonal! Diff: {diff_1_2:.1f}°")
+                u_profile[2] = None
+
+                # Check C: Sind Rechts und Links parallel? (Differenz sollte < 20° sein)
+            elif diff_0_2 is not None and diff_0_2 > 15:
+                self.get_logger().warn(f"Rechts und Links nicht parallel! Diff: {diff_0_2:.1f}°")
+                return [None, front_wall, None]
+            
+            else:
+                wall_dist = self.get_closest_point_in_cluster(u_profile[0])[3] + self.get_closest_point_in_cluster(u_profile[2])[3] if u_profile[0] and u_profile[2] else None
+                if wall_dist is None:
+                    return
+                if wall_dist < 2.0:
+                    self.get_logger().warn("Beide Seitenwände zu nah beieinander! Wahrscheinlich falsche Erkennung. Ignoriere Innenbanden.")
+                    if self.fahrtrichtung == "links":
+                        u_profile[2] = None
+                        return self.merge_clusters(clusters, u_profile)
+                    else:
+                        u_profile[0] = None
+                        return self.merge_clusters(clusters, u_profile)
+                else:
+                    return 
+
+            return self.merge_clusters(clusters, u_profile)
+        return [None, front_wall, None]
     
     def sort_clusters_right_to_left(self, clusters):
         """
@@ -606,7 +692,7 @@ class WallFollower(Node):
         Versucht, benachbarte Cluster zu einem einzigen Cluster zu verschmelzen.
         Nutzt den Normalenvektor, um nur den senkrechten Abstand (Offset) zu prüfen.
         """
-        max_distance_gap = 0.30  # 5 cm maximaler seitlicher Versatz
+        max_distance_gap = 0.10  # 5 cm maximaler seitlicher Versatz
         max_angle_gap = 5.0      # 5 Grad maximale Winkelabweichung
 
         remaining_clusters = [c for c in all_clusters if c not in validated_clusters]
@@ -667,101 +753,116 @@ class WallFollower(Node):
 
         return validated_clusters
 
-    def _get_x_at_y(self, wall, y_coord):
-        if not wall: return None
-        angle = self.get_cluster_angle(wall)
-        if angle is None: return None
-        
-        mean_x = sum(p[1] for p in wall) / len(wall)
-        mean_y = sum(p[2] for p in wall) / len(wall)
-        
-        angle_rad = math.radians(angle)
-        # Verhindere Division durch Null bei fast senkrechten Wänden
-        if abs(math.cos(angle_rad)) < 1e-6:
-            return mean_x
-
-        # tan(angle) = dx/dy -> dx = dy * tan(angle)
-        # Wichtig: Winkel ist relativ zur Y-Achse, daher tan(angle_rad)
-        dy = y_coord - mean_y
-        return mean_x + (dy * math.tan(angle_rad))
-
-    def get_target_point(self, innenbande, aussenbande):
+    def get_target_point_straight(self, innenbande, aussenbande):
         """
         Berechnet den Zielpunkt (Karotte) im perfekten Verhältnis zur Innenbande.
         Mit absolutem Mindestabstand (Kraftfeld-Logik).
         """
-        target_y = self.lookahead_dist  
+        target_y = self.lookahead_dist_straight  
         target_x = 0.0                  
 
+        def get_x_at_y(wall, target_y):
+            angle = self.get_cluster_angle(wall)
+            mean_x = sum(p[1] for p in wall) / len(wall)
+            mean_y = sum(p[2] for p in wall) / len(wall)
+            if angle is None: return mean_x
+            angle_rad = math.radians(angle)
+            dy = target_y - mean_y
+            return mean_x + (dy * math.tan(angle_rad))
 
-        # --- "WAND-KUSCHLER"-LOGIK bei Hindernissen ---
-        # Wenn wir ausweichen, ignorieren wir die Bande, auf deren Seite das Hindernis ist,
-        # um eine Verfälschung der Spurbreite zu verhindern.
-
-        # --- Positionen der Banden auf Höhe der Karotte berechnen ---
-        x_innen_proj = self._get_x_at_y(innenbande, target_y)
-        x_aussen_proj = self._get_x_at_y(aussenbande, target_y)
-
+        # ==========================================
+        # NEU: DER "WAND-KUSCHLER" FIX (Single-Wall Tracking)
+        # ==========================================
+        # Wenn wir einem Hindernis ausweichen, verlassen wir uns NUR noch auf 
+        # die Bande, an der wir gerade entlangfahren. Das verhindert, dass 
+        # das passierte Hindernis die Spurbreiten-Rechnung zerschießt!
         if self.current_obstacle_cmd != "CLEAR":
-            if self.current_obstacle_cmd == "GREEN": # Ausweichen zur Innenbande
-                if self.fahrtrichtung == 'links': # Hindernis auf der Außenbande (rechts)
-                    self.get_logger().info("Ausweichen: Ignoriere Außenbande.", throttle_duration_sec=2.0)
-                    x_aussen_proj = None # Ignoriere Außenbande
-                else: # Fahrtrichtung "rechts"
-                    self.get_logger().info("Ausweichen: Ignoriere Innenbande.", throttle_duration_sec=2.0)
-                    x_innen_proj = None # Ignoriere Innenbande
-            else: # current_obstacle_cmd == "RED"
-                if self.fahrtrichtung == 'links': # Hindernis auf der Innenbande (links)
-                    self.get_logger().info("Ausweichen: Ignoriere Innenbande.", throttle_duration_sec=2.0)
-                    x_innen_proj = None # Ignoriere Innenbande
-                else: # Fahrtrichtung "rechts"
-                    self.get_logger().info("Ausweichen: Ignoriere Außenbande.", throttle_duration_sec=2.0)
-                    x_aussen_proj = None # Ignoriere Außenbande
+            if self.lane_ratio < 0.5:
+                # Wir wollen ganz nah an die Innenbande (Ratio z.B. 0.20)
+                # -> Wir ignorieren die Außenbande (und das Hindernis dort) komplett!
+                aussenbande = None
+            else:
+                # Wir wollen ganz nah an die Außenbande (Ratio z.B. 0.85)
+                # -> Wir ignorieren die Innenbande komplett!
+                innenbande = None
 
-
-
-        # --- FALL 1: BEIDE BANDEN SIND SICHTBAR (Höchste Präzision) ---
-        if x_innen_proj is not None and x_aussen_proj is not None:
-            self.get_logger().info("Banden-Logik: Nutze beide Banden.", throttle_duration_sec=2.0)
-            lane_width = 1.0
+        # --- FALL 1: WIR SEHEN BEIDE BANDEN (Normalfall auf freier Strecke) ---
+        if innenbande and aussenbande:
+            x_innen = get_x_at_y(innenbande, target_y)
+            x_aussen = get_x_at_y(aussenbande, target_y)
             
-            # Sicherheitscheck: Wenn die Banden unrealistisch weit (>1.3m) oder nah (<0.7m) sind,
-            # vertraue der Breiten-Annahme mehr als den Sensordaten.
-            '''if not (0.7 < lane_width < 1.3):
-                self.get_logger().warn(f"Unrealistische Spurbreite ({lane_width:.2f}m)! Nutze assumed_lane_width.")
-                lane_width = self.assumed_lane_width'''
-
-            if self.fahrtrichtung == 'links': # Innenbande links
-                target_x = x_innen_proj + (lane_width * self.lane_ratio)
-            else: # Innenbande rechts
-                target_x = x_innen_proj - (lane_width * self.lane_ratio)
-
-        # --- FALL 2: NUR INNENBANDE SICHTBAR ---
-        elif x_innen_proj is not None: #0.2
-            self.get_logger().info("Banden-Logik: Nur Innenbande sichtbar.", throttle_duration_sec=2.0)
-            if self.fahrtrichtung == 'links': # Innenbande links
-                target_x = x_innen_proj + self.lane_ratio
-            else: # Innenbande rechts
-                target_x = x_innen_proj - self.lane_ratio
-
-        # --- FALL 3: NUR AUSSENBANDE SICHTBAR ---
-        elif x_aussen_proj is not None: # 0.85
-            self.get_logger().info("Banden-Logik: Nur Außenbande sichtbar.", throttle_duration_sec=2.0)
+            lane_width = abs(x_aussen - x_innen)
+            
+            if x_innen < 0: # Innenbande links
+                target_x = x_innen + (lane_width * self.lane_ratio)
+            else:           # Innenbande rechts
+                target_x = x_innen - (lane_width * self.lane_ratio)
+                
+        # --- FALL 2: WIR SEHEN NUR DIE INNENBANDE (Oder haben Außen ignoriert) ---
+        elif innenbande:
+            x_innen = get_x_at_y(innenbande, target_y)
+            if x_innen < 0:
+                target_x = x_innen + (self.assumed_lane_width * self.lane_ratio)
+            else:
+                target_x = x_innen - (self.assumed_lane_width * self.lane_ratio)
+                
+        # --- FALL 3: WIR SEHEN NUR DIE AUSSENBANDE (Oder haben Innen ignoriert) ---
+        elif aussenbande:
+            x_aussen = get_x_at_y(aussenbande, target_y)
             inv_ratio = 1.0 - self.lane_ratio 
-            if self.fahrtrichtung == 'links': # Außenbande rechts
-                target_x = x_aussen_proj - inv_ratio
-            else: # Außenbande links
-                target_x = x_aussen_proj + inv_ratio
-        
-        # --- FALL 4: KEINE BANDE SICHTBAR (Notfall) ---
+            if x_aussen < 0: # Außenbande ist links
+                target_x = x_aussen + (self.assumed_lane_width * inv_ratio)
+            else:            # Außenbande ist rechts
+                target_x = x_aussen - (self.assumed_lane_width * inv_ratio)
+                
+        # Notfall
         else:
-            #self.get_logger().error("Keine Seitenbanden für Pfadplanung sichtbar! Halte Kurs.")
-            target_x = 0.0
+            target_x = 0.0  
 
+        # ==========================================
+        # KRAFTFELD (MINDESTABSTAND ERZWINGEN)
+        # ==========================================
+        if innenbande:
+            # Wir prüfen, wo die Innenbande ist
+            x_innen_check = get_x_at_y(innenbande, target_y)
+            
+            if x_innen_check < 0:  
+                # Innenbande ist LINKS. Ziel MUSS mindestens +min_wall_dist entfernt sein
+                if target_x < x_innen_check + self.min_wall_dist:
+                    target_x = x_innen_check + self.min_wall_dist
+                    
+            else:                  
+                # Innenbande ist RECHTS. Ziel MUSS mindestens -min_wall_dist entfernt sein
+                if target_x > x_innen_check - self.min_wall_dist:
+                    target_x = x_innen_check - self.min_wall_dist
+
+        return (target_x, target_y)
+    
+    def get_target_point_turn(self, front_wall):
+        """
+        Berechnet den Zielpunkt (Karotte) in der Kurve basierend auf der Frontwand.
+        """
+        
+        x = sum(p[1] for p in front_wall) / len(front_wall)
+        y = sum(p[2] for p in front_wall) / len(front_wall)
+
+        # Wir verschieben den Zielpunkt entlang der Richtung der Frontwand
+        angle = self.get_cluster_angle(front_wall)
+        if angle is None:
+            return (x, y)  # Wenn Winkelberechnung fehlschlägt, direkt auf die Wand zielen
+
+        angle_rad = math.radians(angle)
+        
+        # Verschiebung entlang der Wandrichtung (Richtung der Kurve)
+        offset_x = self.lookahead_dist_straight * math.cos(angle_rad)
+        offset_y = self.lookahead_dist_straight * math.sin(angle_rad)
+
+        target_x = x + offset_x
+        target_y = y + offset_y
 
         return (target_x, target_y)
 
-    def track_front_wall(self, point_data, last_front_wall):
+    def  track_front_wall(self, point_data, last_front_wall):
         """
         Trackt die Frontwand während der Kurve durch ein mitwanderndes Suchfenster (ROI).
         Gibt die aktualisierte Wand und einen Boolean (turn_finished) zurück.
@@ -806,8 +907,60 @@ class WallFollower(Node):
         # Da wir alle anderen Wände weggefiltert haben, ist das größte Cluster 
         # (Index 0) in diesem Bereich zu 99,9% unsere gesuchte Wand!
         tracked_wall = roi_clusters[0]
+        clusters = self.get_all_clusters_sorted(point_data)
+        cluster = self.merge_clusters(clusters, [tracked_wall])
+        
 
         return tracked_wall
+
+    def get_unshadowed_leftovers(self, all_clusters, validated_clusters):
+        """
+        Gibt alle Cluster zurück, die weder Teil der validierten Wände sind,
+        noch winkeltechnisch "hinter" den validierten Wänden versteckt liegen.
+        """
+        if not all_clusters:
+            return []
+
+        # 1. Sammle alle Punkte, die bereits erfolgreich zu Wänden gemergt wurden
+        # (Wir nutzen ein Set für extrem schnelles Suchen)
+        valid_points = set()
+        for vc in validated_clusters:
+            if vc is not None:
+                valid_points.update(vc)
+                
+        # Finde die reinen Überbleibsel (Wenn der erste Punkt nicht im Set ist, 
+        # wurde der Cluster nicht gemergt)
+        leftovers = [c for c in all_clusters if c and c[0] not in valid_points]
+        
+        # 2. Berechne die abgedeckten Winkelbereiche ("Schatten") der echten Wände
+        blocked_angle_ranges = []
+        for vc in validated_clusters:
+            if vc is not None and len(vc) > 0:
+                angles = [p[0] for p in vc]
+                min_a = min(angles)
+                max_a = max(angles)
+                blocked_angle_ranges.append((min_a, max_a))
+                
+        # 3. Filtere die Überbleibsel: Liegen sie in einem Schatten?
+        final_free_clusters = []
+        padding = 5.0  # 5 Grad Toleranzbereich an den Rändern der Wände
+        
+        for cluster in leftovers:
+            # Wo befindet sich dieser Cluster im Raum? (Schwerpunkt-Winkel)
+            c_mean_angle = sum(p[0] for p in cluster) / len(cluster)
+            
+            is_shadowed = False
+            for (min_a, max_a) in blocked_angle_ranges:
+                # Liegt der Schwerpunkt des Clusters winkeltechnisch exakt in der Wand?
+                if (min_a - padding) <= c_mean_angle <= (max_a + padding):
+                    is_shadowed = True
+                    break
+                    
+            # Wenn er NICHT verdeckt wird, ist es ein eigenständiges Objekt (z.B. Hindernis)
+            if not is_shadowed:
+                final_free_clusters.append(cluster)
+                
+        return final_free_clusters
 
     def update_avoidance_settings(self):
         """Passt Spur, Kurvenradius und Karotten-Distanz dynamisch an."""
@@ -816,50 +969,32 @@ class WallFollower(Node):
         if self.current_obstacle_cmd == "CLEAR" or self.fahrtrichtung is None:
             self.lane_ratio = 0.85 
             self.max_turn_angle = 0.635
-            self.lookahead_dist = 0.60  # Entspannt vorausschauen
+            self.lookahead_dist_straight = 0.60  # Entspannt vorausschauen
             
             # WICHTIG: Das hier lieber auskommentieren, sonst spammt es dein Terminal voll!
             # self.get_logger().info("Keine Hindernisse erkannt. Fahre mit Standardparametern.")
             return
 
-
-        if self.state in ['TURN_LINKS', 'TURN_RECHTS']:
-            if self.fahrtrichtung == 'rechts':
-                if self.current_obstacle_cmd == "RED":     # Rot = Rechts vorbei = Außenbahn
-                    self.max_turn_angle = 0.435 # Weit driften lassen
-                elif self.current_obstacle_cmd == "GREEN": # Grün = Links vorbei = Innenbahn
-                    self.max_turn_angle = 0.800 # Scharf innen bleiben
-            
-            elif self.fahrtrichtung == 'links':
-                if self.current_obstacle_cmd == "RED":     # Rot = Rechts vorbei = Innenbahn
-                    self.max_turn_angle = 0.800 # Scharf innen bleiben
-                elif self.current_obstacle_cmd == "GREEN": # Grün = Links vorbei = Außenbahn
-                    self.max_turn_angle = 0.435 # Weit driften lassen
-            
-            # In der Kurve brauchen wir keine Karotte
-            return
         # --- AUSWEICH-WERTE (Adrenalin-Modus) ---
         # Karotte näher ranholen, um viel direkter und schärfer zu lenken!
-        self.lookahead_dist = 0.35 
-
-        
+        self.lookahead_dist_straight = 0.35 
 
         # Logik-Matrix
         if self.fahrtrichtung == 'links': # Innenbande links
             if self.current_obstacle_cmd == "RED":       # (Vorher AVOID_RIGHT) Rechts vorbei
                 self.lane_ratio = 0.85
-                #self.max_turn_angle = 0.635 # Weite Kurve (Außen)
+                self.max_turn_angle = 0.635 # Weite Kurve (Außen)
             elif self.current_obstacle_cmd == "GREEN":   # (Vorher AVOID_LEFT) Links vorbei
                 self.lane_ratio = 0.20
-                #self.max_turn_angle = 0.800 # Enge Kurve (Innen)
+                self.max_turn_angle = 0.800 # Enge Kurve (Innen)
 
         elif self.fahrtrichtung == 'rechts': # Innenbande rechts
             if self.current_obstacle_cmd == "RED":       # (Vorher AVOID_RIGHT) Rechts vorbei
                 self.lane_ratio = 0.20
-                #self.max_turn_angle = 0.800 # Enge Kurve (Innen)
+                self.max_turn_angle = 0.800 # Enge Kurve (Innen)
             elif self.current_obstacle_cmd == "GREEN":   # (Vorher AVOID_LEFT) Links vorbei
                 self.lane_ratio = 0.85  
-                #self.max_turn_angle = 0.635 # Weite Kurve (Außen)
+                self.max_turn_angle = 0.635 # Weite Kurve (Außen)
 
     # -----------------------
     # --- YOLO - Function ---
@@ -884,7 +1019,6 @@ class WallFollower(Node):
         
         return results
         
-
     def get_lidar_distance(self, camera_angle_rad, clusters):
         walls = [self.front_wall, self.left_wall, self.right_wall]
         clusters_without_walls = [c for c in clusters if c not in walls and c is not None]
@@ -940,7 +1074,6 @@ class WallFollower(Node):
         for c in cluster:
             sum += c[0]  # Winkel des Punktes
         return sum / len(cluster)
-
 
     def angle_diff(self, a, b):
         """Berechnet den kleinsten Unterschied zwischen zwei Winkeln (Rad)."""
@@ -999,6 +1132,8 @@ class WallFollower(Node):
                         
                         detected_obstacles.append((obj_dist, class_name))
 
+        self.current_obstacle_cmd = "CLEAR"  # Standardmäßig kein Hindernis
+
         current_min_obs_dist = 999.0
         if detected_obstacles:
             # Sortieren nach Distanz (das nächste Objekt kommt auf Index 0)
@@ -1044,7 +1179,7 @@ class WallFollower(Node):
             all_clusters = self.get_all_clusters_sorted(point_data)
 
 
-            validated_clusters = self.validate_clusters(all_clusters)
+            validated_clusters = self.validate_clusters_straight(all_clusters)
             # 5. Wir haben ein perfektes U-Profil!
             #self.get_logger().info(f"Anzahl cluster {len(all_clusters)}")
             kandidaten = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
@@ -1052,9 +1187,8 @@ class WallFollower(Node):
             self.right_wall = kandidaten[2]
             self.front_wall = kandidaten[1]
             self.left_wall  = kandidaten[0]
-
+            
             # Hier war vorher die Wahl der Fahrtrichtung, aber wir haben sie jetzt schon in der Startphase festgelegt.
-        
             if self.fahrtrichtung == 'links':
                 innenbande = self.left_wall
                 aussenbande = self.right_wall
@@ -1069,8 +1203,13 @@ class WallFollower(Node):
             turned_so_far = abs(self.current_yaw - self.start_turn_yaw)
             # Während der Kurve tracken wir die Frontwand mit einem dynamischen Suchfenster (ROI)
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
-            kandidaten = [None, self.front_wall, None]  # Wir haben nur die Frontwand, die wir tracken
-            
+            kandidaten = self.validate_clusters_turn(self.front_wall, point_data)  # Wir haben nur die Frontwand, die wir tracken
+            self.get_logger().info(f"Turn-Validierung: {len([c for c in kandidaten if c is not None])} Kandidaten gefunden für die Frontwand.")
+            '''cluster = self.get_all_clusters_sorted(point_data)
+            front = self.merge_clusters(cluster, [self.front_wall])
+            fertig = self.get_unshadowed_leftovers(cluster, [self.front_wall])
+            fertig.append(self.front_wall)
+            kandidaten = fertig'''
             # --- 1. DER NEUE NOTFALL-ABBRUCH ---
             # Steht ein Objekt am Kurvenausgang extrem nah (< 50cm)?
 
@@ -1090,6 +1229,9 @@ class WallFollower(Node):
             
             else:
                 angle_to_front_wall = self.get_cluster_angle(self.front_wall)
+                if angle_to_front_wall is None:
+                    return
+
                 self.get_logger().info(f"Tracke Frontwand... Winkel zur Fahrtrichtung: {angle_to_front_wall:.1f}°")
 
                 if abs(angle_to_front_wall) < self.turn_exit_angle or turned_so_far > 95.0:
@@ -1103,33 +1245,14 @@ class WallFollower(Node):
                         self.get_logger().warn(f">>> FAKE-KURVE ERKANNT ({turned_so_far:.1f}°). Zähler ignoriert! <<<")
                         
                     self.start_straight_yaw = self.current_yaw
-                else:
-                    # --- NEU: Aktive Pfadplanung in der Kurve ---
-                    target_y = 0.30  # Kürzerer Vorausschauen in der Kurve
-                    turn_offset = 1.0 - self.lane_ratio     # Zielabstand zur Frontwand (ca. Mitte der nächsten Spur)
 
-                    target_x = 0.0
-                    if self.front_wall:
-                        x_front_proj = self._get_x_at_y(self.front_wall, target_y)
-                        if x_front_proj is not None:
-                            if self.state == 'TURN_RECHTS':
-                                # Frontwand ist links, wir wollen rechts davon sein
-                                target_x = x_front_proj + turn_offset
-                            else: # TURN_LINKS
-                                # Frontwand ist rechts, wir wollen links davon sein
-                                target_x = x_front_proj - turn_offset
-                    
-                    # PID-Regler für die Kurve (gleiche Logik wie auf der Geraden)
-                    error = target_x
-                    derivative = error - self.prev_error
-                    self.prev_error = error
-                    steering_cmd = (self.turn_kp * error) + (self.turn_kd * derivative)
-                    steering_cmd = max(-1.0, min(1.0, steering_cmd))
-                    
-                    cmd.linear.x = self.turn_speed
-                    cmd.angular.z = float(steering_cmd)
-                    
-                    self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(1.0, 0.0, 1.0)) # Magenta Karotte
+                else:
+                    if self.state == 'TURN_LINKS':
+                        cmd.linear.x = self.turn_speed
+                        cmd.angular.z = self.max_turn_angle
+                    else:
+                        cmd.linear.x = self.turn_speed
+                        cmd.angular.z = -self.max_turn_angle
 
         elif self.state == 'STOPPED':
             cmd.linear.x = 0.0
@@ -1141,12 +1264,13 @@ class WallFollower(Node):
             return
 
         elif self.state == 'STARTING':
+
             self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
 
             all_clusters = self.get_all_clusters_sorted(point_data)
 
 
-            validated_clusters = self.validate_clusters(all_clusters)
+            validated_clusters = self.validate_clusters_straight(all_clusters)
             # 5. Wir haben ein perfektes U-Profil!
             #self.get_logger().info(f"Anzahl cluster {len(all_clusters)}")
             kandidaten = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
@@ -1182,6 +1306,7 @@ class WallFollower(Node):
             self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen
 
             self.state = 'FOLLOW_LANE'
+
         else:
         
             pass
@@ -1190,101 +1315,62 @@ class WallFollower(Node):
         # ==========================================
         # PFADPLANUNG, PID & STATE MACHINE 
         # ==========================================
+        if self.current_obstacle_cmd != "CLEAR" and self.turn_count > self.locked_turn_count:
+            self.current_obstacle_cmd = "CLEAR"
+            self.get_logger().warn(">>> KURVE BEENDET: Ausweich-Speicher gelöscht, fahre wieder mittig! <<<")
+
         self.update_avoidance_settings()
 
         
-        target_x, target_y = self.get_target_point(innenbande, aussenbande)
+        target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
 
         # Twist-Nachricht für den ESP initialisieren
         
         # --- ZUSTAND 1: GERADEAUS FAHREN ---
         if self.state == 'FOLLOW_LANE':
-            turn_triggered = False
-
-
-            # --- NEU: DYNAMISCHE KURVEN-DISTANZ BERECHNEN ---
-            # Standard ist 1.20m (Früh abbiegen für Innenbahn)
-            turn_entry_dist = 1.20 
-
-            ''' if self.current_obstacle_cmd != "CLEAR":
-                # Rechtsrum + ROT (Außenbahn) oder Linksrum + GRÜN (Außenbahn) = LATE TURN
-                if (self.fahrtrichtung == 'rechts' and self.current_obstacle_cmd == "RED") or (self.fahrtrichtung == 'links' and self.current_obstacle_cmd == "GREEN"):
-                    turn_entry_dist = 0.75 # Erst sehr spät abbiegen
-                    self.get_logger().info("Strategie: LATE TURN (Warte auf 0.75m)", throttle_duration_sec=1.0)'''
-
-
-            # --- WECHSEL-BEDINGUNG 1: Standard-Kurve (Frontwand nah, Innenbande kurz) ---
+            
+            # 1. WECHSEL-BEDINGUNG PRÜFEN
             if self.front_wall is not None and self.fahrtrichtung is not None:
                 front_dist = self.get_closest_point_in_cluster(self.front_wall)[3]
                 
                 max_y_innen = 0.0
                 if innenbande and len(innenbande) > 0:
                     max_y_innen = max(p[2] for p in innenbande)
+                
+                if front_dist < 1.20 and max_y_innen < self.max_wall_lenght_for_turn:
+                    self.state = f"TURN_{self.fahrtrichtung.upper()}"
+                    self.start_turn_yaw = self.current_yaw
+                    self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
+                    # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
+                    self.prev_error = 0.0
+                    self.integral_error = 0.0
 
-                if front_dist < 1.0 and max_y_innen < self.max_wall_lenght_for_turn:
-                    turn_triggered = True
-                    self.get_logger().warn(f"TRIGGER 1: Standard-Kurve (front_dist: {front_dist:.2f}m, innen_y: {max_y_innen:.2f}m)")
-
-            # --- WECHSEL-BEDINGUNG 2: Notfall-Kurve (Innenbande verloren, Frontwand bei ~1m) ---
-            if not turn_triggered and innenbande is None and self.front_wall is not None and self.fahrtrichtung is not None:
-                front_dist = self.get_closest_point_in_cluster(self.front_wall)[3]
-                # Logik: Die Spur ist 1m breit. Wenn die Frontwand ca. 1m entfernt ist,
-                # MUSS die Innenbande gerade neben uns aufgehört haben.
-                if 0.85 < front_dist < 1.15:
-                    turn_triggered = True
-                    self.get_logger().warn(f"TRIGGER 2: Notfall-Kurve (Innenbande verloren, front_dist: {front_dist:.2f}m)")
-
-            # --- GEMEINSAME AKTION: KURVE EINLEITEN ---
-            if turn_triggered:
-                # --- NEU: Ausweich-Speicher löschen, BEVOR die neue Kurve beginnt ---
-                # Wir haben die Gerade nach dem Hindernis erfolgreich beendet.
-                if self.current_obstacle_cmd != "CLEAR":
-            # Wir prüfen, ob wir in einem Turn-State sind
-                    if self.state in ['TURN_LINKS', 'TURN_RECHTS']:
-                        turned_so_far = abs(self.current_yaw - self.start_turn_yaw)
-                        
-                        # Erst wenn wir mehr als 45 Grad der Kurve geschafft haben, 
-                        # ist das Hindernis hinter uns sicher "vergessen".
-                        if turned_so_far > 45.0:
-                            self.current_obstacle_cmd = "CLEAR"
-                            self.get_logger().warn(">>> KURVENMITTE ERREICHT: Ausweich-Speicher gelöscht. <<<")
-
-                self.state = f"TURN_{self.fahrtrichtung.upper()}"
-
-                # --- NEU: RADIUS FÜR LATE TURN VERSCHÄRFEN ---
-                if turn_entry_dist < 1.0:
-                    # Wenn wir spät abbiegen, müssen wir die Lenkung VOLL einschlagen!
-                    self.max_turn_angle = 0.800 
+                    self.turn_start_time = self.get_clock().now().nanoseconds / 1e9
                 else:
-                    # Bei frühem Abbiegen nehmen wir den normalen/weiten Radius
-                    self.max_turn_angle = 0.635
-
-                self.start_turn_yaw = self.current_yaw
-                self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
-                self.prev_error = 0.0
-                self.integral_error = 0.0
-                self.turn_start_time = self.get_clock().now().nanoseconds / 1e9
-            else:
-                # --- AKTION: GERADEAUS FAHREN (PID-Regler) ---
-                if self.front_wall is not None and self.get_closest_point_in_cluster(self.front_wall)[3] < 1.30:
-                    max_y_innen_log = 0.0
-                    if innenbande and len(innenbande) > 0:
-                        max_y_innen_log = max(p[2] for p in innenbande)
-                    self.get_logger().info(f"Warte auf Ecke... (Innenbande ragt noch {max_y_innen_log:.2f}m nach vorne)")
-                
-                # PID-REGLER BERECHNEN
-                error = -target_x 
-                self.integral_error += error
-                self.integral_error = max(-1.0, min(1.0, self.integral_error))
-                derivative = error - self.prev_error
-                self.prev_error = error
-                steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
-                steering_cmd = max(-1.0, min(1.0, steering_cmd))
-                
-                # BEFEHLE AN ESP SETZEN
-                cmd.linear.x = self.base_speed
-                cmd.angular.z = float(steering_cmd)
-                self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
+                    if front_dist < 1.30:
+                        self.get_logger().info(f"Warte auf Ecke... (Innenbande ragt noch {max_y_innen:.2f}m nach vorne)")
+            
+            # 2. PID-REGLER BERECHNEN
+            # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
+            error = -target_x 
+            
+            # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
+            self.integral_error += error
+            self.integral_error = max(-1.0, min(1.0, self.integral_error))
+            
+            # Derivative berechnen (Veränderung zum letzten Frame)
+            derivative = error - self.prev_error
+            self.prev_error = error
+            
+            # Stellgröße (Lenkbefehl) berechnen
+            steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
+            
+            # Auf ROS-Grenzen (-1.0 bis 1.0) kappen
+            steering_cmd = max(-1.0, min(1.0, steering_cmd))
+            
+            # 3. BEFEHLE AN ESP SETZEN
+            cmd.linear.x = self.base_speed
+            cmd.angular.z = float(steering_cmd)
 
         # --- ZUSTAND 2: LINKSKURVE ---
         elif self.state == 'TURN_LINKS':
@@ -1299,10 +1385,13 @@ class WallFollower(Node):
         
         # Befehle an den ESP senden! (Erstmal aufgebockt testen!)
         self.pub_cmd_vel.publish(cmd)
-
-        if self.state not in ['FOLLOW_LANE', 'TURN_LINKS', 'TURN_RECHTS']:
+        
+        if self.state == 'FOLLOW_LANE':
+            self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
+        else:
             self.delete_marker(marker_array, 99, ns="target")
-
+            
+        self.pub_markers.publish(marker_array)
 
         # Feste Farben: Rechts=Rot, Front=Grün, Links=Blau
         colors = [
@@ -1343,7 +1432,11 @@ class WallFollower(Node):
 
 
         # 6. Die drei Wände durchgehen und an RViz senden
-        for i, cluster in enumerate(kandidaten):
+        if kandidaten is not None:
+            kandidaten_RVIZ = [c for c in kandidaten if c is not None]
+        else: 
+            return
+        for i, cluster in enumerate(kandidaten_RVIZ):
             # Info in der Konsole ausgeben
             angle = self.get_cluster_angle(cluster)
 
