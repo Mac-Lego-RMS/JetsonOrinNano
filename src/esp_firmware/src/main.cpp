@@ -212,6 +212,7 @@ void setup() {
     jetson.begin(115200);     
 
     Serial2.begin(1000000, SERIAL_8N1, PIN_SERVO_RX, PIN_SERVO_TX);
+    Serial2.println("ESP COM REady");
     sc09Servo.pSerial = &Serial2; 
     delay(500);
 
