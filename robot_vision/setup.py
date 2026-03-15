@@ -27,6 +27,7 @@ setup(
             'raw_camera = robot_vision.raw_camera:main',
             'yolo_detector = robot_vision.yolo_detector:main',
             'obstacle_follower = robot_vision.obstacle_follower:main',
+            'testBench = robot_vision.testBench:main',
         ],
     },
 )
