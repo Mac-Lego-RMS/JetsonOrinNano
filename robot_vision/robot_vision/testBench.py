@@ -357,6 +357,7 @@ class WallFollower(Node):
                     return cluster # Treffer! front_wall ist komplett in diesem Cluster enthalten
                     
             return False # Kein Cluster enthielt die komplette front_wall
+        front_wall_cluster = []
 
         front_wall_cluster, combined_clusters = self.merge_clusters(clusters, [front_wall_cluster])
         
@@ -379,8 +380,12 @@ class WallFollower(Node):
             # Der Cluster LINKS von der Frontwand hat einen KLEINEREN Index
             while u_profile[2] is None and fw_index > 0:
                 if len(ordered[fw_index - 1]) > minimal_cluster_size:
-                    u_profile[2] = ordered[fw_index - 1]
-                    self.get_logger().info(f"Cluster links von der Frontwand gefunden. Größe: {len(ordered[fw_index - 1])} Punkte.")
+                    if ordered[fw_index - 1] not in combined_clusters:
+                        u_profile[2] = ordered[fw_index - 1]
+                        self.get_logger().info(f"Cluster links von der Frontwand gefunden. Größe: {len(ordered[fw_index - 1])} Punkte.")
+                    else: 
+                        ordered.pop(fw_index - 1)
+                        fw_index -= 1
                 else: 
                     ordered.pop(fw_index - 1)
                     fw_index -= 1
@@ -388,8 +393,12 @@ class WallFollower(Node):
             # Der Cluster RECHTS von der Frontwand hat einen GRÖSSEREN Index
             while u_profile[0] is None and fw_index < len(ordered) - 1:
                 if len(ordered[fw_index + 1]) > minimal_cluster_size:
-                    u_profile[0] = ordered[fw_index + 1]
-                    self.get_logger().info(f"Cluster rechts von der Frontwand gefunden. Größe: {len(ordered[fw_index + 1])} Punkte.")
+                    if ordered[fw_index + 1] not in combined_clusters:
+                        u_profile[0] = ordered[fw_index + 1]
+                        self.get_logger().info(f"Cluster rechts von der Frontwand gefunden. Größe: {len(ordered[fw_index + 1])} Punkte.")
+                    else: 
+                        ordered.pop(fw_index - 1)
+                        fw_index -= 1
                 else: 
                     ordered.pop(fw_index + 1)
 
@@ -745,7 +754,7 @@ class WallFollower(Node):
                 continue # Überspringe diese leere Wand sofort!
 
             if angle is None: 
-                self.get_logger().warn("Fehler bei der Winkelberechnung. Überspringe...")
+                #self.get_logger().warn("Fehler bei der Winkelberechnung. Überspringe...")
                 continue
 
             bx = sum(p[1] for p in valid_cluster) / len(valid_cluster)
@@ -1195,8 +1204,8 @@ class WallFollower(Node):
 
 
     def main_logic(self, point_data):
-        self.fahrtrichtung = "rechts"
-        if self.counter  < 10:
+        self.fahrtrichtung = "links"
+        if self.counter  < 2:
             self.counter += 1
             return
         
