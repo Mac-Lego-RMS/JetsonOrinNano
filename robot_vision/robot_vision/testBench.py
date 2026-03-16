@@ -349,26 +349,36 @@ class WallFollower(Node):
 
         clusters = self.get_all_clusters_sorted(point_data)
 
-        def check_if_wall_in_clusters(front_wall, all_clusters):
-            # Gehe jeden einzelnen Cluster in der großen Liste durch
+        def kill_all_clusters_between(front_wall, all_clusters):
+            # Finde die Grenzen des Winkelbereichs
+            left_angle = min(front_wall, key=lambda p: p[0])[0]
+            right_angle = max(front_wall, key=lambda p: p[0])[0]
+            
+            kept_clusters = []
+            
             for cluster in all_clusters:
-                # all() prüft, ob JEDER Punkt aus front_wall in 'cluster' existiert
-                if all(punkt in cluster for punkt in front_wall):
-                    return cluster # Treffer! front_wall ist komplett in diesem Cluster enthalten
+                # any() prüft, ob IRGENDEIN Punkt im Cluster im kritischen Bereich liegt
+                is_in_killzone = any(left_angle < point[0] < right_angle for point in cluster)
+                
+                # Nur wenn kein Punkt in der Zone liegt, behalten wir den Cluster
+                if not is_in_killzone:
+                    kept_clusters.append(cluster)
                     
-            return False # Kein Cluster enthielt die komplette front_wall
-        front_wall_cluster = []
+            return kept_clusters
 
-        front_wall_cluster, combined_clusters = self.merge_clusters(clusters, [front_wall_cluster])
+
+        front_wall_cluster, combined_clusters = self.merge_clusters(clusters, [front_wall])
+        front_wall_cluster = front_wall_cluster[0]
         
-        front_wall_cluster = check_if_wall_in_clusters(front_wall, clusters)
+        clusters = kill_all_clusters_between(front_wall_cluster, clusters)
+        clusters.append(front_wall_cluster)
+
 
          # Wir fügen die Frontwand wieder hinzu, damit sie in der Sortierung berücksichtigt wird
 
         if len(clusters) >= 2:
             minimal_cluster_size = 25
             ordered = self.sort_clusters_right_to_left(clusters)
-
             u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
             if front_wall_cluster in ordered:
                 u_profile[1] = front_wall_cluster
@@ -380,12 +390,8 @@ class WallFollower(Node):
             # Der Cluster LINKS von der Frontwand hat einen KLEINEREN Index
             while u_profile[2] is None and fw_index > 0:
                 if len(ordered[fw_index - 1]) > minimal_cluster_size:
-                    if ordered[fw_index - 1] not in combined_clusters:
-                        u_profile[2] = ordered[fw_index - 1]
-                        self.get_logger().info(f"Cluster links von der Frontwand gefunden. Größe: {len(ordered[fw_index - 1])} Punkte.")
-                    else: 
-                        ordered.pop(fw_index - 1)
-                        fw_index -= 1
+                    u_profile[2] = ordered[fw_index - 1]
+                    self.get_logger().info(f"Cluster links von der Frontwand gefunden. Größe: {len(ordered[fw_index - 1])} Punkte.")
                 else: 
                     ordered.pop(fw_index - 1)
                     fw_index -= 1
@@ -393,12 +399,10 @@ class WallFollower(Node):
             # Der Cluster RECHTS von der Frontwand hat einen GRÖSSEREN Index
             while u_profile[0] is None and fw_index < len(ordered) - 1:
                 if len(ordered[fw_index + 1]) > minimal_cluster_size:
-                    if ordered[fw_index + 1] not in combined_clusters:
-                        u_profile[0] = ordered[fw_index + 1]
-                        self.get_logger().info(f"Cluster rechts von der Frontwand gefunden. Größe: {len(ordered[fw_index + 1])} Punkte.")
-                    else: 
-                        ordered.pop(fw_index - 1)
-                        fw_index -= 1
+                   
+                    u_profile[0] = ordered[fw_index + 1]
+                    self.get_logger().info(f"Cluster rechts von der Frontwand gefunden. Größe: {len(ordered[fw_index + 1])} Punkte.")
+                    
                 else: 
                     ordered.pop(fw_index + 1)
 
@@ -440,43 +444,46 @@ class WallFollower(Node):
 
 
                 # Check B: Sind Front und Links orthogonal?
-            elif diff_1_2 is not None and diff_1_2 < 70:
+            if diff_1_2 is not None and diff_1_2 < 70:
                 self.get_logger().warn(f"Front und Links nicht orthogonal! Diff: {diff_1_2:.1f}°")
                 u_profile[2] = None
-
-                # Check C: Sind Rechts und Links parallel? (Differenz sollte < 20° sein)
-            elif diff_0_2 is not None and diff_0_2 > 15:
-                self.get_logger().warn(f"Rechts und Links nicht parallel! Diff: {diff_0_2:.1f}°")
-                return [None, front_wall_cluster, None]
             
-            else:
+            
+            try: 
                 wall_dist_left = self.get_closest_point_in_cluster(u_profile[2])[3]
+            except: 
+                wall_dist_left = None
+            try:
                 wall_dist_right = self.get_closest_point_in_cluster(u_profile[0])[3]
+            except:
+                wall_dist_right = None
 
-                if self.fahrtrichtung == "links":
-                    if wall_dist_right is not None:
-                        if wall_dist_right > 1.0:
-                            self.get_logger().warn(f"0")
-                            u_profile[0] = None
 
-                    if wall_dist_left is not None:
-                        if wall_dist_left < 1.5:
-                            self.get_logger().warn(f"1")
-                            u_profile[2] = None
+            if self.fahrtrichtung == "links":
+                if wall_dist_right is not None:
+                    if wall_dist_right > 1.0:
+                        self.get_logger().warn(f"Abstand der rechten Wand {wall_dist_right:.2f}")
+                        u_profile[0] = None
 
-                else: 
-                    if wall_dist_left is not None:
-                        if wall_dist_left > 1.0:
-                            self.get_logger().warn(f"Abstand der linken Wand {wall_dist_left:.2f}")
-                            u_profile[2] = None
+                if wall_dist_left is not None:
+                    if wall_dist_left < 1.5:
+                        self.get_logger().warn(f"Abstand der linken Wand {wall_dist_left:.2f}")
+                        u_profile[2] = None
 
-                    if wall_dist_right is not None:
-                        if wall_dist_right < 1.5:
-                            self.get_logger().warn(f"Abstand der rechten Wand {wall_dist_right:.2f}")
-                            u_profile[0] = None
-                
-                u_profile, _ = self.merge_clusters(clusters, u_profile)
-                return u_profile
+            else: 
+                if wall_dist_left is not None:
+                    if wall_dist_left > 1.0:
+                        self.get_logger().warn(f"Abstand der linken Wand {wall_dist_left:.2f}")
+                        u_profile[2] = None
+
+                if wall_dist_right is not None:
+                    if wall_dist_right < 1.5:
+                        self.get_logger().warn(f"Abstand der rechten Wand {wall_dist_right:.2f}")
+                        u_profile[0] = None
+            
+            u_profile, _ = self.merge_clusters(clusters, u_profile)
+            self.get_logger().warn(f"?")
+            return u_profile
 
         self.get_logger().warn(f"Kein Cluster außer der Frontwand gefunden.")
         return [None, front_wall_cluster, None]
@@ -504,7 +511,7 @@ class WallFollower(Node):
     def get_all_clusters_sorted(self, point_data):
         """
         Sucht ALLE zusammenhängenden Cluster und durchtrennt sie an 90°-Ecken.
-        Nutzt die Manhattan-Norm und X/Y-Gradienten-Überwachung.
+        Nutzt die Manhattan-Norm und X/Y-Gradienten-Überwachung (Vorausschauend).
         point_data: Liste aus (Winkel_deg, x, y, dist)
         """
         if len(point_data) < 2:
@@ -513,11 +520,10 @@ class WallFollower(Node):
         sorted_points = sorted(point_data, key=lambda p: p[0])
 
         # --- PARAMETER ---
-        # Max Gap etwas höher setzen, da Manhattan-Werte (dx+dy) größer sind als euklidische
         max_gap = 0.10      
         outlier_limit = 2
-        # Ab welcher Streckenlänge trauen wir der Ecke? (Filtert Sensor-Rauschen)
         corner_sensitivity = 0.05 
+        lookahead_steps = 5  # NEU: Wie viele Punkte schauen wir in die Zukunft?
         
         clusters = []
         current_cluster = []
@@ -533,49 +539,79 @@ class WallFollower(Node):
             
             p_last = current_cluster[-1]
             
-            # 1. MANHATTAN-DISTANZ (|dx| + |dy|)
+            # 1. MANHATTAN-DISTANZ (|dx| + |dy|) zum aktuellen Punkt
             dx = abs(p_curr[1] - p_last[1])
             dy = abs(p_curr[2] - p_last[2])
             dist_manhattan = dx + dy
             
             if dist_manhattan < max_gap:
-                # 2. NEUE ECKEN-ERKENNUNG (Über echte Vektor-Winkel)
-                if len(current_cluster) >= 20:
-                    p_start = current_cluster[5] # Punkt vor der Kurve
-                    p_mid = current_cluster[-10]   # Punkt am Scheitel
+                
+                # =========================================================
+                # 2. NEUE ECKEN-ERKENNUNG (Blick in die Zukunft!)
+                # =========================================================
+                is_corner = False
+                
+                # Wir prüfen nur auf Ecken, wenn wir schon eine saubere Basis haben (10 Punkte)
+                # UND wenn wir noch genug Punkte in der Zukunft haben (5 Punkte).
+                if len(current_cluster) >= 10 and (i + lookahead_steps) <= len(sorted_points):
                     
-                    # Vektor 1 (Trend vor der Kurve)
-                    dx1 = p_mid[1] - p_start[1]
-                    dy1 = p_mid[2] - p_start[2]
-                    angle1 = math.atan2(dy1, dx1)
+                    # --- A. VERGANGENHEIT (Der Trend der bisherigen Wand) ---
+                    p_base = current_cluster[-10] 
+                    dx_past = p_last[1] - p_base[1]
+                    dy_past = p_last[2] - p_base[2]
+                    angle_past = math.atan2(dy_past, dx_past)
                     
-                    # Vektor 2 (Aktuelle Bewegung)
-                    dx2 = p_curr[1] - p_mid[1]
-                    dy2 = p_curr[2] - p_mid[2]
-                    angle2 = math.atan2(dy2, dx2)
+                    # --- B. ZUKUNFT (Die nächsten 5 Punkte inkl. dem aktuellen) ---
+                    future_points = sorted_points[i : i + lookahead_steps]
                     
-                    # Wie stark knickt die Wand physikalisch ab?
-                    diff_rad = abs(angle1 - angle2)
-                    diff_deg = math.degrees(diff_rad)
-                    if diff_deg > 180:
-                        diff_deg = 360 - diff_deg
+                    # --- C. DISTANZ-PRÜFUNG DER ZUKUNFT ---
+                    # Bevor wir Winkel berechnen, MÜSSEN wir sichergehen, dass die Zukunfts-Punkte 
+                    # nicht einfach eine Lücke/ein Loch in der Bande sind!
+                    valid_future = True
+                    for f_idx in range(1, len(future_points)):
+                        f_dx = abs(future_points[f_idx][1] - future_points[f_idx-1][1])
+                        f_dy = abs(future_points[f_idx][2] - future_points[f_idx-1][2])
+                        if (f_dx + f_dy) >= max_gap:
+                            valid_future = False  # Lücke erkannt! Das ist keine verbundene Ecke.
+                            break
+                            
+                    if valid_future:
+                        # --- D. WINKEL DER ZUKUNFT BERECHNEN ---
+                        p_future_end = future_points[-1]
+                        dx_future = p_future_end[1] - p_curr[1]
+                        dy_future = p_future_end[2] - p_curr[2]
+                        angle_future = math.atan2(dy_future, dx_future)
                         
-                    # Filter: Hat sich der Punkt auch ausreichend bewegt? (Rauschen ignorieren)
-                    dist_moved = math.hypot(dx2, dy2)
-                    
-                    # Eine echte Parcours-Ecke knickt stark ab (z.B. > 70 Grad)
-                    if diff_deg > 25.0 and dist_moved > corner_sensitivity:
-                        # ECKE ERKANNT! Wir zerschneiden das Cluster genau hier.
-                        clusters.append(current_cluster)
-                        current_cluster = [p_curr]
-                        i += 1
-                        continue
+                        # --- E. WINKEL VERGLEICH ---
+                        diff_rad = abs(angle_past - angle_future)
+                        diff_deg = math.degrees(diff_rad)
+                        if diff_deg > 180:
+                            diff_deg = 360 - diff_deg
+                            
+                        # Hat sich der Punkt physikalisch auch weit genug bewegt?
+                        dist_moved = math.hypot(dx_future, dy_future)
+                        
+                        # Wenn die Zukunfts-Punkte stark abbiegen (z.B. > 25 Grad)
+                        if diff_deg > 25.0 and dist_moved > corner_sensitivity:
+                            is_corner = True
 
-                # Wenn keine Ecke, Punkt normal zum Cluster hinzufügen
-                current_cluster.append(p_curr)
-                i += 1
+                # =========================================================
+                # 3. ENTSCHEIDUNG TREFFEN
+                # =========================================================
+                if is_corner:
+                    # ZUKUNFTS-ECKE ERKANNT! 
+                    # Wir packen die SAUBERE Wand weg, p_curr gehört schon zur neuen Wand.
+                    clusters.append(current_cluster)
+                    current_cluster = []
+                    i += lookahead_steps
+                    continue
+                else:
+                    # Keine Ecke in Sicht, Punkt normal zur aktuellen Wand hinzufügen
+                    current_cluster.append(p_curr)
+                    i += 1
+                    
             else:
-                # 3. AUSREISSER-LOGIK (Jetzt auch mit Manhattan-Norm)
+                # 4. AUSREISSER-LOGIK (Lücken überbrücken) bleibt exakt wie vorher!
                 found_connection = False
                 for look_ahead in range(1, outlier_limit + 1):
                     if i + look_ahead < len(sorted_points):
@@ -588,7 +624,6 @@ class WallFollower(Node):
                             break
                 
                 if not found_connection:
-                    # Echte Lücke gefunden -> Cluster abspeichern und neu beginnen
                     clusters.append(current_cluster)
                     current_cluster = [p_curr]
                     i += 1
@@ -596,20 +631,17 @@ class WallFollower(Node):
         if current_cluster:
             clusters.append(current_cluster)
 
-        # 4. WRAP-AROUND-FIX (Mit Manhattan)
+        # 5. WRAP-AROUND-FIX (Mit Manhattan)
         if len(clusters) > 1:
             first_p = clusters[0][0]
             last_p = clusters[-1][-1]
             dist_wrap = abs(first_p[1] - last_p[1]) + abs(first_p[2] - last_p[2])
             
-            # Auch hier prüfen, ob sie über den 180°-Rand hinaus eigentlich die gleiche Wandachse sind
             if dist_wrap < max_gap:
                 clusters[0] = clusters[-1] + clusters[0]
                 clusters.pop()
 
-        # 5. Sortieren nach Größe, größtes zuerst
         clusters.sort(key=len, reverse=True)
-        
         return clusters
  
     def get_cluster_angle(self, cluster):
@@ -731,13 +763,13 @@ class WallFollower(Node):
         Versucht, benachbarte Cluster zu einem einzigen Cluster zu verschmelzen.
         Nutzt den Normalenvektor, um nur den senkrechten Abstand (Offset) zu prüfen.
         """
-        max_distance_gap = 0.30  # 5 cm maximaler seitlicher Versatz
-        max_angle_gap = 5.0      # 5 Grad maximale Winkelabweichung
+        max_distance_gap = 0.25  # 5 cm maximaler seitlicher Versatz
+        max_angle_gap = 15.0      # 5 Grad maximale Winkelabweichung
 
         remaining_clusters = [c for c in all_clusters if c not in validated_clusters]
         if not remaining_clusters:
             self.get_logger().info("Keine Cluster zum Mergen gefunden")
-            return validated_clusters
+            return validated_clusters, []
 
         def get_angle_diff(a1, a2):
             diff = abs(a1 - a2) % 180
@@ -762,8 +794,8 @@ class WallFollower(Node):
 
             angle_rad = math.radians(angle)
             # Richtig: Normalenvektor (steht senkrecht auf der Wand)
-            nx = -math.sin(angle_rad)
-            ny = math.cos(angle_rad)
+            nx = math.cos(angle_rad)
+            ny = math.sin(angle_rad)
 
             clusters_to_remove = []
 
@@ -781,9 +813,12 @@ class WallFollower(Node):
                     self.get_logger().info(f"Offset = {offset:.2f}")
 
                     if offset < max_distance_gap:
+                        self.get_logger().info(f"merged")
                         valid_cluster.extend(other)
                         clusters_to_remove.append(other)
                         combined_clusters[i].append(other)
+                else:
+                    self.get_logger().info(f"Winkeldifferenz zu groß: {get_angle_diff(angle, other_angle):.1f}")
                         
 
             for c in clusters_to_remove:
@@ -887,27 +922,35 @@ class WallFollower(Node):
 
         return (target_x, target_y)
     
-    def get_target_point_turn(self, front_wall):
+    def get_target_point_turn(self, u_profile, x_soll, y_soll):
         """
         Berechnet den Zielpunkt (Karotte) in der Kurve basierend auf der Frontwand.
         """
+        if u_profile is None:
+            return None
         
-        x = sum(p[1] for p in front_wall) / len(front_wall)
-        y = sum(p[2] for p in front_wall) / len(front_wall)
+        # Berechenung der Ist-Position 
+        ist_front_dist = self.get_closest_point_in_cluster(u_profile[1])[3]
+        if self.fahrtrichtung == "links":
+            if u_profile[0] is not None:
+                ist_side_dist = self.get_closest_point_in_cluster(u_profile[0])[3]
+            else:
+                if u_profile[2] is not None:
+                    ist_side_dist = 3.0 - (self.get_closest_point_in_cluster(u_profile[2])[3])
+                else:
+                    self.get_logger.warn("Kein Cluster außer der Frontwand gefunden.")
+                    ist_side_dist = None
+        else:
+            if u_profile[2] is not None:
+                ist_side_dist = self.get_closest_point_in_cluster(u_profile[2])[3]
+            else:
+                if u_profile[0] is not None:
+                    ist_side_dist = 3.0 - (self.get_closest_point_in_cluster(u_profile[0])[3])
+                else:
+                    self.get_logger.warn("Kein Cluster außer der Frontwand gefunden.")
+                    ist_side_dist = None
 
-        # Wir verschieben den Zielpunkt entlang der Richtung der Frontwand
-        angle = self.get_cluster_angle(front_wall)
-        if angle is None:
-            return (x, y)  # Wenn Winkelberechnung fehlschlägt, direkt auf die Wand zielen
-
-        angle_rad = math.radians(angle)
-        
-        # Verschiebung entlang der Wandrichtung (Richtung der Kurve)
-        offset_x = self.lookahead_dist_straight * math.cos(angle_rad)
-        offset_y = self.lookahead_dist_straight * math.sin(angle_rad)
-
-        target_x = x + offset_x
-        target_y = y + offset_y
+                    
 
         return (target_x, target_y)
 
@@ -1228,6 +1271,9 @@ class WallFollower(Node):
         
         self.front_wall = self.track_front_wall(point_data, self.front_wall)
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
+        #validated_clusters = self.merge_clusters(all_clusters, [self.front_wall])[0]
+        #validated_clusters = all_clusters
+        
         visualize = []
         if validated_clusters is None:
             self.get_logger().info("Validated clusters leer")
