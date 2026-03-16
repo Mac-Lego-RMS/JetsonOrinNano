@@ -17,6 +17,9 @@ import cv2
 from ultralytics import YOLO
 import numpy as np
 
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
+
 class WallFollower(Node):
     def __init__(self):
         super().__init__('wall_follower')
@@ -70,7 +73,7 @@ class WallFollower(Node):
 
         # Standard-Werte für die Ideallinie auf der Geraden(z.B. Außenbahn)
         self.default_lane_ratio = 0.85 
-        self.default_max_turn = 0.635
+        self.default_max_turn = 0.8
         
 
         # --- PID-REGLER PARAMETER ---
@@ -82,10 +85,10 @@ class WallFollower(Node):
         self.integral_error = 0.0
 
         # Karotten-Parameter Kurve
-        self.lookahead_dist_turn = 0.25
+        self.lookahead_dist_turn = 0.60
 
         # --- TURN PID-REGLER PARAMETER ---
-        self.turn_kp = 1.0
+        self.turn_kp = 0.6
         self.turn_kd = 0.0
         self.turn_ki = 0.0
 
@@ -924,35 +927,84 @@ class WallFollower(Node):
     
     def get_target_point_turn(self, u_profile, x_soll, y_soll):
         """
-        Berechnet den Zielpunkt (Karotte) in der Kurve basierend auf der Frontwand.
+        Die Soll-Werte Sicht aus beim Ende der Kurve
         """
-        if u_profile is None:
-            return None
-        
-        # Berechenung der Ist-Position 
+        if u_profile is None or u_profile[1] is None:
+            self.get_logger().warn("Keine Frontwand für Kurven-Karotte! Fahre starr.")
+            return (self.lookahead_dist_turn, 0.0)
+
+        turned_so_far = 90.0 - abs(self.get_cluster_angle(u_profile[1]))
+        self.get_logger().info(f"Winkel zur Wand: {turned_so_far:.1f}°")
+        progress = min(1.0, turned_so_far / 90.0)
+        self.get_logger().info(f"Progress: {progress:.5f}")
+
         ist_front_dist = self.get_closest_point_in_cluster(u_profile[1])[3]
+
+        # Y IST JETZT DIE SEITENACHSE! (Positiv = Links, Negativ = Rechts)
+        target_y_side = 0.0
+        target_y_front = 0.0
+        
+        flur_breite = 3.0  # Eure Breite von 3 Metern!
+
+        # ==========================================
+        # LINKSKURVE 
+        # ==========================================
         if self.fahrtrichtung == "links":
-            if u_profile[0] is not None:
+            if u_profile[0] is not None: # Rechte Wand
                 ist_side_dist = self.get_closest_point_in_cluster(u_profile[0])[3]
+            elif u_profile[2] is not None:
+                ist_side_dist = flur_breite - self.get_closest_point_in_cluster(u_profile[2])[3]
             else:
-                if u_profile[2] is not None:
-                    ist_side_dist = 3.0 - (self.get_closest_point_in_cluster(u_profile[2])[3])
-                else:
-                    self.get_logger.warn("Kein Cluster außer der Frontwand gefunden.")
-                    ist_side_dist = None
+                ist_side_dist = x_soll 
+                
+            # Wir wollen x_soll von rechts weg sein. 
+            # Wenn Distanz > x_soll (z.B. 0.51 > 0.40), müssen wir nach RECHTS (Negatives Y!)
+            target_y_side = x_soll - ist_side_dist
+
+            # Frontwand zieht uns nach LINKS (Positives Y) in die Kurve hinein
+            target_y_front = ist_front_dist - y_soll
+
+        # ==========================================
+        # RECHTSKURVE 
+        # ==========================================
         else:
-            if u_profile[2] is not None:
+            if u_profile[2] is not None: # Linke Wand
                 ist_side_dist = self.get_closest_point_in_cluster(u_profile[2])[3]
+            elif u_profile[0] is not None:
+                ist_side_dist = flur_breite - self.get_closest_point_in_cluster(u_profile[0])[3]
             else:
-                if u_profile[0] is not None:
-                    ist_side_dist = 3.0 - (self.get_closest_point_in_cluster(u_profile[0])[3])
-                else:
-                    self.get_logger.warn("Kein Cluster außer der Frontwand gefunden.")
-                    ist_side_dist = None
+                ist_side_dist = x_soll 
+                
+            # Wir wollen x_soll von links weg sein. 
+            # Wenn Distanz > x_soll, müssen wir nach LINKS (Positives Y!)
+            target_y_side = ist_side_dist - x_soll
 
-                    
+            # Frontwand zieht uns nach RECHTS (Negatives Y) in die Kurve hinein
+            target_y_front = y_soll - ist_front_dist
 
-        return (target_x, target_y)
+        # ==========================================
+        # DIE ÜBERBLENDUNG & PURE PURSUIT (X = VORNE)
+        # ==========================================
+        final_target_y = ((1.0 - progress) * target_y_side) + (progress * target_y_front)
+        self.get_logger().info(f"final_target_y: {final_target_y:.2f}")
+
+        if self.fahrtrichtung == "links":
+            vorzeichen = 1.0
+        else:
+            vorzeichen = 1.0
+
+
+
+        # X ist jetzt die Vorausschau (Vorwärts-Achse)
+        # Satz des Pythagoras: X^2 + Y^2 = Lookahead^2
+        if abs(final_target_y) >= self.lookahead_dist_turn:
+            final_target_y = math.copysign(self.lookahead_dist_turn - 0.05, final_target_y)
+            final_target_x = vorzeichen * 0.15  # Karotte liegt direkt neben dem Auto
+        else:
+            final_target_x = vorzeichen * (math.sqrt(self.lookahead_dist_turn**2 - final_target_y**2))
+
+        # RÜCKGABE: (Vorne, Seite)
+        return (final_target_x, final_target_y)
 
     def track_front_wall(self, point_data, last_front_wall):
         """
@@ -1172,17 +1224,46 @@ class WallFollower(Node):
         
 
     def visualize_clusters(self, kandidaten_RVIZ):
-        innenbande = self.right_wall
-        aussenbande = self.left_wall
+        if self.fahrtrichtung == 'links':
+            innenbande = self.left_wall
+            aussenbande = self.right_wall
+        else:
+            innenbande = self.right_wall
+            aussenbande = self.left_wall
+            
         target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
+        
         marker_array = MarkerArray()
 
         if self.state == 'FOLLOW_LANE':
-            self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
+            # ALTE LOGIK FÜR DIE GERADE
+            if self.fahrtrichtung == 'links':
+                innenbande = self.left_wall
+                aussenbande = self.right_wall
+            else:
+                innenbande = self.right_wall
+                aussenbande = self.left_wall
+                
+            target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
+            
+            if target_x is not None and target_y is not None:
+                # Cyan für Geradeaus-Fahrt
+                self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
+                
+        elif self.state in ['TURN_LINKS', 'TURN_RECHTS']:
+            # NEUE LOGIK FÜR DIE KURVE
+            # get_target_point_turn erwartet das u_profile Array!
+            u_profile = [self.right_wall, self.front_wall, self.left_wall]
+            
+            # Zielpunkt-Berechnung aufrufen (z.B. 40cm Soll-Abstand)
+            target_pt = self.get_target_point_turn(u_profile, x_soll=1.00, y_soll=0.40)
+            
+            if target_pt is not None:
+                target_x, target_y = target_pt
+                # Magenta für Kurven-Fahrt (damit du sofort siehst, dass die neue Logik greift!)
+                self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(1.0, 0.0, 1.0))
         else:
             self.delete_marker(marker_array, 99, ns="target")
-            
-        self.pub_markers.publish(marker_array)
 
         # Feste Farben: Rechts=Rot, Front=Grün, Links=Blau
         colors = [
@@ -1248,43 +1329,103 @@ class WallFollower(Node):
 
     def main_logic(self, point_data):
         self.fahrtrichtung = "links"
+        self.state = 'TURN_LINKS'  # Wir testen die Linkskurve
+        
         if self.counter  < 2:
             self.counter += 1
             return
         
-
-        # 1. Alle Cluster finden (mit Kurven- und Ausreißer-Logik)
+        # 1. Alle Cluster finden
         all_clusters = self.get_all_clusters_sorted(point_data)
         front_wall = all_clusters[0] if len(all_clusters) > 0 else None
+        
         if self.begin == True:
             for c in all_clusters:
+                
+                # ==========================================
+                # DER FIX: Cluster in Foxglove anzeigen, BEVOR wir auf Input warten!
+                # ==========================================
                 self.visualize_clusters([c])
                 
-                skip = input("Drücke Enter, um zum nächsten Cluster zu gehen...")
+                skip = input("Drücke Enter, um zum nächsten Cluster zu gehen (oder 'q' für Auswahl)...")
                 if skip.lower() == 'q':
                     self.begin = False
-                    self.get_logger().info("starting Test Bench")
+                    self.get_logger().info(">>> Starte Test Bench mit der gewählten Frontwand! <<<")
                     self.front_wall = c
+                    
+                    # Gyro Nullen für saubere Kurven-Mathematik
+                    self.current_yaw = 0.0
+                    self.start_turn_yaw = 0.0
+                    self.yaw_offset = 0.0
+                    
+                    # PID-Regler nullen
+                    self.integral_error = 0.0
+                    self.prev_error = 0.0
                     break
                 else:
                     continue
         
         self.front_wall = self.track_front_wall(point_data, self.front_wall)
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-        #validated_clusters = self.merge_clusters(all_clusters, [self.front_wall])[0]
-        #validated_clusters = all_clusters
         
         visualize = []
-        if validated_clusters is None:
+        if validated_clusters is None or len(validated_clusters) < 3:
             self.get_logger().info("Validated clusters leer")
-            
+            self.right_wall = None
+            self.front_wall = None
+            self.left_wall = None
         else:
+            self.right_wall = validated_clusters[0]
+            self.front_wall = validated_clusters[1]
+            self.left_wall  = validated_clusters[2]
+            
             for c in validated_clusters:
                 if c is not None:
                     visualize.append(c)
                 
-            self.get_logger().warn(f"Länge des Visualize: {len(visualize)}")
             self.visualize_clusters(visualize)
+        
+        # ==========================================================
+        # 🤖 DIE SERVO-STEUERUNG (PURE PURSUIT + PID)
+        # ==========================================================
+        cmd = Twist()
+        
+        u_profile = [self.right_wall, self.front_wall, self.left_wall]
+        target_pt = self.get_target_point_turn(u_profile, x_soll=1.50, y_soll=0.40)
+        
+        if target_pt is not None:
+            target_x, target_y = target_pt
+            
+            # 1. PURE PURSUIT WINKEL (Y = Seite, X = Vorne)
+            # Liefert automatisch positive Werte für Links, negative für Rechts!
+            alpha_rad = math.atan2(target_y, target_x)
+            
+            # 2. PID REGLER
+            error = alpha_rad
+            
+            self.integral_error += error
+            self.integral_error = max(-1.0, min(1.0, self.integral_error))
+            derivative = error - self.prev_error
+            self.prev_error = error
+            
+            # 3. LENKBEFEHL BERECHNEN
+            steering_cmd = (self.turn_kp * error) + (self.turn_ki * self.integral_error) + (self.turn_kd * derivative)
+            
+            # 4. KAPPEN & SETZEN
+            final_steering = max(-self.max_turn_angle, min(self.max_turn_angle, float(steering_cmd)))
+            cmd.linear.x = 0.0
+            cmd.angular.z = final_steering
+            
+            self.get_logger().info(f"Karotte Vorne(X): {target_y:.2f}m, Seite(Y): {target_x:.2f}m | Winkel: {math.degrees(alpha_rad):.1f}° -> SERVO: {final_steering:.2f}")
+            
+        else:
+            # Notfall-Fallback, falls die Wände komplett weg sind
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.get_logger().warn("Kein Zielpunkt berechenbar. Servo bleibt stehen.")
+            
+        # 6. BEFEHL AN DEN ESP SENDEN
+        self.pub_cmd_vel.publish(cmd)
         
         self.counter = 0
 
