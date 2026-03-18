@@ -28,6 +28,7 @@ setup(
             'yolo_detector = robot_vision.yolo_detector:main',
             'obstacle_follower = robot_vision.obstacle_follower:main',
             'testBench = robot_vision.testBench:main',
+            'coord_test = robot_vision.coord_test:main',
         ],
     },
 )
