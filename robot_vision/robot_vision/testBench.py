@@ -129,6 +129,7 @@ class WallFollower(Node):
         # Karotten-Parameter Kurve
         self.lookahead_dist_turn = 0.20
         self.start_turn_dist = 0
+        self.target_point = (0, 0)
 
         # --- TURN PID-REGLER PARAMETER ---
         self.turn_kp = 0.6
@@ -943,56 +944,84 @@ class WallFollower(Node):
     
     def get_target_point_turn(self, u_profile, x_soll, y_soll):
         """
-        Der "Donkey-Fix": Y zieht IMMER konstant nach vorne. X lenkt ein 
-        und zwingt den Roboter bei exakt 90° Gyro-Drehung kerngerade auf 0.0.
+        Original-Code mit Rotations-Fix:
+        Berechnet den Zielpunkt im Start-Koordinatensystem und dreht ihn 
+        dann passend zur aktuellen Ausrichtung des Roboters mit.
         """
         if u_profile is None or u_profile[1] is None:
             self.get_logger().warn("Keine Frontwand für Kurven-Karotte! Fahre starr.")
             return (0.0, self.lookahead_dist_turn)
 
-        # 1. PERFEKTER PROGRESS ÜBER DEN GYRO
-        # self.current_yaw und self.start_turn_yaw hast du in der main_logic schon perfekt genullt!
-        yaw_turned = abs(self.current_yaw - self.start_turn_yaw)
-        
-        # Sobald er sich 90 Grad gedreht hat, ist die Kurve zu 100% fertig.
-        progress = min(1.0, max(0.0, yaw_turned / 90.0))
-        
-        self.get_logger().info(f"Gyro-Drehung: {yaw_turned:.1f}° | Progress: {progress:.2f}")
+        dist_front_y = self.get_closest_point_in_cluster(u_profile[1])[3]
 
+        # Progress berechnen (0.0 bis 1.0)
+        dist_to_go = max(0.01, self.start_turn_dist - y_soll)
+        dist_completed = max(0.0, self.start_turn_dist - dist_front_y)
+        progress = min(1.0, dist_completed / dist_to_go)
+
+        self.get_logger().info(f"dist_to_go: {dist_to_go:.2f}")
+        self.get_logger().info(f"Progress: {progress:.2f}")
+        self.get_logger().warn(f"Abstand zur Frontwand {dist_front_y:.2f}")
+
+        flur_breite = 3.0
         lookahead = self.lookahead_dist_turn
 
-        # 2. DIE Y-ACHSE (Immer konstant!)
-        # Die Karotte muss immer vor dem Roboter schweben, damit der Pure Pursuit uns vorwärts zieht.
-        final_target_y = lookahead
-
-        # 3. DIE X-ACHSE (Die Lenk-Parabel)
-        # Steigt sanft an, ist bei 45° maximal, und ZWINGT X bei 90° exakt auf 0.0!
-        turn_intensity = 4.0 * progress * (1.0 - progress)
-
+        # =======================================================
+        # DEIN BERECHNUNGS-BLOCK (Bleibt exakt gleich!)
+        # =======================================================
         if self.fahrtrichtung == "links":
-            # Schwingt nach Links (-X) aus
-            base_x = -lookahead * turn_intensity
-            
-            # Spur-Fehler (Nur am Start wichtig, wird sanft ausgeblendet)
-            if u_profile[0] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
-                error_x = dist_side - x_soll
+            if u_profile[0] is not None: 
+                dist_side_x = self.get_closest_point_in_cluster(u_profile[0])[3]
             else:
-                error_x = 0.0
+                dist_side_x = x_soll
                 
-            final_target_x = base_x + (error_x * (1.0 - progress))
+            error_x_start = dist_side_x - x_soll 
+            start_carrot_x = error_x_start
+            start_carrot_y = lookahead 
+
+            error_y_end = dist_front_y - y_soll 
             
+            end_carrot_x = -lookahead 
+            end_carrot_y = error_y_end
+
         else: # RECHTSKURVE
-            # Schwingt nach Rechts (+X) aus
-            base_x = lookahead * turn_intensity
-            
             if u_profile[2] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
-                error_x = x_soll - dist_side
+                dist_side_x = self.get_closest_point_in_cluster(u_profile[2])[3]
             else:
-                error_x = 0.0
+                dist_side_x = x_soll
                 
-            final_target_x = base_x + (error_x * (1.0 - progress))
+            error_x_start = x_soll - dist_side_x 
+            start_carrot_x = error_x_start
+            start_carrot_y = lookahead
+
+            error_y_end = dist_front_y - y_soll
+            
+            end_carrot_x = lookahead 
+            end_carrot_y = error_y_end
+
+        # Die Überblendung erzeugt den globalen Zielpunkt (Start-Koordinatensystem)
+        global_target_x = ((1.0 - progress)) * start_carrot_x + ((progress) * end_carrot_x)
+        global_target_y = ((1.0 - progress)) * start_carrot_y + ((progress) * end_carrot_y)
+
+        
+
+        # =======================================================
+        # DEIN LÖSUNGS-ANSATZ: DIE KOORDINATEN MITDREHEN
+        # =======================================================
+        # Wie viel hat der Roboter sich laut Gyro schon gedreht?
+        yaw_turned_deg = abs(self.current_yaw - self.start_turn_yaw)
+        self.get_logger().info(f"yaw_turned: {yaw_turned_deg:.2f}")
+        # Linksdrehung ist mathematisch positiv, Rechtsdrehung negativ
+        if self.fahrtrichtung == "links":
+            yaw_rad = math.radians(yaw_turned_deg)
+        else:
+            yaw_rad = math.radians(-yaw_turned_deg)
+
+        # Die Rotationsmatrix dreht deinen Punkt passend zur aktuellen Schnauze des Roboters.
+        # Bei exakt 90° Drehung passiert hier genau das, was du gefordert hast: 
+        # Aus dem alten Y wird das neue X und aus dem alten X wird das neue Y!
+        final_target_x = global_target_x * math.cos(yaw_rad) + global_target_y * math.sin(yaw_rad)
+        final_target_y = -global_target_x * math.sin(yaw_rad) + global_target_y * math.cos(yaw_rad)
 
         return (final_target_x, final_target_y)
     
@@ -1291,7 +1320,7 @@ class WallFollower(Node):
             u_profile = [self.right_wall, self.front_wall, self.left_wall]
             
             # Zielpunkt-Berechnung aufrufen (z.B. 40cm Soll-Abstand)
-            target_pt = self.get_target_point_turn(u_profile, x_soll = 0.60, y_soll = 0.20)
+            target_pt = self.target_point
             
             if target_pt is not None:
                 target_x, target_y = target_pt
@@ -1434,7 +1463,8 @@ class WallFollower(Node):
         
         self.front_wall = self.track_front_wall(point_data, self.front_wall)
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-        target_x, target_y = self.get_target_point_turn(validated_clusters, x_soll = 0.90, y_soll = 0.20)
+        self.target_point = self.get_target_point_turn(validated_clusters, x_soll = 1.30, y_soll = 0.20)
+        target_x, target_y = self.target_point
         
         visualize = []
         if validated_clusters is None or len(validated_clusters) < 3:
