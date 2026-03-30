@@ -194,15 +194,16 @@ class WallFollower(Node):
         self.counter = 0
 
         # Mess Variablen
-        self.messwerte_x = np.array([-1.0, -0.80, -0.60, -0.40, -0.25, -0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15, 0.25, 0.40, 0.60, 0.80, 1.0])
+        self.messwerte_x = np.array([-1.0, -0.95, -0.90, -0.85, -0.75, -0.65, -0.55, -0.45, 0.0, 0.45, 0.55, 0.65, 0.75, 0.85, 0.90, 0.95, 1.0])
         self.messwerte_y = np.zeros(17)
         self.turn_polynom = None
         self.current_test_index = 0
 
         self.test_state = "INIT"
         self.state_start_time = 0.0
-        self.measure_start_yaw = 0.0
+        self.measure_start_yaw = None
         self.start_wall_distance = None
+        self.single_test_mode = False
 
         self.load_calibration()
 
@@ -572,7 +573,6 @@ class WallFollower(Node):
             innenbande = self.right_wall
             aussenbande = self.left_wall
             
-        target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
         
         marker_array = MarkerArray()
 
@@ -584,8 +584,6 @@ class WallFollower(Node):
             else:
                 innenbande = self.right_wall
                 aussenbande = self.left_wall
-                
-            target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
             
             if target_x is not None and target_y is not None:
                 # Cyan für Geradeaus-Fahrt
@@ -597,7 +595,7 @@ class WallFollower(Node):
             u_profile = [self.right_wall, self.front_wall, self.left_wall]
             
             # Zielpunkt-Berechnung aufrufen (z.B. 40cm Soll-Abstand)
-            target_pt = self.target_point
+            target_pt = None
             
             if target_pt is not None:
                 target_x, target_y = target_pt
@@ -670,20 +668,18 @@ class WallFollower(Node):
     def cluster_wahl(self, point_data):
         # 1. Alle Cluster finden
         all_clusters = self.get_all_clusters_sorted(point_data)
-        if self.begin == True:
-            for c in all_clusters:
-                self.visualize_clusters([c])
-                skip = input("Drücke Enter, um zum nächsten Cluster zu gehen (oder 'q' für Auswahl)...")
-                if skip.lower() == 'q':
-                    self.begin = False
-                    self.get_logger().info(">>> Starte Test Bench mit der gewählten Frontwand! <<<")
-                    return c
-                else:
-                    continue
-            return None
+        for c in all_clusters:
+            self.visualize_clusters([c])
+            skip = input("Drücke Enter, um zum nächsten Cluster zu gehen (oder 'q' für Auswahl)...")
+            if skip.lower() == 'q':
+                self.get_logger().info(">>> Starte Test Bench mit der gewählten Frontwand! <<<")
+                return c
+            else:
+                continue
+        return None
         
     def load_calibration(self):
-        file_path = os.path.expanduser('~/wro_calibration.json')
+        file_path = '/workspace/src/robot_vision/robot_vision/wro_calibration.json'
         
         if os.path.exists(file_path):
             try:
@@ -736,7 +732,7 @@ class WallFollower(Node):
         }
 
         # 4. Als JSON speichern (Absoluter Pfad im Home-Verzeichnis)
-        file_path = os.path.expanduser('~/wro_calibration.json')
+        file_path = '/workspace/src/robot_vision/robot_vision/wro_calibration.json'
         try:
             with open(file_path, 'w') as f:
                 json.dump(calib_data, f, indent=4)
@@ -747,23 +743,62 @@ class WallFollower(Node):
 
     def main_logic(self, point_data):
         """
-        Zustandsautomat für die Kalibrierung. Wird hochfrequent in der scan_callback aufgerufen.
+        Zustandsautomat für die Kalibrierung.
         """
-        if self.current_test_index == 8:
+        if self.measure_start_yaw is None:
+            self.measure_start_yaw = self.current_yaw
+        # --- FIX FÜR INDEX 8 (Geradeausfahrt) ---
+        # Da eine 180°-Drehung bei u=0 unmöglich ist, setzen wir R=0 und überspringen.
+        if self.current_test_index == 8 and self.test_state != "DONE":
             self.messwerte_y[8] = 0.0
-            self.current_test_index += 1
+            self.get_logger().info("Index 8 (u=0.0) wird übersprungen (Geradeausfahrt).")
+            
+            if self.single_test_mode:
+                self.save_calibration()
+                self.test_state = "DONE"
+            else:
+                self.current_test_index += 1
             return
 
         # ---------------------------------------------------------
         if self.test_state == "INIT":
-            # Warte auf ersten manuellen Trigger (z.B. über eine Variable, 
-            # die Sie im Debugger setzen, oder automatisch nach 3 Sekunden)
+            self.measure_start_yaw = None
             if self.imu_ready:
+                # 1. Benutzereingabe abfragen
+                self.get_logger().info("Sensoren bereit. Warte auf Benutzereingabe im Terminal...")
+                print("\n=== KALIBRIERUNGS-MENÜ ===")
+                for i, x in enumerate(self.messwerte_x):
+                    aktueller_radius = self.messwerte_y[i]
+                    # Ausgabe formatiert: u auf 2 Nachkommastellen, Radius auf 3 Nachkommastellen (Meter)
+                    print(f"[{i:2d}]: u = {x:5.2f}  |  Gespeicherter Radius: {aktueller_radius:6.3f} m")
+                    
+                eingabe = input("\nWelcher Index soll gemessen werden? ('all' für alle): ")
+                
+                if eingabe.lower() == 'all':
+                    self.current_test_index = 0
+                    self.single_test_mode = False
+                else:
+                    try:
+                        idx = int(eingabe)
+                        if 0 <= idx < len(self.messwerte_x):
+                            self.current_test_index = idx
+                            self.single_test_mode = True
+                        else:
+                            self.get_logger().error("Index out of bounds! Skript neustarten.")
+                            self.test_state = "DONE"
+                            return
+                    except ValueError:
+                        self.get_logger().error("Ungültige Eingabe! Skript neustarten.")
+                        self.test_state = "DONE"
+                        return
+
                 self.get_logger().info(f"Starte Test für u={self.messwerte_x[self.current_test_index]}")
+                
+                # 2. Clusterwahl und Start der Messung
                 cluster = self.cluster_wahl(point_data)
-                self.start_wall_distance = self.get_closest_point_in_cluster(cluster)[3]
-                self.measure_start_yaw = self.current_yaw
-                self.test_state = "APPLY_STEERING"
+                if cluster is not None and len(cluster) > 0:
+                    self.start_wall_distance = (self.get_closest_point_in_cluster(cluster)[3]) + 0.08
+                    self.test_state = "APPLY_STEERING"
 
         # ---------------------------------------------------------
         elif self.test_state == "APPLY_STEERING":
@@ -772,53 +807,72 @@ class WallFollower(Node):
             test_cmd.linear.x = self.turn_speed
             test_cmd.angular.z = float(u)
             self.pub_cmd_vel.publish(test_cmd)
-            
-            # Zeitstempel merken und in den Wartezustand wechseln
             self.test_state = "STOP_FOR_MEASUREMENT"
+            self.get_logger().info(f"Starte Drehung für u={u}")
 
         # ---------------------------------------------------------
         elif self.test_state == "STOP_FOR_MEASUREMENT":
-            # Drehen bis der Roboter 180° gedreht hat
-            if abs(self.current_yaw - self.measure_start_yaw) >= 180.0:
-                self.measure_start_yaw = self.current_yaw
+            u = self.messwerte_x[self.current_test_index]
+            test_cmd = Twist()
+            test_cmd.linear.x = self.turn_speed
+            test_cmd.angular.z = float(u)
+            self.pub_cmd_vel.publish(test_cmd)
+            if abs(self.current_yaw - self.measure_start_yaw) >= 80.0:
                 test_cmd = Twist()
                 test_cmd.linear.x = 0.0
                 test_cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(test_cmd)
                 self.test_state = "MEASURE"
+                self.get_logger().info("Drehung abgeschlossen. Stoppe Roboter und starte Messung...")
+            self.get_logger().info(f"Derzeitiger Yaw: {self.current_yaw:.1f}°, Ziel: {self.measure_start_yaw}°")
 
         # ---------------------------------------------------------
         elif self.test_state == "MEASURE":
-            yaw_diff = abs(self.current_yaw - self.measure_start_yaw)
             cluster = self.cluster_wahl(point_data)
-            new_distance = self.get_closest_point_in_cluster(cluster)[3]
-            distance_diff = new_distance - self.start_wall_distance
-            radius = distance_diff / 2.0
-            self.messwerte_y[self.current_test_index] = radius
-            self.get_logger().info(f"Ergebnis u={self.messwerte_x[self.current_test_index]}: Radius {radius} mm , Gefahrener Winkel{yaw_diff:.1f} Grad")
-            
-            self.test_state = "NEXT_TEST"
+            if cluster is not None and len(cluster) > 0:
+                yaw_diff = abs(self.current_yaw - self.measure_start_yaw)
+                new_distance = self.get_closest_point_in_cluster(cluster)[3]
+                distance_diff = new_distance - self.start_wall_distance
+                #radius = distance_diff / 2.0
+                radius = distance_diff
+
+                # HIER wird der alte Wert im Array mit dem neuen überschrieben
+                self.messwerte_y[self.current_test_index] = abs(radius)
+                self.get_logger().info(f"Ergebnis u={self.messwerte_x[self.current_test_index]}: Radius {radius*1000:.0f} mm, Winkel {yaw_diff:.1f}°")
+                self.test_state = "NEXT_TEST"
 
         # ---------------------------------------------------------
         elif self.test_state == "NEXT_TEST":
-            self.current_test_index += 1
-            
-            if self.current_test_index < len(self.messwerte_x):
-                self.get_logger().info(f"Wechsle zu u={self.messwerte_x[self.current_test_index]}")
-                self.test_state = "APPLY_STEERING"
-            else:
-                self.get_logger().info("Alle Messungen abgeschlossen. Stoppe Roboter.")
-                
+            # --- ABBRUCHBEDINGUNG FÜR EINZELMESSUNG ---
+            if self.single_test_mode:
+                self.get_logger().info("Einzelmessung abgeschlossen. Speichere neue JSON...")
                 stop_cmd = Twist()
                 stop_cmd.linear.x = 0.0
                 stop_cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(stop_cmd)
+                
+                # Speichert die 15 alten und den 1 neuen Wert + fittet das Polynom neu
                 self.save_calibration()
                 self.test_state = "DONE"
+                
+            else:
+                self.current_test_index += 1
+                if self.current_test_index < len(self.messwerte_x):
+                    self.get_logger().info(f"Wechsle zu u={self.messwerte_x[self.current_test_index]}")
+                    self.test_state = "APPLY_STEERING"
+                else:
+                    self.get_logger().info("Alle Messungen abgeschlossen. Stoppe Roboter.")
+                    stop_cmd = Twist()
+                    stop_cmd.linear.x = 0.0
+                    stop_cmd.angular.z = 0.0
+                    self.pub_cmd_vel.publish(stop_cmd)
+                    
+                    self.save_calibration()
+                    self.test_state = "DONE"
 
         # ---------------------------------------------------------
         elif self.test_state == "DONE":
-            pass # Nichts weiter tun, Kalibrierung ist fertig.
+            self.test_state = "INIT"
 
         
 def main(args=None):

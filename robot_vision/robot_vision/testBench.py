@@ -19,6 +19,7 @@ import numpy as np
 
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
+from robot_vision.steering_lib import SteeringController
 
 
 
@@ -127,6 +128,7 @@ class WallFollower(Node):
         self.integral_error = 0.0
 
         # Karotten-Parameter Kurve
+        self.steering_ctrl = SteeringController(logger=self.get_logger())
         self.lookahead_dist_turn = 0.20
         self.start_turn_dist = 0
         self.target_point = (0, 0)
@@ -943,88 +945,86 @@ class WallFollower(Node):
         return (target_x, target_y)
     
     def get_target_point_turn(self, u_profile, x_soll, y_soll):
-        """
-        Original-Code mit Rotations-Fix:
-        Berechnet den Zielpunkt im Start-Koordinatensystem und dreht ihn 
-        dann passend zur aktuellen Ausrichtung des Roboters mit.
-        """
-        if u_profile is None or u_profile[1] is None:
-            self.get_logger().warn("Keine Frontwand für Kurven-Karotte! Fahre starr.")
-            return (0.0, self.lookahead_dist_turn)
-
-        dist_front_y = self.get_closest_point_in_cluster(u_profile[1])[3]
-
-        # Progress berechnen (0.0 bis 1.0)
-        dist_to_go = max(0.01, self.start_turn_dist - y_soll)
-        dist_completed = max(0.0, self.start_turn_dist - dist_front_y)
-        progress = min(1.0, dist_completed / dist_to_go)
-
-        self.get_logger().info(f"dist_to_go: {dist_to_go:.2f}")
-        self.get_logger().info(f"Progress: {progress:.2f}")
-        self.get_logger().warn(f"Abstand zur Frontwand {dist_front_y:.2f}")
-
-        flur_breite = 3.0
-        lookahead = self.lookahead_dist_turn
-
-        # =======================================================
-        # DEIN BERECHNUNGS-BLOCK (Bleibt exakt gleich!)
-        # =======================================================
-        if self.fahrtrichtung == "links":
-            if u_profile[0] is not None: 
-                dist_side_x = self.get_closest_point_in_cluster(u_profile[0])[3]
-            else:
-                dist_side_x = x_soll
-                
-            error_x_start = dist_side_x - x_soll 
-            start_carrot_x = error_x_start
-            start_carrot_y = lookahead 
-
-            error_y_end = dist_front_y - y_soll 
-            
-            end_carrot_x = -lookahead 
-            end_carrot_y = error_y_end
-
-        else: # RECHTSKURVE
-            if u_profile[2] is not None:
-                dist_side_x = self.get_closest_point_in_cluster(u_profile[2])[3]
-            else:
-                dist_side_x = x_soll
-                
-            error_x_start = x_soll - dist_side_x 
-            start_carrot_x = error_x_start
-            start_carrot_y = lookahead
-
-            error_y_end = dist_front_y - y_soll
-            
-            end_carrot_x = lookahead 
-            end_carrot_y = error_y_end
-
-        # Die Überblendung erzeugt den globalen Zielpunkt (Start-Koordinatensystem)
-        global_target_x = ((1.0 - progress)) * start_carrot_x + ((progress) * end_carrot_x)
-        global_target_y = ((1.0 - progress)) * start_carrot_y + ((progress) * end_carrot_y)
-
-        
-
-        # =======================================================
-        # DEIN LÖSUNGS-ANSATZ: DIE KOORDINATEN MITDREHEN
-        # =======================================================
-        # Wie viel hat der Roboter sich laut Gyro schon gedreht?
-        yaw_turned_deg = abs(self.current_yaw - self.start_turn_yaw)
-        self.get_logger().info(f"yaw_turned: {yaw_turned_deg:.2f}")
-        # Linksdrehung ist mathematisch positiv, Rechtsdrehung negativ
-        if self.fahrtrichtung == "links":
-            yaw_rad = math.radians(yaw_turned_deg)
+        if u_profile[1] is None:
+            return None
         else:
-            yaw_rad = math.radians(-yaw_turned_deg)
+            dist_front = self.get_closest_point_in_cluster(u_profile[1])[3]
 
-        # Die Rotationsmatrix dreht deinen Punkt passend zur aktuellen Schnauze des Roboters.
-        # Bei exakt 90° Drehung passiert hier genau das, was du gefordert hast: 
-        # Aus dem alten Y wird das neue X und aus dem alten X wird das neue Y!
-        final_target_x = global_target_x * math.cos(yaw_rad) + global_target_y * math.sin(yaw_rad)
-        final_target_y = -global_target_x * math.sin(yaw_rad) + global_target_y * math.cos(yaw_rad)
+        if self.fahrtrichtung == "links":
+            if u_profile[0] is not None:
+                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
+            elif u_profile[2] is not None:
+                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
+            else: 
+                dist_side = None
+        else:
+            if u_profile[2] is not None:
+                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
+            elif u_profile[0] is not None:
+                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
+            else:
+                dist_side = None
 
-        return (final_target_x, final_target_y)
+        delta_x =  dist_side - x_soll if dist_side is not None else None
+        delta_y = dist_front - y_soll
+
+        return (delta_x, delta_y)
     
+    # Chatler Idee
+    def get_target_point_turn(self, u_profile, x_soll, y_soll):
+        if u_profile[1] is None:
+            return None
+            
+        # 1. Abstand zur Frontwand
+        dist_front = self.get_closest_point_in_cluster(u_profile[1])[3]
+        
+        # 2. WIE SCHIEF STEHT DER ROBOTER?
+        # Die Frontwand sollte idealerweise bei 90° sein.
+        angle_front_deg = self.get_cluster_angle(u_profile[1])
+        if angle_front_deg is None:
+            return None
+            
+        # Winkel-Differenz in Bogenmaß umrechnen (z.B. Frontwand bei 60° -> alpha = -30°)
+        alpha = math.radians(angle_front_deg - 90.0)
+
+        # 3. Seitenabstand bestimmen (Eure bestehende Logik)
+        dist_side = None
+        is_left_wall = False
+        
+        if self.fahrtrichtung == "links":
+            if u_profile[0] is not None:
+                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
+                is_left_wall = False
+            elif u_profile[2] is not None:
+                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
+                is_left_wall = True
+        else:
+            if u_profile[2] is not None:
+                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
+                is_left_wall = True
+            elif u_profile[0] is not None:
+                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
+                is_left_wall = False
+
+        # 4. "Ideale" Deltas berechnen (Skalare Distanzen)
+        delta_y_ideal = dist_front - y_soll
+        
+        if dist_side is not None:
+            # Vorzeichen-Logik: Wenn wir uns an der linken Wand orientieren, 
+            # muss das Ziel weiter nach links (-X) geschoben werden.
+            if is_left_wall:
+                delta_x_ideal = -(dist_side - x_soll)
+            else:
+                delta_x_ideal = (dist_side - x_soll)
+        else:
+            delta_x_ideal = 0.0
+
+        # 5. DIE LÖSUNG: Rotationsmatrix anwenden!
+        # Dreht die Koordinaten passend zur Schräglage des Roboters
+        delta_x = delta_x_ideal * math.cos(alpha) - delta_y_ideal * math.sin(alpha)
+        delta_y = delta_x_ideal * math.sin(alpha) + delta_y_ideal * math.cos(alpha)
+
+        return (delta_x, delta_y)
 
     def track_front_wall(self, point_data, last_front_wall):
         """
