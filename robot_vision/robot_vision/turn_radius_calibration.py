@@ -201,6 +201,7 @@ class WallFollower(Node):
         self.test_state = "INIT"
         self.state_start_time = 0.0
         self.measure_start_yaw = 0.0
+        self.start_wall_distance = None
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -684,10 +685,8 @@ class WallFollower(Node):
         """
         if self.current_test_index == 8:
             self.messwerte_y[8] = 0.0
-            self.current_test_index += 1 
+            self.current_test_index += 1
             return
-        # Aktuelle Zeit in Sekunden abrufen (ROS 2 Clock)
-        now = self.get_clock().now().nanoseconds / 1e9 
 
         # ---------------------------------------------------------
         if self.test_state == "INIT":
@@ -695,7 +694,9 @@ class WallFollower(Node):
             # die Sie im Debugger setzen, oder automatisch nach 3 Sekunden)
             if self.imu_ready:
                 self.get_logger().info(f"Starte Test für u={self.messwerte_x[self.current_test_index]}")
-                self.state_start_time = now
+                cluster = self.cluster_wahl(point_data)
+                self.start_wall_distance = self.get_closest_point_in_cluster(cluster)[3]
+                self.measure_start_yaw = self.current_yaw
                 self.test_state = "APPLY_STEERING"
 
         # ---------------------------------------------------------
@@ -707,29 +708,30 @@ class WallFollower(Node):
             self.pub_cmd_vel.publish(test_cmd)
             
             # Zeitstempel merken und in den Wartezustand wechseln
-            self.state_start_time = now
-            self.test_state = "WAIT_FOR_STABILITY"
+            self.test_state = "STOP_FOR_MEASUREMENT"
 
         # ---------------------------------------------------------
-        elif self.test_state == "WAIT_FOR_STABILITY":
-            # 2.0 Sekunden warten, bis sich der Kreisflug stabilisiert hat
-            if (now - self.state_start_time) >= 2.0:
+        elif self.test_state == "STOP_FOR_MEASUREMENT":
+            # Drehen bis der Roboter 180° gedreht hat
+            if abs(self.current_yaw - self.measure_start_yaw) >= 180.0:
                 self.measure_start_yaw = self.current_yaw
-                self.state_start_time = now
+                test_cmd = Twist()
+                test_cmd.linear.x = 0.0
+                test_cmd.angular.z = 0.0
+                self.pub_cmd_vel.publish(test_cmd)
                 self.test_state = "MEASURE"
 
         # ---------------------------------------------------------
         elif self.test_state == "MEASURE":
-            # 3.0 Sekunden lang den Kreis fahren und messen
-            if (now - self.state_start_time) >= 3.0:
-                yaw_diff = abs(self.current_yaw - self.measure_start_yaw)
-                
-                # HIER: Radius berechnen und speichern
-                # radius = ... 
-                # self.messwerte_y[self.current_test_index] = radius
-                self.get_logger().info(f"Ergebnis u={self.messwerte_x[self.current_test_index]}: {yaw_diff:.1f} Grad")
-                
-                self.test_state = "NEXT_TEST"
+            yaw_diff = abs(self.current_yaw - self.measure_start_yaw)
+            cluster = self.cluster_wahl(point_data)
+            new_distance = self.get_closest_point_in_cluster(cluster)[3]
+            distance_diff = new_distance - self.start_wall_distance
+            radius = distance_diff / 2.0
+            self.messwerte_y[self.current_test_index] = radius
+            self.get_logger().info(f"Ergebnis u={self.messwerte_x[self.current_test_index]}: Radius {radius} mm , Gefahrener Winkel{yaw_diff:.1f} Grad")
+            
+            self.test_state = "NEXT_TEST"
 
         # ---------------------------------------------------------
         elif self.test_state == "NEXT_TEST":
