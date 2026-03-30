@@ -21,7 +21,8 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 
 import time
-
+import json
+import os
 
 
 '''
@@ -202,6 +203,8 @@ class WallFollower(Node):
         self.state_start_time = 0.0
         self.measure_start_yaw = 0.0
         self.start_wall_distance = None
+
+        self.load_calibration()
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -678,6 +681,69 @@ class WallFollower(Node):
                 else:
                     continue
             return None
+        
+    def load_calibration(self):
+        file_path = os.path.expanduser('~/wro_calibration.json')
+        
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, 'r') as f:
+                    calib_data = json.load(f)
+                
+                # Werte in Numpy-Arrays zurückwandeln
+                self.messwerte_x = np.array(calib_data["messwerte_x"])
+                self.messwerte_y = np.array(calib_data["messwerte_y"])
+                self.poly_coeffs = np.array(calib_data["poly_coeffs"])
+                
+                self.get_logger().info("Kalibrierungsdaten erfolgreich geladen.")
+            except Exception as e:
+                self.get_logger().error(f"JSON fehlerhaft, nutze Standardwerte. Fehler: {e}")
+                self._set_default_calibration()
+        else:
+            self.get_logger().warn("Keine Kalibrierungsdatei gefunden! Nutze Standardwerte.")
+            self._set_default_calibration()
+
+    def _set_default_calibration(self):
+        # Fallback, falls keine JSON existiert
+        self.poly_coeffs = np.array([0.0, 1.5, 0.0]) # Lineare Standard-Annahme
+        # self.messwerte_x und _y wie bisher definiert lassen
+
+    def save_calibration(self):
+        # 1. Radien in Krümmung (Kappa) umwandeln
+        kappas = np.zeros_like(self.messwerte_y)
+        for i, r in enumerate(self.messwerte_y):
+            # Vorzeichen beibehalten! (Rechtskurven haben negatives u, also auch negatives kappa)
+            # Wenn der Radius über den Lidar-Offset positiv reinkommt, müssen wir
+            # das Vorzeichen von u übernehmen, damit die Mathe stimmt.
+            vorzeichen = np.sign(self.messwerte_x[i])
+            if vorzeichen == 0:
+                vorzeichen = 1.0
+
+            if abs(r) > 0.001:  # Schutz vor Division durch 0
+                kappas[i] = vorzeichen * (1.0 / abs(r))
+            else:
+                kappas[i] = 0.0
+
+        # 2. Polynom 3. Grades fitten: u = c3*kappa^3 + c2*kappa^2 + c1*kappa + c0
+        # WICHTIG: Wir fitten u (x) über kappa, nicht umgekehrt! Grad 3 wegen Symmetrie.
+        coeffs = np.polyfit(kappas, self.messwerte_x, 3)
+
+        # 3. Daten in ein Dictionary packen
+        calib_data = {
+            "messwerte_x": self.messwerte_x.tolist(),
+            "messwerte_y": self.messwerte_y.tolist(),
+            "poly_coeffs": coeffs.tolist()
+        }
+
+        # 4. Als JSON speichern (Absoluter Pfad im Home-Verzeichnis)
+        file_path = os.path.expanduser('~/wro_calibration.json')
+        try:
+            with open(file_path, 'w') as f:
+                json.dump(calib_data, f, indent=4)
+            self.get_logger().info(f"Kalibrierung erfolgreich gespeichert unter {file_path}")
+            self.get_logger().info(f"Gefundene Koeffizienten: {coeffs}")
+        except Exception as e:
+            self.get_logger().error(f"Fehler beim Speichern der Kalibrierung: {e}")
 
     def main_logic(self, point_data):
         """
@@ -747,7 +813,7 @@ class WallFollower(Node):
                 stop_cmd.linear.x = 0.0
                 stop_cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(stop_cmd)
-                
+                self.save_calibration()
                 self.test_state = "DONE"
 
         # ---------------------------------------------------------
