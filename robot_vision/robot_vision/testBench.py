@@ -1421,6 +1421,37 @@ class WallFollower(Node):
 
         return steering_cmd
 
+    import math
+
+    def transform_world_to_robot(point_world, robot_pose):
+        """
+        Transformiert einen Punkt vom Weltkoordinatensystem (Banden-Profil) 
+        in das lokale Roboterkoordinatensystem (Lidar).
+        
+        Parameter:
+        point_world : tuple (x_w, y_w) - Der Zielpunkt im Weltsystem in Metern.
+        robot_pose  : tuple (x_r, y_r, theta_r) - Die Pose des Roboters im Weltsystem.
+                    (x_r, y_r) in Metern, theta_r in Radiant.
+                    
+        Rückgabe:
+        tuple (x_b, y_b) - Die Koordinaten des Punktes relativ zum Roboter.
+        """
+        x_w, y_w = point_world
+        x_r, y_r, theta_r = robot_pose
+        
+        # 1. Translation berechnen (Verschiebung)
+        dx = x_w - x_r
+        dy = y_w - y_r
+        
+        # Trigonometrische Funktionen für die Rotation 
+        cos_theta = math.cos(theta_r)
+        sin_theta = math.sin(theta_r)
+        
+        # 2. Rotation anwenden (Rotationsmatrix)
+        x_b = dx * cos_theta + dy * sin_theta
+        y_b = -dx * sin_theta + dy * cos_theta
+        
+        return (x_b, y_b)
     def main_logic(self, point_data):
         self.fahrtrichtung = "links"
         self.state = 'TURN_LINKS'  # Wir testen die Linkskurve
