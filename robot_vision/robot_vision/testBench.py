@@ -133,6 +133,11 @@ class WallFollower(Node):
         self.start_turn_dist = 0
         self.target_point = (0, 0)
 
+        TRACK_WIDTH_M = 1.0
+        ROBOT_WIDTH_M = 0.15
+        SAFETY_MARGIN_M = 0.05
+        MAX_KINEMATIC_RADIUS_M = 0.34200002431869514
+
         # --- TURN PID-REGLER PARAMETER ---
         self.turn_kp = 0.6
         self.turn_kd = 0.0
@@ -1421,8 +1426,6 @@ class WallFollower(Node):
 
         return steering_cmd
 
-    import math
-
     def transform_world_to_robot(point_world, robot_pose):
         """
         Transformiert einen Punkt vom Weltkoordinatensystem (Banden-Profil) 
@@ -1452,6 +1455,189 @@ class WallFollower(Node):
         y_b = -dx * sin_theta + dy * cos_theta
         
         return (x_b, y_b)
+    
+    # -----------------------------------------------
+    # Neue Koordinatensystem Idee für Kurvenfahrten
+    # -----------------------------------------------
+
+    def cluster_to_hnf(self, cluster):
+        """
+        Berechnet die Hessesche Normalform aus einem Cluster von Messpunkten.
+        Erwartetes Cluster-Format: Liste aus Tupeln (winkel, x_coord, y_coord, abstand)
+        """
+        # 1. Extrahieren der x- und y-Koordinaten in ein NumPy-Array
+        # Index 1 ist x_coord, Index 2 ist y_coord
+        points = np.array([[p[1], p[2]] for p in cluster])
+        
+        # Sicherstellen, dass das Cluster nicht leer ist
+        if len(points) == 0:
+            raise ValueError("Das Cluster ist leer.")
+            
+        # 2. Schwerpunkt berechnen
+        centroid = np.mean(points, axis=0)
+        
+        # 3. Daten zentrieren
+        centered_points = points - centroid
+        
+        # 4. Singulärwertzerlegung (SVD) für orthogonale Regression
+        # Vh enthält die Eigenvektoren der Kovarianzmatrix
+        _, _, Vh = np.linalg.svd(centered_points)
+        
+        # Der Normalenvektor entspricht dem Eigenvektor der geringsten Varianz
+        # Bei der SVD in NumPy ist dies die letzte Zeile von Vh
+        normal_vector = Vh[-1]
+        
+        # 5. Abstand d berechnen (Skalarprodukt aus Schwerpunkt und Normalenvektor)
+        d = np.dot(centroid, normal_vector)
+        
+        # 6. Normierung: d muss größer oder gleich 0 sein
+        if d < 0:
+            normal_vector = -normal_vector
+            d = -d
+            
+        n_x, n_y = normal_vector
+        
+        return n_x, n_y, d
+    
+    def extract_wall_lines(self, front_cluster, side_cluster):
+        # Sicherheitsprüfung: Sind ausreichend Datenpunkte für eine SVD vorhanden?
+        # Eine Linie benötigt mathematisch mindestens 2 Punkte.
+
+        if len(front_cluster) < 2:
+            front_straight = None
+        else:
+            front_straight = self.cluster_to_hnf(front_cluster)
+
+        if len(side_cluster) < 2:
+            side_straight = None
+        else:
+            side_straight = self.cluster_to_hnf(side_cluster)
+        
+        return front_straight, side_straight
+
+    def calculate_target_line(self, side_line_params, front_line_params, obstacle, desired_wall_distance_m):
+        if side_line_params is None or front_line_params is None:
+            return None, None
+            
+        n_xs, n_ys, d_s = side_line_params
+        n_xf, n_yf, d_f = front_line_params
+        
+        # 1. Basis-Zielgerade
+        d_ziel = d_f - desired_wall_distance_m
+        
+        # 2. Hindernis auswerten
+        if obstacle is not None and len(obstacle.cluster) > 0:
+            # Hier folgt die detaillierte Ausweichlogik basierend auf obstacle.farbe
+            # ...
+            # Beispielhaftes Überschreiben von d_ziel, falls Offset nötig ist:
+            # d_ziel = neues_sicheres_d
+            pass
+            
+        target_line_params = (n_xf, n_yf, d_ziel)
+        
+        # 3. Radius Limitierung
+        delta_d_neu = d_f - d_ziel
+        
+        r_max_start = self.TRACK_WIDTH_M - d_s - (self.ROBOT_WIDTH_M / 2.0)
+        r_max_ziel = self.TRACK_WIDTH_M - delta_d_neu - (self.ROBOT_WIDTH_M / 2.0)
+        
+        max_allowed_radius_m = min(r_max_start, r_max_ziel, self.MAX_KINEMATIC_RADIUS_M)
+        
+        # Sicherstellen, dass der Radius physikalisch fahrbar bleibt (> 0)
+        max_allowed_radius_m = max(max_allowed_radius_m, 0.0)
+        
+        return target_line_params, max_allowed_radius_m
+    
+    def get_intersection_point(self, target_line_params):
+        """
+        Berechnet den Schnittpunkt der y-Achse (Roboter-Trajektorie) mit der Zielgeraden.
+        """
+        if target_line_params is None:
+            return None, None
+            
+        n_x, n_y, d = target_line_params
+        
+        # Sicherheitsprüfung auf Parallelität (Vermeidung von Division durch Null)
+        epsilon = 1e-6
+        if abs(n_y) < epsilon:
+            # Zielgerade ist parallel zur Fahrtrichtung, kein Schnittpunkt
+            return None, None
+            
+        # Schnittpunkt berechnen
+        intersection_x_m = 0.0  # Roboter fährt per Definition auf x=0
+        intersection_y_m = d / n_y
+        
+        # Plausibilitätsprüfung: Schnittpunkt muss vor dem Roboter (in Fahrtrichtung) liegen
+        if intersection_y_m <= 0.0:
+            # Mathematischer Schnittpunkt liegt hinter dem Roboter. 
+            # Indiziert Fehler im Lidar-Clustering oder Odometrie-Sprung.
+            return None, None
+            
+        return intersection_x_m, intersection_y_m
+
+    def calculate_curve_geometry(self, intersection_y_m, turn_angle_deg, max_allowed_radius_m, robot_min_radius_m):
+        """
+        Berechnet den optimalen Kurvenradius und die Distanz zum Einlenkpunkt auf der y-Achse.
+        """
+        if intersection_y_m is None or max_allowed_radius_m < robot_min_radius_m:
+            # Kurve ist geometrisch oder mechanisch unmöglich
+            return None, None
+
+        # 1. Optimalen Radius bestimmen
+        ideal_radius_m = 0.4  # Euer bevorzugter Standardradius für flüssiges Fahren
+        
+        # Radius wird zwischen dem mechanischen Minimum und dem Platz-Maximum eingeklemmt
+        curve_radius_m = max(robot_min_radius_m, min(ideal_radius_m, max_allowed_radius_m))
+        
+        # 2. Tangentenlänge (Distanz vom Schnittpunkt zum Einlenkpunkt) berechnen
+        alpha_rad = math.radians(abs(turn_angle_deg))
+        tangent_length_m = curve_radius_m * math.tan(alpha_rad / 2.0)
+        
+        # 3. Finalen Einlenkpunkt auf der y-Achse festlegen
+        entry_point_distance_m = intersection_y_m - tangent_length_m
+        
+        return curve_radius_m, entry_point_distance_m
+
+    def check_turn_trigger(self, entry_point_distance_m):
+        """
+        Prüft anhand der aktuell berechneten Distanz, ob das Einlenkmanöver starten muss.
+        """
+        if entry_point_distance_m is None:
+            return False
+
+        # Toleranzwert (z.B. 2 cm), um Verzögerungen in der Hauptschleife abzufangen
+        trigger_tolerance_m = 0.04 
+
+        if entry_point_distance_m <= trigger_tolerance_m:
+            return True
+            
+        return False
+
+    def execute_turn(self, curve_radius_m, is_left_turn):
+        """
+        Übersetzt den Radius über den SteeringController und publisht die Twist-Message.
+        """
+        cmd = Twist()
+        
+        # 1. Sicherheitscheck auf ungültige Geometrie
+        if curve_radius_m is None or curve_radius_m <= 0.0:
+            self.get_logger().error("Ungültiger Kurvenradius.")
+            return False
+        
+        # 3. Abruf des kalibrierten PWM-Signals (-1.0 bis 1.0)
+        steering_signal = self.steering_ctrl.get_steering_for_radius(
+            target_radius=curve_radius_m,
+            fahrtrichtung_ist_links=is_left_turn
+        )
+        
+        # 4. Twist-Message konstruieren und senden
+        cmd.linear.x = float(self.turn_speed)
+        cmd.angular.z = float(steering_signal)
+        
+        self.pub_cmd_vel.publish(cmd)
+        
+        return True
+
     def main_logic(self, point_data):
         self.fahrtrichtung = "links"
         self.state = 'TURN_LINKS'  # Wir testen die Linkskurve
@@ -1547,7 +1733,6 @@ class WallFollower(Node):
         return  # Bricht ab, damit keine anderen Fahrbefehle feuern
         # ==========================================
 
-        
 def main(args=None):
     rclpy.init(args=args)
     node = WallFollower()
