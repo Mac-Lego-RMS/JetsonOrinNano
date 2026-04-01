@@ -1502,6 +1502,7 @@ class WallFollower(Node):
     def extract_wall_lines(self, front_cluster, side_cluster):
         # Sicherheitsprüfung: Sind ausreichend Datenpunkte für eine SVD vorhanden?
         # Eine Linie benötigt mathematisch mindestens 2 Punkte.
+        # Fehlt noch was passiert wenn wir nur die gegenüberliegende Wand !!!
 
         if len(front_cluster) < 2:
             front_straight = None
@@ -1637,6 +1638,71 @@ class WallFollower(Node):
         self.pub_cmd_vel.publish(cmd)
         
         return True
+
+    def check_turn_completion_fused(self, current_gyro_angle, target_angle, front_line_params):
+        """
+        Kombiniert Gyro-Daten mit dem Wandwinkel für maximale Präzision am Kurvenausgang.
+        """
+        # 1. Grobe Prüfung via Gyro (Delta-Berechnung wie zuvor)
+        delta_gyro = abs(current_gyro_angle - self.start_gyro_angle)
+        if delta_gyro > 180: delta_gyro = 360 - delta_gyro
+        
+        # Wenn wir noch nicht einmal 75 Grad gedreht haben, sicher noch nicht fertig
+        if delta_gyro < 75.0:
+            return False
+
+        # 2. Präzise Prüfung via LiDAR-Winkel (falls Wand sichtbar)
+        if front_line_params is not None:
+            n_x, n_y, d = front_line_params
+            
+            # In eurem System (y = vorne, x = seite): 
+            # Wenn der Roboter parallel zur Wand steht, muss n_y gegen 0 gehen.
+            # Das entspricht einem Orientierungsfehler zur Wand von:
+            wall_error_deg = math.degrees(math.atan2(abs(n_y), abs(n_x)))
+            
+            # Abbruchbedingung: Gyro ist nah dran UND Wand-Parallelität ist hoch
+            if delta_gyro >= 85.0 and wall_error_deg < 3.0:
+                self.get_logger().info(f"Fused Match: Gyro {delta_gyro:.1f}°, Wall-Error {wall_error_deg:.1f}°")
+                return True
+
+        # 3. Fallback: Nur Gyro (falls LiDAR die Wand kurz verliert)
+        if delta_gyro >= abs(target_angle) - 2.0:
+            self.get_logger().warn("Nur Gyro-Abschluss (Wand nicht erkannt)")
+            return True
+
+        return False
+
+    def check_turn_completion_fused(self, current_gyro_angle, target_angle, front_line_params):
+        """
+        Kombiniert Gyro-Daten mit dem Wandwinkel für maximale Präzision am Kurvenausgang.
+        """
+        # 1. Grobe Prüfung via Gyro (Delta-Berechnung wie zuvor)
+        delta_gyro = abs(current_gyro_angle - self.start_turn_yaw)
+        
+        # Wenn wir noch nicht einmal 75 Grad gedreht haben, sicher noch nicht fertig
+        if delta_gyro < 75.0:
+            return False
+
+        # 2. Präzise Prüfung via LiDAR-Winkel (falls Wand sichtbar)
+        if front_line_params is not None:
+            n_x, n_y, d = front_line_params
+            
+            # In eurem System (y = vorne, x = seite): 
+            # Wenn der Roboter parallel zur Wand steht, muss n_y gegen 0 gehen.
+            # Das entspricht einem Orientierungsfehler zur Wand von:
+            wall_error_deg = math.degrees(math.atan2(abs(n_y), abs(n_x)))
+            
+            # Abbruchbedingung: Gyro ist nah dran UND Wand-Parallelität ist hoch
+            if delta_gyro >= 85.0 and wall_error_deg < 3.0:
+                self.get_logger().info(f"Fused Match: Gyro {delta_gyro:.1f}°, Wall-Error {wall_error_deg:.1f}°")
+                return True
+
+        # 3. Fallback: Nur Gyro (falls LiDAR die Wand kurz verliert)
+        if delta_gyro >= abs(target_angle) - 2.0:
+            self.get_logger().warn("Nur Gyro-Abschluss (Wand nicht erkannt)")
+            return True
+
+        return False
 
     def main_logic(self, point_data):
         self.fahrtrichtung = "links"
