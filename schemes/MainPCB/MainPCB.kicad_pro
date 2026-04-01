@@ -190,7 +190,10 @@
       "track_widths": [
         0.0,
         0.25,
+        0.5,
+        0.75,
         1.0,
+        1.5,
         2.0,
         3.0
       ],
@@ -507,9 +510,9 @@
     "last_paths": {
       "gencad": "",
       "idf": "",
-      "netlist": "",
-      "plot": "gerber/gerberV2/",
-      "pos_files": "",
+      "netlist": "./",
+      "plot": "gerber/gerberV3/",
+      "pos_files": "gerber/",
       "specctra_dsn": "",
       "step": "MainPCB.step",
       "svg": "",
