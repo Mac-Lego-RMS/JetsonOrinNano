@@ -58,7 +58,32 @@
           "width": 0.0
         }
       ],
-      "drc_exclusions": [],
+      "drc_exclusions": [
+        [
+          "courtyards_overlap|156609380|131733860|1680aa69-bdd7-4dc8-b2dc-aa2c18cbfe63|b3e31960-4dad-4cec-b53d-aa65f9c801bc",
+          ""
+        ],
+        [
+          "lib_footprint_mismatch|111797349|155760000|f01e886a-33ab-408a-ba58-d7c80eb2dafb|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "lib_footprint_mismatch|113628932|168821068|fb45fedd-0abb-4235-a6d7-b9898a4fe2a1|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "lib_footprint_mismatch|128297349|155500000|2095ca8a-6616-4610-8b6a-4024aebe1f84|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "lib_footprint_mismatch|132628932|173821068|5815cde5-a4c4-4e56-bea9-f070fcab9a5d|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "silk_over_copper|129971039|150892430|e599e92e-65e8-4ec7-a227-8edc34805fdd|00000000-0000-0000-0000-000000000000",
+          ""
+        ]
+      ],
       "meta": {
         "version": 2
       },
@@ -511,8 +536,8 @@
       "gencad": "",
       "idf": "",
       "netlist": "./",
-      "plot": "gerber/gerberV3/",
-      "pos_files": "gerber/",
+      "plot": "gerber/gerberV4/",
+      "pos_files": "gerber/gerberV4/",
       "specctra_dsn": "",
       "step": "MainPCB.step",
       "svg": "",
