@@ -1704,11 +1704,71 @@ class WallFollower(Node):
 
         return False
 
+    # -----------------------------------------------
+    # Testfunktionen
+    # -----------------------------------------------
+
+    def visualize_hnf_line(self, hnf_params, m_id, farbe_name="rot", label="HNF_LINE"):
+        """
+        Erstellt einen Marker für eine Gerade aus der Hesseschen Normalform (n_x, n_y, d).
+        
+        Args:
+            hnf_params: Tuple (n_x, n_y, d)
+            m_id: Eindeutige ID für den Marker
+            farbe_name: "rot", "gruen" oder "blau"
+            label: Textbeschriftung an der Linie
+        """
+        if hnf_params is None:
+            return
+
+        # Farb-Mapping (RGB-Werte normiert auf 0.0 - 1.0)
+        farben = {
+            "rot": (1.0, 0.0, 0.0),
+            "gruen": (0.0, 1.0, 0.0),
+            "blau": (0.0, 0.5, 1.0)
+        }
+        
+        # Fallback auf Weiß, falls die Farbe nicht im Dictionary ist
+        rgb = farben.get(farbe_name.lower(), (1.0, 1.0, 1.0))
+        
+        n_x, n_y, d = hnf_params
+        
+        # 1. Lotpunkt berechnen (Punkt auf der Linie am nächsten zum Ursprung)
+        p_lot_x = n_x * d
+        p_lot_y = n_y * d
+        
+        # 2. Richtungsvektor der Geraden (senkrecht zum Normalenvektor)
+        # Da y vorne ist: n=(nx, ny) -> v=(-ny, nx)
+        v_x = -n_y
+        v_y = n_x
+        
+        # 3. Zwei Punkte für eine 4 Meter lange Linie (2m in jede Richtung vom Lotpunkt)
+        p1 = (p_lot_x + v_x * 2.0, p_lot_y + v_y * 2.0)
+        p2 = (p_lot_x - v_x * 2.0, p_lot_y - v_y * 2.0)
+        
+        # 4. Marker-Array vorbereiten
+        marker_array = MarkerArray()
+        
+        # 5. Linie zeichnen (Nutzt deine interne send_line Methode)
+        self.send_line(marker_array, m_id=m_id, p1=p1, p2=p2, color=rgb)
+        
+        # 6. Text-Label am Lotpunkt (ID versetzt, damit Text und Linie koexistieren)
+        self.send_text(marker_array, m_id=m_id + 1000, text=label, x=p_lot_x, y=p_lot_y, color=rgb)
+        
+        # 7. Veröffentlichen
+        self.pub_markers.publish(marker_array)
+
+    def test_extract_wall_lines(self, front_cluster, side_cluster):
+        front_straight = self.extract_wall_lines(front_cluster, side_cluster)
+        side_straight = self.extract_wall_lines(side_cluster, front_cluster)
+        self.visualize_hnf_line(front_straight, m_id=200, farbe_name="gruen", label="Front HNF")
+        self.visualize_hnf_line(side_straight, m_id=300, farbe_name="blau", label="Side HNF")
+
     def main_logic(self, point_data):
         self.fahrtrichtung = "links"
         self.state = 'TURN_LINKS'  # Wir testen die Linkskurve
         
-        if self.counter  < 2:
+        if self.counter  < 3:
             self.counter += 1
             return
         
@@ -1746,54 +1806,9 @@ class WallFollower(Node):
         
         self.front_wall = self.track_front_wall(point_data, self.front_wall)
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-        self.target_point = self.get_target_point_turn(validated_clusters, x_soll = 1.30, y_soll = 0.20)
-        target_x, target_y = self.target_point
+        außenbande = validated_clusters[0] if len(validated_clusters) > 0 else None
         
-        visualize = []
-        if validated_clusters is None or len(validated_clusters) < 3:
-            self.get_logger().info("Validated clusters leer")
-            self.right_wall = None
-            self.front_wall = None
-            self.left_wall = None
-        else:
-            self.right_wall = validated_clusters[0]
-            self.front_wall = validated_clusters[1]
-            self.left_wall  = validated_clusters[2]
-            
-            for c in validated_clusters:
-                if c is not None:
-                    visualize.append(c)
-            #visualize = all_clusters    
-            self.visualize_clusters(visualize)
-
-        # ==========================================
-        # 🧪 TEST-BLOCK: Karotte prüfen & NUR LENKEN (Motor aus)
-        # ==========================================
-        if target_x is not None and target_y is not None:
-            # 1. Logge die Karotte
-            self.get_logger().info(f"[TEST] Karotte: X={target_x:.2f}m | Y={target_y:.2f}m")
-            
-            # 2. Hole den Lenkbefehl aus dem neuen PID-Regler
-            steering_cmd = self.calculate_steering_pid(target_x, target_y)
-            self.get_logger().info(f"[TEST] Sende Lenkbefehl (angular.z): {steering_cmd:.3f} rad")
-
-            # 3. Karotte in Foxglove zeichnen
-            test_marker_array = MarkerArray()
-            self.send_sphere(test_marker_array, m_id=99, x=target_x, y=target_y, color=(1.0, 0.0, 1.0))
-            self.pub_markers.publish(test_marker_array)
-
-            # 4. Befehl an den Roboter senden!
-            test_cmd = Twist()
-            test_cmd.linear.x = 0.0  # MOTOR AUS (Sicherheit!)
-            test_cmd.angular.z = float(steering_cmd) # SERVO BEWEGEN!
-            self.pub_cmd_vel.publish(test_cmd)
-            
-        else:
-            self.get_logger().warn("[TEST] Es wurde kein Target Point zurückgegeben (None)!")
-            test_cmd = Twist()
-            test_cmd.linear.x = 0.0
-            test_cmd.angular.z = 0.0
-            self.pub_cmd_vel.publish(test_cmd)
+        self.test_extract_wall_lines(front_wall, außenbande)
 
         self.counter = 0
         return  # Bricht ab, damit keine anderen Fahrbefehle feuern
