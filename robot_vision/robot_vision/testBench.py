@@ -133,10 +133,12 @@ class WallFollower(Node):
         self.start_turn_dist = 0
         self.target_point = (0, 0)
 
-        TRACK_WIDTH_M = 1.0
-        ROBOT_WIDTH_M = 0.15
-        SAFETY_MARGIN_M = 0.05
-        MAX_KINEMATIC_RADIUS_M = 0.34200002431869514
+        self.TRACK_WIDTH_M = 1.0
+        self.ROBOT_WIDTH_M = 0.15
+        self.SAFETY_MARGIN_M = 0.05
+        self.MAX_KINEMATIC_RADIUS_M = 1.2
+        self.IDEAL_RADIUS_M = 0.4
+        self.MIN_TURN_RADIUS_M = 0.35
 
         # --- TURN PID-REGLER PARAMETER ---
         self.turn_kp = 0.6
@@ -285,26 +287,41 @@ class WallFollower(Node):
     def camera_sub_callback(self, msg):
         self.last_image_msg = msg
 
-    def send_text(self, marker_array, m_id, text, x, y, color=(1.0, 1.0, 1.0)):
-        """Hilfsfunktion zum Erstellen von schwebendem Text in RViz."""
+    def send_text(self, marker_array, m_id, text, x, y, color=(1.0, 1.0, 1.0), scale=0.15):
+        """
+        Fügt einen sichtbaren Text-Marker zum MarkerArray hinzu.
+        scale: Schriftgröße in Metern (Standard 15cm)
+        """
         marker = Marker()
-        marker.header.frame_id = self.rviz_frame
+        marker.header.frame_id = "base_link"  # Passe dies an euren Frame an (z.B. "laser")
         marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "labels"  # Eigener Namespace, damit es nicht mit den Linien crasht
+        
+        marker.ns = "text_labels"
         marker.id = m_id
-        marker.type = Marker.TEXT_VIEW_FACING
+        marker.type = Marker.TEXT_VIEW_FACING  # Wichtig: Typ 9 für Text
         marker.action = Marker.ADD
         
-        # Position des Textes (Z leicht erhöht, damit es über dem Lidar schwebt)
+        # Position
         marker.pose.position.x = float(x)
         marker.pose.position.y = float(y)
-        marker.pose.position.z = 0.3 
+        # Leichtes Anheben (z = 0.1) verhindert oft, dass der Text im Grid/Boden verschwindet
+        marker.pose.position.z = 0.1 
         
-        marker.scale.z = 0.15  # Textgröße
+        # Ausrichtung (bei TEXT_VIEW_FACING rotiert der Text automatisch zur Kamera,
+        # die Quaternion muss aber trotzdem valide sein)
+        marker.pose.orientation.w = 1.0
         
-        marker.color.r, marker.color.g, marker.color.b = color
-        marker.color.a = 1.0
-        marker.text = text
+        # SKALIERUNG: Bei Text ist NUR scale.z relevant (Schriftgröße in m)
+        marker.scale.z = float(scale) 
+        
+        # Farbe und Sichtbarkeit
+        marker.color.r = float(color[0])
+        marker.color.g = float(color[1])
+        marker.color.b = float(color[2])
+        marker.color.a = 1.0  # Wichtig: 1.0 bedeutet 100% sichtbar (Deckkraft)
+        
+        # Der eigentliche String
+        marker.text = str(text)
         
         marker_array.markers.append(marker)
 
@@ -536,7 +553,6 @@ class WallFollower(Node):
                         u_profile[0] = None
             
             u_profile, _ = self.merge_clusters(clusters, u_profile)
-            self.get_logger().warn(f"?")
             return u_profile
 
         self.get_logger().warn(f"Kein Cluster außer der Frontwand gefunden.")
@@ -1352,8 +1368,8 @@ class WallFollower(Node):
         # --- RVIZ TEXT-MARKER FÜR DIE FAHRTRICHTUNG UND BANDEN ---
         if self.fahrtrichtung is not None:
             # 1. Zeige die gelockte Fahrtrichtung direkt über dem Roboter an (X=0, Y=0)
-            richtung_text = f"LOCKED: {self.fahrtrichtung.upper()}"
-            self.send_text(marker_array, m_id=10, text=richtung_text, x=0.0, y=0.0, color=(1.0, 1.0, 0.0)) # Gelb
+            '''richtung_text = f"LOCKED: {self.fahrtrichtung.upper()}"
+            self.send_text(marker_array, m_id=10, text=richtung_text, x=0.0, y=0.0, color=(1.0, 1.0, 0.0)) # Gelb'''
 
             # 2. Beschrifte die Innenbande
             if innenbande and len(innenbande) > 0:
@@ -1390,7 +1406,7 @@ class WallFollower(Node):
                 ende_p = (cluster[-1][1], cluster[-1][2])
                 
                 # Linie zeichnen: ID entspricht dem Index (0, 1, oder 2)
-                self.send_line(marker_array, m_id=i, p1=start_p, p2=ende_p, color=colors[i])
+                self.send_line(marker_array, m_id=i, p1=start_p, p2=ende_p, color=colors[0])
 
         # Alles veröffentlichen, damit es in RViz2 auftaucht!
         self.pub_markers.publish(marker_array)
@@ -1503,13 +1519,19 @@ class WallFollower(Node):
         # Sicherheitsprüfung: Sind ausreichend Datenpunkte für eine SVD vorhanden?
         # Eine Linie benötigt mathematisch mindestens 2 Punkte.
         # Fehlt noch was passiert wenn wir nur die gegenüberliegende Wand !!!
+        '''if self.are_clusters_near(front_cluster, side_cluster):
+            self.get_logger().warn("WARNUNG: Front- und Seitencluster sind zu nahe beieinander.") '''
 
-        if len(front_cluster) < 2:
+        if front_cluster is None:
+            front_straight = None
+        elif len(front_cluster) < 2:
             front_straight = None
         else:
             front_straight = self.cluster_to_hnf(front_cluster)
 
-        if len(side_cluster) < 2:
+        if side_cluster is None:
+            side_straight = None
+        elif len(side_cluster) < 2:
             side_straight = None
         else:
             side_straight = self.cluster_to_hnf(side_cluster)
@@ -1517,10 +1539,9 @@ class WallFollower(Node):
         return front_straight, side_straight
 
     def calculate_target_line(self, side_line_params, front_line_params, obstacle, desired_wall_distance_m):
-        if side_line_params is None or front_line_params is None:
+        if front_line_params is None:
             return None, None
-            
-        n_xs, n_ys, d_s = side_line_params
+
         n_xf, n_yf, d_f = front_line_params
         
         # 1. Basis-Zielgerade
@@ -1536,8 +1557,12 @@ class WallFollower(Node):
             
         target_line_params = (n_xf, n_yf, d_ziel)
         
+        if side_line_params is None:
+            return target_line_params, None
+
         # 3. Radius Limitierung
         delta_d_neu = d_f - d_ziel
+        n_xs, n_ys, d_s = side_line_params
         
         r_max_start = self.TRACK_WIDTH_M - d_s - (self.ROBOT_WIDTH_M / 2.0)
         r_max_ziel = self.TRACK_WIDTH_M - delta_d_neu - (self.ROBOT_WIDTH_M / 2.0)
@@ -1554,7 +1579,7 @@ class WallFollower(Node):
         Berechnet den Schnittpunkt der y-Achse (Roboter-Trajektorie) mit der Zielgeraden.
         """
         if target_line_params is None:
-            return None, None
+            return None, None, None
             
         n_x, n_y, d = target_line_params
         
@@ -1562,7 +1587,7 @@ class WallFollower(Node):
         epsilon = 1e-6
         if abs(n_y) < epsilon:
             # Zielgerade ist parallel zur Fahrtrichtung, kein Schnittpunkt
-            return None, None
+            return None, None, None
             
         # Schnittpunkt berechnen
         intersection_x_m = 0.0  # Roboter fährt per Definition auf x=0
@@ -1572,23 +1597,29 @@ class WallFollower(Node):
         if intersection_y_m <= 0.0:
             # Mathematischer Schnittpunkt liegt hinter dem Roboter. 
             # Indiziert Fehler im Lidar-Clustering oder Odometrie-Sprung.
-            return None, None
-            
-        return intersection_x_m, intersection_y_m
+            return None, None, None
+        
+        nx_clipped = max(-1.0, min(1.0, abs(n_x)))
+        turn_angle_deg = math.degrees(math.acos(nx_clipped))  
+
+        return intersection_x_m, intersection_y_m, turn_angle_deg
 
     def calculate_curve_geometry(self, intersection_y_m, turn_angle_deg, max_allowed_radius_m, robot_min_radius_m):
         """
         Berechnet den optimalen Kurvenradius und die Distanz zum Einlenkpunkt auf der y-Achse.
         """
-        if intersection_y_m is None or max_allowed_radius_m < robot_min_radius_m:
+        if intersection_y_m is None:
             # Kurve ist geometrisch oder mechanisch unmöglich
             return None, None
 
-        # 1. Optimalen Radius bestimmen
-        ideal_radius_m = 0.4  # Euer bevorzugter Standardradius für flüssiges Fahren
-        
+        if max_allowed_radius_m is None:
+            max_allowed_radius_m = self.MAX_KINEMATIC_RADIUS_M
+
+        if max_allowed_radius_m < robot_min_radius_m:
+            return None, None
+
         # Radius wird zwischen dem mechanischen Minimum und dem Platz-Maximum eingeklemmt
-        curve_radius_m = max(robot_min_radius_m, min(ideal_radius_m, max_allowed_radius_m))
+        curve_radius_m = max(robot_min_radius_m, min(self.IDEAL_RADIUS_M, max_allowed_radius_m))
         
         # 2. Tangentenlänge (Distanz vom Schnittpunkt zum Einlenkpunkt) berechnen
         alpha_rad = math.radians(abs(turn_angle_deg))
@@ -1743,8 +1774,8 @@ class WallFollower(Node):
         v_y = n_x
         
         # 3. Zwei Punkte für eine 4 Meter lange Linie (2m in jede Richtung vom Lotpunkt)
-        p1 = (p_lot_x + v_x * 2.0, p_lot_y + v_y * 2.0)
-        p2 = (p_lot_x - v_x * 2.0, p_lot_y - v_y * 2.0)
+        p1 = (p_lot_x + v_x * 3.0, p_lot_y + v_y * 3.0)
+        p2 = (p_lot_x - v_x * 3.0, p_lot_y - v_y * 3.0)
         
         # 4. Marker-Array vorbereiten
         marker_array = MarkerArray()
@@ -1759,10 +1790,136 @@ class WallFollower(Node):
         self.pub_markers.publish(marker_array)
 
     def test_extract_wall_lines(self, front_cluster, side_cluster):
-        front_straight = self.extract_wall_lines(front_cluster, side_cluster)
-        side_straight = self.extract_wall_lines(side_cluster, front_cluster)
-        self.visualize_hnf_line(front_straight, m_id=200, farbe_name="gruen", label="Front HNF")
-        self.visualize_hnf_line(side_straight, m_id=300, farbe_name="blau", label="Side HNF")
+        '''Testet die Funktion extract_wall_lines() und visualisiert die Ergebnisse in RViz.'''
+        front_straight, side_straight = self.extract_wall_lines(front_cluster, side_cluster)
+        self.get_logger().info(f"Front HNF: {front_straight}")
+        self.get_logger().info(f"Side HNF: {side_straight}")
+        self.visualize_hnf_line(front_straight, m_id=200, farbe_name="blau", label="")
+        self.visualize_hnf_line(side_straight, m_id=300, farbe_name="blau", label="")
+
+    def test_calculate_target_line(self, front_wall_cluster, side_wall_cluster, desired_wall_distance_m):
+        '''Testet die Funktion calculate_target_line() und visualisiert die Ergebnisse in RViz.'''
+        front_line_params, side_line_params = self.extract_wall_lines(front_wall_cluster, side_wall_cluster)
+        target_line_params, max_radius = self.calculate_target_line(side_line_params, front_line_params, None, desired_wall_distance_m)
+        radius = f"{max_radius:.2f}" if max_radius is not None else "None"
+        self.get_logger().info(f"Target Line HNF: {target_line_params}, Max Radius: {radius} m")
+        self.visualize_hnf_line(target_line_params, m_id=400, farbe_name="gruen", label="")
+        return target_line_params, max_radius
+
+    def test_get_intersection_point(self, target_line_params):
+        '''Testet die Funktion get_intersection_point() und visualisiert den Schnittpunkt in RViz.'''
+        intersection_x, intersection_y, angle = self.get_intersection_point(target_line_params)
+        if intersection_x is not None and intersection_y is not None:
+            self.get_logger().info(f"Schnittpunkt: (X={intersection_x:.2f}, Y={intersection_y:.2f}), Schnittwinkel: {angle:.2f}°")
+            marker_array = MarkerArray()
+            self.send_sphere(marker_array, m_id=500, x=intersection_x, y=intersection_y, color=(1.0, 1.0, 0.0)) # Gelb
+            self.pub_markers.publish(marker_array)
+            return intersection_x, intersection_y, angle
+        
+        else:
+            self.get_logger().warn("Kein gültiger Schnittpunkt gefunden.")
+            return None, None, None
+
+    def test_calculate_curve_geometry(self, intersection_y_m, turn_angle_deg, max_allowed_radius_m):
+        """Testet die Funktion calculate_curve_geometry() und loggt die Ergebnisse."""
+        
+        curve_radius_m, entry_point_distance_m = self.calculate_curve_geometry(intersection_y_m, turn_angle_deg, max_allowed_radius_m, self.MIN_TURN_RADIUS_M)
+        
+        radius_str = f"{curve_radius_m:.2f} m" if curve_radius_m is not None else "None"
+        entry_str = f"{entry_point_distance_m:.2f} m" if entry_point_distance_m is not None else "None"
+        self.get_logger().info(f"Berechnete Kurvengeometrie: Radius = {radius_str}, Einlenkpunkt-Distanz = {entry_str}")
+        
+        marker_array = MarkerArray()
+    
+        if entry_point_distance_m is not None and intersection_y_m is not None:
+            # Einlenkpunkt (Start)
+            self.send_sphere(marker_array, m_id=900, x=0.0, y=entry_point_distance_m, color=(0.0, 1.0, 0.0))
+            
+            # Logische Richtung ermitteln
+            is_left = (self.fahrtrichtung == 'links')
+            
+            # GeoGebra Winkel-Sektor zeichnen (Radius 0.4 m)
+            self.visualize_geogebra_angle(marker_array, intersection_y_m, turn_angle_deg, is_left_turn=is_left, m_id=960, radius=0.4)
+            
+            # Text-Label für den Winkel am Rand des Bogens platzieren
+            text_x = -0.45 if is_left else 0.45
+            self.send_text(marker_array, m_id=961, text=f"{turn_angle_deg:.1f}°", 
+                        x=text_x, y=intersection_y_m + 0.2, color=(1.0, 1.0, 0.0))
+        else:
+            self.delete_marker(marker_array, m_id=900)
+            self.delete_marker(marker_array, m_id=960)
+            self.delete_marker(marker_array, m_id=961)
+            
+        if hasattr(self, 'pub_markers'):
+            self.pub_markers.publish(marker_array)
+
+    def are_clusters_near(self, cluster_a, cluster_b, threshold=0.02):
+        # Mittelpunkt A
+        avg_a = np.mean(cluster_a, axis=0) # [x_avg, y_avg]
+        # Mittelpunkt B
+        avg_b = np.mean(cluster_b, axis=0)
+        
+        # Euklidische Distanz
+        dist = np.linalg.norm(avg_a - avg_b)
+        return dist < threshold
+    
+    def visualize_geogebra_angle(self, marker_array, intersection_y_m, turn_angle_deg, is_left_turn, m_id=960, radius=0.4):
+        """
+        Zeichnet den Schnittwinkel als Kreissektor und platziert die Gradzahl mittig darin.
+        """
+        # 1. Abbruchbedingung und Löschen der Marker
+        if intersection_y_m is None or turn_angle_deg is None:
+            self.delete_marker(marker_array, m_id)      # Bogen löschen
+            self.delete_marker(marker_array, m_id + 1)  # Text löschen
+            return
+
+        # 2. Bogen-Marker einrichten
+        marker = Marker()
+        marker.header.frame_id = "base_link" 
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "angle_arc"
+        marker.id = m_id
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.015 
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = 0.59, 0.0, 1.0, 1.0
+
+        # 3. Winkel berechnen
+        start_angle_rad = math.pi / 2.0  # y-Achse = 90 Grad
+        turn_rad = math.radians(turn_angle_deg)
+        
+        if is_left_turn:
+            end_angle_rad = start_angle_rad + turn_rad
+        else:
+            end_angle_rad = start_angle_rad - turn_rad
+
+        # 4. Bogen zeichnen
+        center_p = Point(x=0.0, y=intersection_y_m, z=0.0)
+        marker.points.append(center_p)
+
+        num_steps = 15
+        angle_diff = end_angle_rad - start_angle_rad
+        for i in range(num_steps + 1):
+            current_angle = start_angle_rad + (i / num_steps) * angle_diff
+            p = Point()
+            p.x = radius * math.cos(current_angle)
+            p.y = intersection_y_m + radius * math.sin(current_angle)
+            p.z = 0.0
+            marker.points.append(p)
+            
+        marker.points.append(center_p)
+        marker_array.markers.append(marker)
+
+        # 5. NEU: Text in der Winkelhalbierenden platzieren
+        mid_angle_rad = (start_angle_rad + end_angle_rad) / 2.0
+        
+        # Text-Radius auf 60% des Bogen-Radius setzen, damit er im Sektor liegt
+        text_radius = radius * 0.6 
+        text_x = text_radius * math.cos(mid_angle_rad)
+        text_y = intersection_y_m + text_radius * math.sin(mid_angle_rad)
+        
+        # Nutzt m_id + 1, um nicht mit dem Bogen-Marker zu kollidieren
+        self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
     def main_logic(self, point_data):
         self.fahrtrichtung = "links"
@@ -1774,7 +1931,7 @@ class WallFollower(Node):
         
         # 1. Alle Cluster finden
         all_clusters = self.get_all_clusters_sorted(point_data)
-        front_wall = all_clusters[0] if len(all_clusters) > 0 else None
+        #front_wall = all_clusters[0] if len(all_clusters) > 0 else None
         
         if self.begin == True:
             for c in all_clusters:
@@ -1808,7 +1965,17 @@ class WallFollower(Node):
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
         außenbande = validated_clusters[0] if len(validated_clusters) > 0 else None
         
-        self.test_extract_wall_lines(front_wall, außenbande)
+        self.test_extract_wall_lines(self.front_wall, außenbande)
+
+        target_line_params, max_allowed_radius_m = self.test_calculate_target_line(self.front_wall, außenbande, desired_wall_distance_m=0.40)
+
+        self.visualize_hnf_line((1.0, 0, 0), m_id=550, farbe_name="rot", label="")
+
+        intersection_x, intersection_y, angle = self.test_get_intersection_point(target_line_params)
+        
+        self.test_calculate_curve_geometry(intersection_y, angle, max_allowed_radius_m)
+        
+        #self.visualize_clusters(all_clusters)
 
         self.counter = 0
         return  # Bricht ab, damit keine anderen Fahrbefehle feuern
