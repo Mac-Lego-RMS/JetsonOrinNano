@@ -29,6 +29,8 @@ setup(
             'obstacle_follower = robot_vision.obstacle_follower:main',
             'testBench = robot_vision.testBench:main',
             'coord_test = robot_vision.coord_test:main',
+            'turn_radius_calibration = robot_vision.turn_radius_calibration:main',
+            'steering_lib = robot_vision.steering_lib:main',
         ],
     },
 )
