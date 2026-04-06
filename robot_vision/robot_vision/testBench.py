@@ -93,6 +93,7 @@ class WallFollower(Node):
         # --- STATE MACHINE & PFADPLANUNG ---
         self.state = 'STARTING'    # Startzustand
         self.fahrtrichtung = None     # Wird automatisch erkannt
+        self.saved_target_angle = None
 
         self.target_turns = 4
         self.turn_count = 0
@@ -1932,7 +1933,7 @@ class WallFollower(Node):
         # Nutzt m_id + 1, um nicht mit dem Bogen-Marker zu kollidieren
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
-    def main_logic(self, point_data):
+    def test_turn_main_logic(self, point_data):
         self.fahrtrichtung = "links"
         self.state = 'TURN_LINKS'  # Wir testen die Linkskurve
         
@@ -2031,6 +2032,84 @@ class WallFollower(Node):
         self.counter = 0
         return
         # ==========================================
+
+    
+    def handle_turn_maneuver(self, point_data):
+        """
+        Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
+        """
+        is_left_turn = (self.fahrtrichtung == 'links')
+        
+        # ---------------------------------------------------------
+        # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
+        # ---------------------------------------------------------
+        if self.turn_phase == 'APPROACH':
+            # 1. Wände tracken und Geometrie berechnen
+            self.front_wall = self.track_front_wall(point_data, self.front_wall)
+            validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
+            aussenbande = validated_clusters[0] if len(validated_clusters) > 0 else None
+            
+            front_wall_params, side_wall_params = self.extract_wall_lines(self.front_wall, aussenbande)
+            target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, desired_wall_distance_m=0.40)
+            
+            intersection_x, intersection_y, turn_angle = self.get_intersection_point(target_line_params, is_left_turn)
+            
+            curve_radius_m, entry_distance_m = self.calculate_curve_geometry(intersection_y, turn_angle, max_allowed_radius)
+            
+            # 2. Trigger prüfen
+            # check_turn_trigger muss True zurückgeben, wenn die Distanz erreicht ist
+            if self.check_turn_trigger(entry_distance_m):
+                self.get_logger().info("Trigger erreicht. Wechsle in EXECUTE-Phase.")
+                # Daten für die Abschlussprüfung einfrieren
+                self.saved_target_angle = turn_angle
+                self.turn_phase = 'EXECUTE'
+                
+        # ---------------------------------------------------------
+        # PHASE 2: AUSFÜHRUNG (Servo lenkt, Gyro prüft)
+        # ---------------------------------------------------------
+        elif self.turn_phase == 'EXECUTE':
+            # 1. Servo-Befehl kontinuierlich senden
+            self.execute_turn(self.saved_target_angle, is_left_turn)
+            
+            # 2. Aktuelle Frontwand-Parameter für den Completion-Check extrahieren
+            # (Hier musst du evtl. deine track_front_wall Logik leicht anpassen, 
+            # damit sie auch während der Drehung die Wand nicht verliert)
+            self.front_wall = self.track_front_wall(point_data, self.front_wall)
+            front_wall_params, _ = self.extract_wall_lines(self.front_wall, None) # Aussenbande ist hier egal
+
+
+            # 3. Abschluss prüfen
+            if self.check_turn_completion_fused(self.saved_target_angle, front_wall_params):
+                self.get_logger().info("Kurve physikalisch beendet.")
+            
+                # Aufräumen und State zurücksetzen
+                self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
+                self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle an die main_logic
+    
+    def execute_stop(self):
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+            self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
+            self.destroy_node()
+            rclpy.shutdown()
+            return
+
+    def main_logic(self, point_data):
+        # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
+
+        if self.state == 'FOLLOW_LANE':
+            self.handle_lane_following(point_data)
+            
+        elif self.state in ['TURN_LINKS', 'TURN_RECHTS']:
+            # Delegiere die komplette Kurvenlogik an die neue Funktion
+            self.handle_turn_maneuver(point_data, self.state)
+            
+        elif self.state == 'STOPPED':
+            self.execute_stop()
+
+
 
 
 def main(args=None):
