@@ -138,8 +138,8 @@ class WallFollower(Node):
         self.ROBOT_WIDTH_M = 0.15
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.5
-        self.MIN_TURN_RADIUS_M = 0.35
+        self.IDEAL_RADIUS_M = 0.45
+        self.MIN_TURN_RADIUS_M = 0.2
 
         # --- TURN PID-REGLER PARAMETER ---
         self.turn_kp = 0.6
@@ -148,7 +148,7 @@ class WallFollower(Node):
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
         self.base_speed = 450.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 450.0  # Leicht reduzierter Speed in der Kurve
+        self.turn_speed = 250.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -200,6 +200,7 @@ class WallFollower(Node):
         self.begin = True
         self.counter = 0
         self.test_is_turning = False
+        self.curve_radius_m = None
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -765,7 +766,8 @@ class WallFollower(Node):
             point_data.append((angle_user_deg, x_ros, y_ros, dist))
         
         self.last_point_data = point_data
-        self.main_logic(point_data)
+        self.test_turn_main_logic(point_data)
+        #self.main_logic(point_data)
     
     def get_closest_measure(self, point_data, target_angle):
         """
@@ -1681,8 +1683,8 @@ class WallFollower(Node):
         self.get_logger().info(f"Steering-Signal: {steering_signal:.3f}")
 
         # 4. Twist-Message konstruieren und senden
-        #cmd.linear.x = float(self.turn_speed)
-        cmd.linear.x = 0.0  # MOTOR AUS FÜR DEN TEST!
+        cmd.linear.x = float(self.turn_speed)
+        #cmd.linear.x = 0.0  # MOTOR AUS FÜR DEN TEST!
         cmd.angular.z = float(steering_signal)
         
         self.pub_cmd_vel.publish(cmd)
@@ -1694,12 +1696,13 @@ class WallFollower(Node):
         Kombiniert Gyro-Daten mit dem Wandwinkel für maximale Präzision am Kurvenausgang.
         """
         # 1. Grobe Prüfung via Gyro (Delta-Berechnung wie zuvor)
-        delta_gyro = abs(self.current_yaw - self.start_turn_yaw)
-        
+        error_gyro = abs(target_angle) - abs(self.current_yaw - self.start_turn_yaw)
+        self.get_logger().info(f"Gyro Error: {error_gyro:.1f}°, target: {target_angle:.1f}°")
+        error_gyro = abs(error_gyro)
         # Wenn wir noch nicht einmal 75 Grad gedreht haben, sicher noch nicht fertig
-        if delta_gyro < 75.0:
+        if error_gyro > 180:
             return False
-
+        
         # 2. Präzise Prüfung via LiDAR-Winkel (falls Wand sichtbar)
         if front_line_params is not None:
             n_x, n_y, d = front_line_params
@@ -1708,14 +1711,14 @@ class WallFollower(Node):
             # Wenn der Roboter parallel zur Wand steht, muss n_y gegen 0 gehen.
             # Das entspricht einem Orientierungsfehler zur Wand von:
             wall_error_deg = math.degrees(math.atan2(abs(n_y), abs(n_x)))
-            
+            self.get_logger().info(f"Wall-Error {wall_error_deg:.1f}°")
             # Abbruchbedingung: Gyro ist nah dran UND Wand-Parallelität ist hoch
-            if delta_gyro >= 85.0 and wall_error_deg < 3.0:
-                self.get_logger().info(f"Fused Match: Gyro {delta_gyro:.1f}°, Wall-Error {wall_error_deg:.1f}°")
+            if wall_error_deg < 6.0:
+                self.get_logger().info(f"Fused Match: Gyro {error_gyro:.1f}°, Wall-Error {wall_error_deg:.1f}°")
                 return True
 
         # 3. Fallback: Nur Gyro (falls LiDAR die Wand kurz verliert)
-        if delta_gyro >= abs(target_angle) - 2.0:
+        if error_gyro <= 7.0:
             self.get_logger().warn("Nur Gyro-Abschluss (Wand nicht erkannt)")
             return True
 
@@ -1782,6 +1785,8 @@ class WallFollower(Node):
         self.get_logger().info(f"Side HNF: {side_straight}")
         self.visualize_hnf_line(front_straight, m_id=200, farbe_name="blau", label="")
         self.visualize_hnf_line(side_straight, m_id=300, farbe_name="blau", label="")
+        return front_straight, side_straight
+
 
     def test_calculate_target_line(self, front_wall_cluster, side_wall_cluster, desired_wall_distance_m):
         '''Testet die Funktion calculate_target_line() und visualisiert die Ergebnisse in RViz.'''
@@ -1941,10 +1946,10 @@ class WallFollower(Node):
         if not hasattr(self, 'test_is_turning'):
             self.test_is_turning = False
 
-        if self.counter  < 3:
+        '''if self.counter  < 1:
             self.counter += 1
             return
-        
+        '''
         # 1. Alle Cluster finden
         all_clusters = self.get_all_clusters_sorted(point_data)
         
@@ -1960,9 +1965,7 @@ class WallFollower(Node):
                     self.front_wall = c
                     
                     # Gyro Nullen für saubere Kurven-Mathematik
-                    self.current_yaw = 0.0
-                    self.start_turn_yaw = 0.0
-                    self.yaw_offset = 0.0
+                    #self.start_turn_yaw = self.current_yaw
                     self.start_turn_dist = self.get_closest_point_in_cluster(c)[3]
                     self.get_logger().warn(f"Start Distanz ist {self.start_turn_dist:.2f}m")
                     
@@ -1980,39 +1983,39 @@ class WallFollower(Node):
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
         außenbande = validated_clusters[0] if len(validated_clusters) > 0 else None
         
-        self.test_extract_wall_lines(self.front_wall, außenbande)
-
-        target_line_params, max_allowed_radius_m = self.test_calculate_target_line(self.front_wall, außenbande, desired_wall_distance_m=0.20)
-        self.visualize_hnf_line((1.0, 0, 0), m_id=550, farbe_name="rot", label="")
-
-        intersection_x, intersection_y, schnitt_winkel = self.test_get_intersection_point(target_line_params)
-        curve_radius_m, entry_point_distance_m = self.test_calculate_curve_geometry(intersection_y, schnitt_winkel, max_allowed_radius_m)
-        
-        self.test_check_turn_trigger(entry_point_distance_m)
+        front_wall_params, side_wall_params = self.test_extract_wall_lines(self.front_wall, außenbande)
     
         # ==========================================
         # DIE NEUE TEST-LOGIK FÜR DEN SERVO/GYRO
         # ==========================================
         if not self.test_is_turning:
             # WARTE-MODUS: Zeigt Live-Daten, bis 't' gedrückt wird
+            target_line_params, max_allowed_radius_m = self.test_calculate_target_line(self.front_wall, außenbande, desired_wall_distance_m=0.8)
+            self.visualize_hnf_line((1.0, 0, 0), m_id=550, farbe_name="rot", label="")
+
+            intersection_x, intersection_y, schnitt_winkel = self.test_get_intersection_point(target_line_params)
+            self.curve_radius_m, entry_point_distance_m = self.test_calculate_curve_geometry(intersection_y, schnitt_winkel, max_allowed_radius_m)
+        
+            self.test_check_turn_trigger(entry_point_distance_m)
+
             start = input("Drücke 'q' + Enter für Kurven-Start (Servo), oder nur Enter für nächsten Frame: ")
             
             if start.lower() == 'q':
                 self.test_is_turning = True
                 self.saved_target_angle = schnitt_winkel
+                self.start_turn_yaw = self.current_yaw
                 self.get_logger().warn(">>> KURVE GESTARTET - DREHE DEN ROBOTER NUN PER HAND <<<")
                 
         else:
             # AUSFÜHRUNGS-MODUS: Servo schlägt ein, System wartet auf Gyro-Vollendung
-            if curve_radius_m is not None:
+            if self.curve_radius_m is not None:
                 # WICHTIG: test_execute_turn MUSS cmd.linear.x = 0.0 setzen!
-                self.test_execute_turn(curve_radius_m)
+                self.test_execute_turn(self.curve_radius_m)
             
-            # Aktuelle Wand-Parameter für die Fusion abrufen (werden durch test_extract_wall_lines gesetzt)
-            current_front_params = getattr(self, 'front_wall_hnf', None)
             
             # Prüfung: Hast du den Roboter weit genug per Hand gedreht?
-            turn_completed = self.test_check_turn_completion_fused(self.saved_target_angle, current_front_params)
+            self.get_logger().info(f"Alte Winkelberchnung: {self.get_cluster_angle(self.front_wall)}")
+            turn_completed = self.test_check_turn_completion_fused(self.saved_target_angle, front_wall_params)
             
             if turn_completed:
                 self.get_logger().info(">>> KURVE BEENDET! SETZE SERVO ZURÜCK <<<")
