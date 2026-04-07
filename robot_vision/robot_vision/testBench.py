@@ -2059,7 +2059,29 @@ class WallFollower(Node):
     # -----------------------------------------
 
     def handle_lane_following(self, point_data):
-        pass
+        total_gedreht = abs(self.current_yaw - self.yaw_offset)
+        if self.turn_count >= self.target_turns or total_gedreht > 1060:  # 1080° = 3 volle Umdrehungen
+            if self.get_closest_point_in_cluster(self.front_wall) is not None and self.get_closest_point_in_cluster(self.front_wall)[3] < 1.80:
+                self.state = 'STOPPED'
+                return
+        if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
+            self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
+            self.start_straight_yaw = self.current_yaw
+            self.turn_count += 1
+                
+        all_clusters = self.get_all_clusters_sorted(point_data)
+        validated_clusters = self.validate_clusters_straight(all_clusters)
+        validated_clusters = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
+
+        # Hier war vorher die Wahl der Fahrtrichtung, aber wir haben sie jetzt schon in der Startphase festgelegt.
+        
+        if self.fahrtrichtung == 'links':
+            innenbande = validated_clusters[0]
+            aussenbande = validated_clusters[2]
+        elif self.fahrtrichtung == 'rechts':
+            innenbande = validated_clusters[2]
+            aussenbande = validated_clusters[0]
+        
 
     def handle_turn_maneuver(self, point_data):
         """
@@ -2120,7 +2142,11 @@ class WallFollower(Node):
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
 
-        if self.state == 'FOLLOW_LANE':
+        if self.state == 'STARTING':
+            self.execute_start(point_data)
+            pass
+
+        elif self.state == 'FOLLOW_LANE':
             self.handle_lane_following(point_data)
             
         elif self.state in ['TURN_LINKS', 'TURN_RECHTS']:
