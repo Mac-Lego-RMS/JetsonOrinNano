@@ -94,6 +94,7 @@ class WallFollower(Node):
         self.state = 'STARTING'    # Startzustand
         self.fahrtrichtung = None     # Wird automatisch erkannt
         self.saved_target_angle = None
+        self.saved_curve_radius_m = None
 
         self.target_turns = 4
         self.turn_count = 0
@@ -766,8 +767,8 @@ class WallFollower(Node):
             point_data.append((angle_user_deg, x_ros, y_ros, dist))
         
         self.last_point_data = point_data
-        self.test_turn_main_logic(point_data)
-        #self.main_logic(point_data)
+        #self.test_turn_main_logic(point_data)
+        self.main_logic(point_data)
     
     def get_closest_measure(self, point_data, target_angle):
         """
@@ -1485,6 +1486,9 @@ class WallFollower(Node):
         Berechnet die Hessesche Normalform aus einem Cluster von Messpunkten.
         Erwartetes Cluster-Format: Liste aus Tupeln (winkel, x_coord, y_coord, abstand)
         """
+        if cluster is None:
+            return None
+        
         # 1. Extrahieren der x- und y-Koordinaten in ein NumPy-Array
         # Index 1 ist x_coord, Index 2 ist y_coord
         points = np.array([[p[1], p[2]] for p in cluster])
@@ -1519,27 +1523,45 @@ class WallFollower(Node):
         
         return n_x, n_y, d
     
-    def extract_wall_lines(self, front_cluster, side_cluster):
-        # Sicherheitsprüfung: Sind ausreichend Datenpunkte für eine SVD vorhanden?
-        # Eine Linie benötigt mathematisch mindestens 2 Punkte.
-        # Fehlt noch was passiert wenn wir nur die gegenüberliegende Wand !!!
-        '''if self.are_clusters_near(front_cluster, side_cluster):
-            self.get_logger().warn("WARNUNG: Front- und Seitencluster sind zu nahe beieinander.") '''
+    def extract_wall_lines(self, u_profile):
+        if self.fahrtrichtung == "links":
+            side_cluster, front_cluster, opposite_cluster = u_profile
+        else:
+            opposite_cluster, front_cluster, side_cluster = u_profile
 
-        if front_cluster is None:
-            front_straight = None
-        elif len(front_cluster) < 2:
+        # 1. Frontwand extrahieren
+        # Reihenfolge ist wichtig: 'is None' schützt 'len()' vor Fehlern
+        if front_cluster is None or len(front_cluster) < 2:
             front_straight = None
         else:
             front_straight = self.cluster_to_hnf(front_cluster)
 
-        if side_cluster is None:
-            side_straight = None
-        elif len(side_cluster) < 2:
-            side_straight = None
-        else:
+        # 2. Seitenwand extrahieren
+        if side_cluster is not None and len(side_cluster) >= 2:
+            # Primäres Ziel: Die innere Kurvenwand
             side_straight = self.cluster_to_hnf(side_cluster)
-        
+            
+        elif opposite_cluster is not None and len(opposite_cluster) >= 2:
+            # Fallback: Gegenüberliegende Wand über die 3m-Distanz spiegeln
+            oppo_x, oppo_y, oppo_d = self.cluster_to_hnf(opposite_cluster)
+            
+            new_nx = -oppo_x
+            new_ny = -oppo_y
+            new_d = 3.0 - oppo_d
+            
+            # HNF-Bedingung: d muss immer >= 0 sein
+            if new_d < 0:
+                self.get_logger().warn("WARNUNG: HNF-Distanz negativ. Spiegelung korrigiert.")
+                new_nx = -new_nx
+                new_ny = -new_ny
+                new_d = abs(new_d)
+                
+            side_straight = (new_nx, new_ny, new_d)
+            
+        else:
+            # Keine verwertbaren Seitenwände vorhanden
+            side_straight = None
+
         return front_straight, side_straight
 
     def calculate_target_line(self, side_line_params, front_line_params, obstacle, desired_wall_distance_m):
@@ -1691,13 +1713,13 @@ class WallFollower(Node):
         
         return True
 
-    def check_turn_completion_fused(self, target_angle, front_line_params):
+    def check_turn_completion_fused(self, turn_angle, front_line_params):
         """
         Kombiniert Gyro-Daten mit dem Wandwinkel für maximale Präzision am Kurvenausgang.
         """
         # 1. Grobe Prüfung via Gyro (Delta-Berechnung wie zuvor)
-        error_gyro = abs(target_angle) - abs(self.current_yaw - self.start_turn_yaw)
-        self.get_logger().info(f"Gyro Error: {error_gyro:.1f}°, target: {target_angle:.1f}°")
+        error_gyro = abs(turn_angle) - abs(self.current_yaw - self.start_turn_yaw)
+        self.get_logger().info(f"Gyro Error: {error_gyro:.1f}°, target: {turn_angle:.1f}°")
         error_gyro = abs(error_gyro)
         # Wenn wir noch nicht einmal 75 Grad gedreht haben, sicher noch nicht fertig
         if error_gyro > 180:
@@ -1706,9 +1728,6 @@ class WallFollower(Node):
         # 2. Präzise Prüfung via LiDAR-Winkel (falls Wand sichtbar)
         if front_line_params is not None:
             n_x, n_y, d = front_line_params
-            
-            # In eurem System (y = vorne, x = seite): 
-            # Wenn der Roboter parallel zur Wand steht, muss n_y gegen 0 gehen.
             # Das entspricht einem Orientierungsfehler zur Wand von:
             wall_error_deg = math.degrees(math.atan2(abs(n_y), abs(n_x)))
             self.get_logger().info(f"Wall-Error {wall_error_deg:.1f}°")
@@ -1778,9 +1797,9 @@ class WallFollower(Node):
         # 7. Veröffentlichen
         self.pub_markers.publish(marker_array)
 
-    def test_extract_wall_lines(self, front_cluster, side_cluster):
+    def test_extract_wall_lines(self, u_profile):
         '''Testet die Funktion extract_wall_lines() und visualisiert die Ergebnisse in RViz.'''
-        front_straight, side_straight = self.extract_wall_lines(front_cluster, side_cluster)
+        front_straight, side_straight = self.extract_wall_lines(u_profile)
         self.get_logger().info(f"Front HNF: {front_straight}")
         self.get_logger().info(f"Side HNF: {side_straight}")
         self.visualize_hnf_line(front_straight, m_id=200, farbe_name="blau", label="")
@@ -1981,9 +2000,8 @@ class WallFollower(Node):
         # ==========================================
         self.front_wall = self.track_front_wall(point_data, self.front_wall)
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-        außenbande = validated_clusters[0] if len(validated_clusters) > 0 else None
         
-        front_wall_params, side_wall_params = self.test_extract_wall_lines(self.front_wall, außenbande)
+        front_wall_params, side_wall_params = self.test_extract_wall_lines(validated_clusters)
     
         # ==========================================
         # DIE NEUE TEST-LOGIK FÜR DEN SERVO/GYRO
@@ -2036,13 +2054,17 @@ class WallFollower(Node):
         return
         # ==========================================
 
-    
+    # -----------------------------------------
+    # State Maschine Obstacle Parcour
+    # -----------------------------------------
+
+    def handle_lane_following(self, point_data):
+        pass
+
     def handle_turn_maneuver(self, point_data):
         """
         Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
         """
-        is_left_turn = (self.fahrtrichtung == 'links')
-        
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
         # ---------------------------------------------------------
@@ -2050,12 +2072,11 @@ class WallFollower(Node):
             # 1. Wände tracken und Geometrie berechnen
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-            aussenbande = validated_clusters[0] if len(validated_clusters) > 0 else None
             
-            front_wall_params, side_wall_params = self.extract_wall_lines(self.front_wall, aussenbande)
-            target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, desired_wall_distance_m=0.40)
+            front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
+            target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, desired_wall_distance_m=0.50)
             
-            intersection_x, intersection_y, turn_angle = self.get_intersection_point(target_line_params, is_left_turn)
+            intersection_x, intersection_y, turn_angle = self.get_intersection_point(target_line_params)
             
             curve_radius_m, entry_distance_m = self.calculate_curve_geometry(intersection_y, turn_angle, max_allowed_radius)
             
@@ -2065,6 +2086,7 @@ class WallFollower(Node):
                 self.get_logger().info("Trigger erreicht. Wechsle in EXECUTE-Phase.")
                 # Daten für die Abschlussprüfung einfrieren
                 self.saved_target_angle = turn_angle
+                self.saved_curve_radius_m = curve_radius_m
                 self.turn_phase = 'EXECUTE'
                 
         # ---------------------------------------------------------
@@ -2072,13 +2094,9 @@ class WallFollower(Node):
         # ---------------------------------------------------------
         elif self.turn_phase == 'EXECUTE':
             # 1. Servo-Befehl kontinuierlich senden
-            self.execute_turn(self.saved_target_angle, is_left_turn)
-            
-            # 2. Aktuelle Frontwand-Parameter für den Completion-Check extrahieren
-            # (Hier musst du evtl. deine track_front_wall Logik leicht anpassen, 
-            # damit sie auch während der Drehung die Wand nicht verliert)
+            self.execute_turn(self.saved_curve_radius_m)
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
-            front_wall_params, _ = self.extract_wall_lines(self.front_wall, None) # Aussenbande ist hier egal
+            front_wall_params = self.cluster_to_hnf(self.front_wall)
 
 
             # 3. Abschluss prüfen
