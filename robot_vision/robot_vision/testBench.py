@@ -92,6 +92,7 @@ class WallFollower(Node):
 
         # --- STATE MACHINE & PFADPLANUNG ---
         self.state = 'STARTING'    # Startzustand
+        self.turn_phase = 'APPROACH'  # Bei Kurven: 'APPROACH', 'TURNING', 'EXIT'
         self.fahrtrichtung = None     # Wird automatisch erkannt
         self.saved_target_angle = None
         self.saved_curve_radius_m = None
@@ -105,10 +106,10 @@ class WallFollower(Node):
         self.right_wall = None
         
         # Karotten-Parameter Geradeausfahrt
-        self.lookahead_dist_straight = 0.60    # Wie weit schaut der Roboter voraus? (60 cm)
-        self.min_wall_dist = 0.10       
+        self.lookahead_dist_straight = 0.50    # Wie weit schaut der Roboter voraus? (60 cm)
+        self.min_wall_dist = 0.15       
 
-        self.lane_ratio = 0.85       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
+        self.lane_ratio = 0.5       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
         self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
         self.turn_exit_angle = 25
         self.max_wall_lenght_for_turn = 0.25
@@ -122,7 +123,7 @@ class WallFollower(Node):
         
 
         # --- PID-REGLER PARAMETER ---
-        self.kp = 3.5   # Lenkt hart zur Karotte
+        self.kp = 2.0   # Lenkt hart zur Karotte
         self.kd = 0   # Verhindert das Schlingern (Dämpfung)
         self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
         
@@ -148,8 +149,8 @@ class WallFollower(Node):
         self.turn_ki = 0.0
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 450.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 250.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 150.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 150.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -868,7 +869,7 @@ class WallFollower(Node):
                     offset = abs((ox - bx) * nx + (oy - by) * ny)
 
                     if offset < max_distance_gap:
-                        self.get_logger().info(f"Wand gemergt! (Offset: {offset:.2f}m)")
+                        #self.get_logger().info(f"Wand gemergt! (Offset: {offset:.2f}m)")
                         valid_cluster.extend(other)
                         clusters_to_remove.append(other)
                         combined_clusters[i].append(other)
@@ -884,18 +885,15 @@ class WallFollower(Node):
 
         return validated_clusters, combined_clusters
 
-    def get_target_point_straight(self, innenbande, aussenbande):
+    def get_target_point_straight(self, hnf_innen, hnf_aussen):
         """
         Berechnet den Zielpunkt (Karotte) mithilfe der HNF.
         Fehlende oder durch Hindernisse gestörte Wände werden virtuell projiziert.
         """
+        self.get_logger().info(f"Berechne Zielpunkt. HNF Innen: {hnf_innen}, HNF Außen: {hnf_aussen}, Lane Ratio: {self.lane_ratio:.2f}")
         target_y = self.lookahead_dist_straight
         target_x = 0.0
-
-        # 1. Cluster sofort in HNF umwandeln
-        hnf_innen = self.cluster_to_hnf(innenbande) if innenbande and len(innenbande) >= 2 else None
-        hnf_aussen = self.cluster_to_hnf(aussenbande) if aussenbande and len(aussenbande) >= 2 else None
-
+        
         # ==========================================
         # HILFSFUNKTION: VIRTUELLE WAND PROJIZIEREN
         # ==========================================
@@ -903,7 +901,7 @@ class WallFollower(Node):
             if not hnf_base: return None
             nx, ny, d = hnf_base
             new_nx, new_ny = -nx, -ny
-            new_d = self.TRACK_WIDTH_M - d  # Nutzt dynamische Spurbreite statt Magic Number 1.0
+            new_d = 1.0 - d  # Nutzt dynamische Spurbreite statt Magic Number 1.0
             
             if new_d < 0:
                 new_nx, new_ny = -new_nx, -new_ny
@@ -936,21 +934,27 @@ class WallFollower(Node):
             if abs(nx) < 1e-6: return 0.0 
             return (d - ny * y_val) / nx
 
-        # ==========================================
-        # 4. ZIELPUNKT BERECHNEN (Es gibt jetzt nur noch Fall 1)
+# ==========================================
+        # 4. ZIELPUNKT BERECHNEN (Mit konstanter Spurbreite)
         # ==========================================
         if hnf_innen and hnf_aussen:
+            # Wir berechnen nur noch, wo die Innenbande ist. 
+            # Die Außenbande brauchen wir für den X-Wert gar nicht mehr, 
+            # da die Breite fix 1.0 Meter ist!
             x_innen = get_x_at_y(hnf_innen, target_y)
             
-            # Da die Wände jetzt zwingend parallel sind, reicht die Referenz zur Innenbande völlig aus
+            # Annahme: self.lane_ratio ist ein Prozentwert (z.B. 0.5 für Mitte)
+            # Falls ihr eine Konstante wie self.TRACK_WIDTH_M habt, setze sie statt 1.0 ein
+            offset_von_wand = 1.0 * self.lane_ratio 
+            
             if x_innen < 0: # Innenbande links
-                target_x = x_innen + self.lane_ratio
+                target_x = x_innen + offset_von_wand
             else:           # Innenbande rechts
-                target_x = x_innen - self.lane_ratio
+                target_x = x_innen - offset_von_wand
                 
-        # Notfall (Beide Wände fehlen komplett, z.B. Roboter hochgehoben)
+        # Notfall (Beide Wände fehlen komplett)
         else:
-            target_x = 0.0  
+            target_x = 0.0
 
         # ==========================================
         # 5. KRAFTFELD (MINDESTABSTAND ERZWINGEN)
@@ -964,6 +968,90 @@ class WallFollower(Node):
                     target_x = x_innen_check + self.min_wall_dist
             else:                  
                 # Innenbande ist RECHTS
+                if target_x > x_innen_check - self.min_wall_dist:
+                    target_x = x_innen_check - self.min_wall_dist
+
+        self.get_logger().info(f"Zielpunkt: {target_x}, {target_y}")
+        return (target_x, target_y)
+
+    def get_target_point_straight_cluster(self, innenbande, aussenbande):
+        """
+        Berechnet den Zielpunkt (Karotte) im perfekten Verhältnis zur Innenbande.
+        Mit absolutem Mindestabstand (Kraftfeld-Logik).
+        """
+        target_y = self.lookahead_dist_straight  
+        target_x = 0.0                  
+
+        def get_x_at_y(wall, target_y):
+            angle = self.get_cluster_angle(wall)
+            mean_x = sum(p[1] for p in wall) / len(wall)
+            mean_y = sum(p[2] for p in wall) / len(wall)
+            if angle is None: return mean_x
+            angle_rad = math.radians(angle)
+            dy = target_y - mean_y
+            return mean_x + (dy * math.tan(angle_rad))
+
+        # ==========================================
+        # NEU: DER "WAND-KUSCHLER" FIX (Single-Wall Tracking)
+        # ==========================================
+        # Wenn wir einem Hindernis ausweichen, verlassen wir uns NUR noch auf 
+        # die Bande, an der wir gerade entlangfahren. Das verhindert, dass 
+        # das passierte Hindernis die Spurbreiten-Rechnung zerschießt!
+        if self.current_obstacle_cmd != "CLEAR":
+            if self.lane_ratio < 0.5:
+                # Wir wollen ganz nah an die Innenbande (Ratio z.B. 0.20)
+                # -> Wir ignorieren die Außenbande (und das Hindernis dort) komplett!
+                aussenbande = None
+            else:
+                # Wir wollen ganz nah an die Außenbande (Ratio z.B. 0.85)
+                # -> Wir ignorieren die Innenbande komplett!
+                innenbande = None
+
+        # --- FALL 1: WIR SEHEN BEIDE BANDEN (Normalfall auf freier Strecke) ---
+        if innenbande and aussenbande:
+            x_innen = get_x_at_y(innenbande, target_y)
+            x_aussen = get_x_at_y(aussenbande, target_y)
+            
+            if x_innen < 0: # Innenbande links
+                target_x = x_innen + self.lane_ratio
+            else:           # Innenbande rechts
+                target_x = x_innen - self.lane_ratio
+                
+        # --- FALL 2: WIR SEHEN NUR DIE INNENBANDE (Oder haben Außen ignoriert) ---
+        elif innenbande:
+            x_innen = get_x_at_y(innenbande, target_y)
+            if x_innen < 0:
+                target_x = x_innen + self.lane_ratio
+            else:
+                target_x = x_innen - self.lane_ratio
+                
+        # --- FALL 3: WIR SEHEN NUR DIE AUSSENBANDE (Oder haben Innen ignoriert) ---
+        elif aussenbande:
+            x_aussen = get_x_at_y(aussenbande, target_y)
+            inv_ratio = 1.0 - self.lane_ratio 
+            if x_aussen < 0: # Außenbande ist links
+                target_x = x_aussen + inv_ratio
+            else:            # Außenbande ist rechts
+                target_x = x_aussen - inv_ratio
+                
+        # Notfall
+        else:
+            target_x = 0.0  
+
+        # ==========================================
+        # KRAFTFELD (MINDESTABSTAND ERZWINGEN)
+        # ==========================================
+        if innenbande:
+            # Wir prüfen, wo die Innenbande ist
+            x_innen_check = get_x_at_y(innenbande, target_y)
+            
+            if x_innen_check < 0:  
+                # Innenbande ist LINKS. Ziel MUSS mindestens +min_wall_dist entfernt sein
+                if target_x < x_innen_check + self.min_wall_dist:
+                    target_x = x_innen_check + self.min_wall_dist
+                    
+            else:                  
+                # Innenbande ist RECHTS. Ziel MUSS mindestens -min_wall_dist entfernt sein
                 if target_x > x_innen_check - self.min_wall_dist:
                     target_x = x_innen_check - self.min_wall_dist
 
@@ -1736,7 +1824,7 @@ class WallFollower(Node):
                 return True
 
         # 3. Fallback: Nur Gyro (falls LiDAR die Wand kurz verliert)
-        if error_gyro <= 7.0:
+        elif error_gyro <= 7.0:
             self.get_logger().warn("Nur Gyro-Abschluss (Wand nicht erkannt)")
             return True
 
@@ -1767,7 +1855,7 @@ class WallFollower(Node):
         }
         
         # Fallback auf Weiß, falls die Farbe nicht im Dictionary ist
-        rgb = farben.get(farbe_name.lower(), (1.0, 1.0, 1.0))
+        rgb = farben.get(farbe_name.lower(), (0.0, 0.0, 0.0))
         
         n_x, n_y, d = hnf_params
         
@@ -1805,9 +1893,9 @@ class WallFollower(Node):
         self.visualize_hnf_line(side_straight, m_id=300, farbe_name="blau", label="")
         return front_straight, side_straight
 
-    def test_calculate_target_line(self, front_wall_cluster, side_wall_cluster, desired_wall_distance_m):
+    def test_calculate_target_line(self, u_profile, desired_wall_distance_m):
         '''Testet die Funktion calculate_target_line() und visualisiert die Ergebnisse in RViz.'''
-        front_line_params, side_line_params = self.extract_wall_lines(front_wall_cluster, side_wall_cluster)
+        front_line_params, side_line_params = self.extract_wall_lines(u_profile)
         target_line_params, max_radius = self.calculate_target_line(side_line_params, front_line_params, None, desired_wall_distance_m)
         radius = f"{max_radius:.2f}" if max_radius is not None else "None"
         self.get_logger().info(f"Target Line HNF: {target_line_params}, Max Radius: {radius} m")
@@ -1963,26 +2051,20 @@ class WallFollower(Node):
         if not hasattr(self, 'test_is_turning'):
             self.test_is_turning = False
 
-        '''if self.counter  < 1:
-            self.counter += 1
-            return
-        '''
         # 1. Alle Cluster finden
         all_clusters = self.get_all_clusters_sorted(point_data)
         
+        # --- CLUSTER AUSWAHL (Einmalig zu Beginn) ---
         if self.begin == True:
             for c in all_clusters:
-                # Cluster in Foxglove anzeigen, BEVOR wir auf Input warten!
                 self.visualize_clusters([c])
                 
                 skip = input("Drücke Enter, um zum nächsten Cluster zu gehen (oder 'q' für Auswahl)...")
                 if skip.lower() in ['q', '#']:
                     self.begin = False
-                    self.get_logger().info(">>> Starte Test Bench mit der gewählten Frontwand! <<<")
+                    self.get_logger().info(">>> Starte autonome Test-Bench! Roboter fährt los. <<<")
                     self.front_wall = c
                     
-                    # Gyro Nullen für saubere Kurven-Mathematik
-                    #self.start_turn_yaw = self.current_yaw
                     self.start_turn_dist = self.get_closest_point_in_cluster(c)[3]
                     self.get_logger().warn(f"Start Distanz ist {self.start_turn_dist:.2f}m")
                     
@@ -1999,55 +2081,66 @@ class WallFollower(Node):
         self.front_wall = self.track_front_wall(point_data, self.front_wall)
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
         
+        # Hinweis: außenbande fehlte in deinem Snippet, wird hier für den Methodenaufruf benötigt
+        außenbande = validated_clusters[0] if len(validated_clusters) > 0 else None
         front_wall_params, side_wall_params = self.test_extract_wall_lines(validated_clusters)
     
         # ==========================================
-        # DIE NEUE TEST-LOGIK FÜR DEN SERVO/GYRO
+        # AUTONOME STATE MACHINE (Fahren & Lenken)
         # ==========================================
+        
         if not self.test_is_turning:
-            # WARTE-MODUS: Zeigt Live-Daten, bis 't' gedrückt wird
-            target_line_params, max_allowed_radius_m = self.test_calculate_target_line(self.front_wall, außenbande, desired_wall_distance_m=0.8)
+            # PHASE 1: ANNÄHERUNG (Geradeaus fahren und auf Trigger warten)
+            
+            target_line_params, max_allowed_radius_m = self.test_calculate_target_line(validated_clusters, desired_wall_distance_m=0.6)
             self.visualize_hnf_line((1.0, 0, 0), m_id=550, farbe_name="rot", label="")
 
             intersection_x, intersection_y, schnitt_winkel = self.test_get_intersection_point(target_line_params)
-            self.curve_radius_m, entry_point_distance_m = self.test_calculate_curve_geometry(intersection_y, schnitt_winkel, max_allowed_radius_m)
+            self.curve_radius_m, entry_point_distance_m = self.test_calculate_curve_geometry(
+                intersection_y, schnitt_winkel, max_allowed_radius_m
+            )
         
-            self.test_check_turn_trigger(entry_point_distance_m)
-
-            start = input("Drücke 'q' + Enter für Kurven-Start (Servo), oder nur Enter für nächsten Frame: ")
+            # 1. Motor für die Annäherung aktivieren
+            cmd = Twist()
+            cmd.linear.x = 300.0  # Moderate Test-Geschwindigkeit (z.B. 0.3 m/s)
+            cmd.angular.z = 0.0 # Idealerweise hier deinen Geradeaus-Regler einsetzen
+            self.pub_cmd_vel.publish(cmd)
             
-            if start.lower() == 'q':
+            # 2. Trigger kontinuierlich abfragen
+            # WICHTIG: test_check_turn_trigger muss True zurückgeben, wenn Distanz unterschritten ist!
+            trigger_erreicht = self.test_check_turn_trigger(entry_point_distance_m)
+
+            if trigger_erreicht:
                 self.test_is_turning = True
                 self.saved_target_angle = schnitt_winkel
                 self.start_turn_yaw = self.current_yaw
-                self.get_logger().warn(">>> KURVE GESTARTET - DREHE DEN ROBOTER NUN PER HAND <<<")
+                self.get_logger().warn(">>> TRIGGER ERREICHT - KURVE STARTET <<<")
                 
         else:
-            # AUSFÜHRUNGS-MODUS: Servo schlägt ein, System wartet auf Gyro-Vollendung
+            # PHASE 2: AUSFÜHRUNG (Servo schlägt ein, Motor fährt weiter)
+            
             if self.curve_radius_m is not None:
-                # WICHTIG: test_execute_turn MUSS cmd.linear.x = 0.0 setzen!
+                # WICHTIG: Du musst in test_execute_turn den Motor jetzt wieder EINSCHALTEN 
+                # (linear.x = 0.3), sonst lenkt er nur und bleibt stehen!
                 self.test_execute_turn(self.curve_radius_m)
             
-            
-            # Prüfung: Hast du den Roboter weit genug per Hand gedreht?
+            # Prüfung: Hat der Roboter sich weit genug gedreht?
             self.get_logger().info(f"Alte Winkelberchnung: {self.get_cluster_angle(self.front_wall)}")
             turn_completed = self.test_check_turn_completion_fused(self.saved_target_angle, front_wall_params)
             
             if turn_completed:
-                self.get_logger().info(">>> KURVE BEENDET! SETZE SERVO ZURÜCK <<<")
+                self.get_logger().info(">>> KURVE BEENDET! STOPPE ROBOTER <<<")
                 self.test_is_turning = False
                 
-                # Servo sofort auf Neutral stellen
-                from geometry_msgs.msg import Twist
-                stop_cmd = Twist()
-                stop_cmd.linear.x = 0.0
-                stop_cmd.angular.z = 0.0 
-                self.pub_cmd_vel.publish(stop_cmd)
+                # Motor und Servo sofort stoppen
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0 
+                self.pub_cmd_vel.publish(cmd)
                 
-                # Testzyklus beenden und neu starten
-                input("Test abgeschlossen. Drücke Enter für neue Wand-Auswahl...")
+                # Pausiert die Schleife, bis du den Roboter für den nächsten Test aufgestellt hast
+                input("Test abgeschlossen. Roboter manuell umstellen und Enter drücken...")
                 self.begin = True  # Startet die Cluster-Auswahl neu
-
         self.counter = 0
         return
         # ==========================================
@@ -2078,13 +2171,14 @@ class WallFollower(Node):
         self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_straight(all_clusters)
-        merged_validated_clusters = self.merge_clusters(all_clusters, validated_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
         self.right_wall = merged_validated_clusters[2]
         self.front_wall = merged_validated_clusters[1]
         self.left_wall  = merged_validated_clusters[0]
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
         if self.fahrtrichtung is None:
             # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
             if self.left_wall and self.right_wall:
@@ -2101,93 +2195,117 @@ class WallFollower(Node):
                     elif right_len > left_len + 0.30:
                         self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
                         self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
-                
+                    self.get_logger().info("Fehler! Keine Wand ist länger als die")
             else:
                 self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                 return
 
-            if not self.imu_ready:
-                self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
-                return  # Brich hier ab, mach noch nichts!   
-            self.yaw_offset = self.current_yaw
-            self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen
+        if not self.imu_ready:
+            self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
+            return  # Brich hier ab, mach noch nichts!   
+        self.yaw_offset = self.current_yaw
+        self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen
 
-            self.state = 'FOLLOW_LANE'
+        self.state = 'FOLLOW_LANE'
 
-    def handle_lane_following(self, point_data, all_clusters):
+    def handle_lane_following(self, point_data):
         cmd = Twist()
+        marker_array = MarkerArray()
+        all_clusters = self.get_all_clusters_sorted(point_data)
+
+        self.get_logger().info(f"Verfolge die Spur... Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
 
         self.check_undetected_turn()
         validated_clusters = self.validate_clusters_straight(all_clusters)
-        merged_validated_clusters = self.merge_clusters(all_clusters, validated_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
         self.right_wall = merged_validated_clusters[2]
         self.front_wall = merged_validated_clusters[1]
         self.left_wall  = merged_validated_clusters[0]
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
+        self.visualize_hnf_line(front_wall_hnf, m_id=110, farbe_name="rot", label="Front HNF")
+        self.visualize_hnf_line(left_wall_hnf, m_id=111, farbe_name="blau", label="Links HNF")
+        self.visualize_hnf_line(right_wall_hnf, m_id=112, farbe_name="gruen", label="Rechts HNF")
+
+
         if self.fahrtrichtung == 'links':
             innenbande = self.left_wall
+            innenbande_hnf = left_wall_hnf
             aussenbande = self.right_wall
+            aussenbande_hnf = right_wall_hnf
         elif self.fahrtrichtung == 'rechts':
             innenbande = self.right_wall
+            innenbande_hnf = right_wall_hnf
             aussenbande = self.left_wall
+            aussenbande_hnf = left_wall_hnf
 
-        if self.current_obstacle_cmd != "CLEAR":
-            pass
-        else:
-            if self.front_wall_hnf is not None and self.fahrtrichtung is not None:
-                _, _, front_dist = front_wall_hnf
-                
-                if front_dist < 1.20:
-                    self.state = f"TURN_{self.fahrtrichtung.upper()}"
-                    self.start_turn_yaw = self.current_yaw
-                    self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
-                    # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
-                    self.prev_error = 0.0
-                    self.integral_error = 0.0
-                else:
-                    if front_dist < 1.40:
-                        self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
+        if front_wall_hnf is not None and self.fahrtrichtung is not None:
+            _, _, front_dist = front_wall_hnf
             
-            target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
+            if front_dist < 1.20:
+                self.state = f"TURN_{self.fahrtrichtung.upper()}"
+                self.start_turn_yaw = self.current_yaw
+                cmd.angular.z = 0.0
+                self.pub_cmd_vel.publish(cmd)
+                self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
+                # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
+                self.prev_error = 0.0
+                self.integral_error = 0.0
+                return
+            else:
+                if front_dist < 1.40:
+                    self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
+        
+        target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
+        #target_x, target_y = self.get_target_point_straight_cluster(innenbande, aussenbande)
+        self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
 
-            # 2. PID-REGLER BERECHNEN
-            # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
-            error = -target_x 
-            
-            # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
-            self.integral_error += error
-            self.integral_error = max(-1.0, min(1.0, self.integral_error))
-            
-            # Derivative berechnen (Veränderung zum letzten Frame)
-            derivative = error - self.prev_error
-            self.prev_error = error
-            
-            # Stellgröße (Lenkbefehl) berechnen
-            steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
-            
-            # Auf ROS-Grenzen (-1.0 bis 1.0) kappen
-            steering_cmd = max(-1.0, min(1.0, steering_cmd))
-            
-            # 3. BEFEHLE AN ESP SETZEN
-            cmd.linear.x = self.base_speed
-            cmd.angular.z = float(steering_cmd)
+        # 2. PID-REGLER BERECHNEN
+        # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
+        error = -target_x 
+        
+        # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
+        self.integral_error += error
+        self.integral_error = max(-1.0, min(1.0, self.integral_error))
+        
+        # Derivative berechnen (Veränderung zum letzten Frame)
+        derivative = error - self.prev_error
+        self.prev_error = error
+        
+        # Stellgröße (Lenkbefehl) berechnen
+        steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
+        
+        # Auf ROS-Grenzen (-1.0 bis 1.0) kappen
+        steering_cmd = max(-1.0, min(1.0, steering_cmd))
+        
+        # 3. BEFEHLE AN ESP SETZEN
+        cmd.linear.x = self.base_speed
+        cmd.angular.z = float(-steering_cmd)
+        self.pub_cmd_vel.publish(cmd)
+        self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
+        self.pub_cmd_vel.publish(cmd)
+        self.pub_markers.publish(marker_array)
 
     def handle_turn_maneuver(self, point_data):
         """
         Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
         """
+        cmd = Twist()
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
         # ---------------------------------------------------------
         if self.turn_phase == 'APPROACH':
+            cmd.linear.x = self.base_speed
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
             # 1. Wände tracken und Geometrie berechnen
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-            target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, desired_wall_distance_m=0.50)
+            target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, None, self.lane_ratio)
             
             intersection_x, intersection_y, turn_angle = self.get_intersection_point(target_line_params)
             
@@ -2199,7 +2317,7 @@ class WallFollower(Node):
                 self.get_logger().info("Trigger erreicht. Wechsle in EXECUTE-Phase.")
                 # Daten für die Abschlussprüfung einfrieren
                 self.saved_target_angle = turn_angle
-                self.saved_curve_radius_m = curve_radius_m
+                self.saved_curve_radius_m = curve_radius_m        
                 self.turn_phase = 'EXECUTE'
                 
         # ---------------------------------------------------------
@@ -2233,6 +2351,7 @@ class WallFollower(Node):
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
         self.current_obstacle_cmd = self.check_for_obstacles(point_data)
+        self.get_logger().info(f"Aktueller Status: {self.state}")
 
         if self.state == 'STARTING':
             self.execute_start(point_data)
@@ -2241,7 +2360,7 @@ class WallFollower(Node):
             self.handle_lane_following(point_data)
             
         elif self.state in ['TURN_LINKS', 'TURN_RECHTS']:
-            self.handle_turn_maneuver(point_data, self.state)
+            self.handle_turn_maneuver(point_data)
             
         elif self.state == 'STOPPED':
             self.execute_stop()
