@@ -195,7 +195,6 @@ class WallFollower(Node):
         self.camera_fov = 115.0  # Dein Sichtfeld
         self.get_logger().info('YOLO Lidar Fusion Node gestartet.')
 
-        self.turn_start_time = 0.0
 
         ############ debug ##############
         self.begin = True
@@ -2058,30 +2057,69 @@ class WallFollower(Node):
     # State Maschine Obstacle Parcour
     # -----------------------------------------
 
-    def handle_lane_following(self, point_data):
-        total_gedreht = abs(self.current_yaw - self.yaw_offset)
-        if self.turn_count >= self.target_turns or total_gedreht > 1060:  # 1080° = 3 volle Umdrehungen
-            if self.get_closest_point_in_cluster(self.front_wall) is not None and self.get_closest_point_in_cluster(self.front_wall)[3] < 1.80:
-                self.state = 'STOPPED'
-                return
-        if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
-            self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
-            self.start_straight_yaw = self.current_yaw
-            self.turn_count += 1
-                
-        all_clusters = self.get_all_clusters_sorted(point_data)
-        validated_clusters = self.validate_clusters_straight(all_clusters)
-        validated_clusters = self.merge_clusters(all_clusters, validated_clusters)  # Die drei größten Cluster, die wir validiert haben
+    def check_for_obstacles(self, point_data):
+        return "CLEAR"
 
-        # Hier war vorher die Wahl der Fahrtrichtung, aber wir haben sie jetzt schon in der Startphase festgelegt.
-        
+
+    def handle_lane_following(self, point_data, all_clusters, current_obstacle_status):
+        cmd = Twist()
+
+        self.check_undetected_turn()
+        validated_clusters = self.validate_clusters_straight(all_clusters)
+        merged_validated_clusters = self.merge_clusters(all_clusters, validated_clusters)
+        self.right_wall = merged_validated_clusters[2]
+        self.front_wall = merged_validated_clusters[1]
+        self.left_wall  = merged_validated_clusters[0]
+        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
         if self.fahrtrichtung == 'links':
-            innenbande = validated_clusters[0]
-            aussenbande = validated_clusters[2]
+            innenbande = self.left_wall
+            aussenbande = self.right_wall
         elif self.fahrtrichtung == 'rechts':
-            innenbande = validated_clusters[2]
-            aussenbande = validated_clusters[0]
-        
+            innenbande = self.right_wall
+            aussenbande = self.left_wall
+
+        if current_obstacle_status != "CLEAR":
+            pass
+        else:
+            if self.front_wall_hnf is not None and self.fahrtrichtung is not None:
+                _, _, front_dist = front_wall_hnf
+                
+                if front_dist < 1.20:
+                    self.state = f"TURN_{self.fahrtrichtung.upper()}"
+                    self.start_turn_yaw = self.current_yaw
+                    self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
+                    # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
+                    self.prev_error = 0.0
+                    self.integral_error = 0.0
+                else:
+                    if front_dist < 1.40:
+                        self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
+            
+            target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
+
+            # 2. PID-REGLER BERECHNEN
+            # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
+            error = -target_x 
+            
+            # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
+            self.integral_error += error
+            self.integral_error = max(-1.0, min(1.0, self.integral_error))
+            
+            # Derivative berechnen (Veränderung zum letzten Frame)
+            derivative = error - self.prev_error
+            self.prev_error = error
+            
+            # Stellgröße (Lenkbefehl) berechnen
+            steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
+            
+            # Auf ROS-Grenzen (-1.0 bis 1.0) kappen
+            steering_cmd = max(-1.0, min(1.0, steering_cmd))
+            
+            # 3. BEFEHLE AN ESP SETZEN
+            cmd.linear.x = self.base_speed
+            cmd.angular.z = float(steering_cmd)
 
     def handle_turn_maneuver(self, point_data):
         """
@@ -2142,15 +2180,15 @@ class WallFollower(Node):
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
 
+        current_obstacle_status = self.check_for_obstacles(point_data)
+
         if self.state == 'STARTING':
             self.execute_start(point_data)
-            pass
 
         elif self.state == 'FOLLOW_LANE':
             self.handle_lane_following(point_data)
             
         elif self.state in ['TURN_LINKS', 'TURN_RECHTS']:
-            # Delegiere die komplette Kurvenlogik an die neue Funktion
             self.handle_turn_maneuver(point_data, self.state)
             
         elif self.state == 'STOPPED':
