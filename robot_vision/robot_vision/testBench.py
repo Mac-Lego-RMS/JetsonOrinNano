@@ -889,8 +889,8 @@ class WallFollower(Node):
         Berechnet den Zielpunkt (Karotte) im perfekten Verhältnis zur Innenbande.
         Mit absolutem Mindestabstand (Kraftfeld-Logik).
         """
-        target_y = self.lookahead_dist_straight  
-        target_x = 0.0                  
+        target_y = self.lookahead_dist_straight
+        target_x = 0.0
 
         def get_x_at_y(wall, target_y):
             angle = self.get_cluster_angle(wall)
@@ -922,29 +922,27 @@ class WallFollower(Node):
             x_innen = get_x_at_y(innenbande, target_y)
             x_aussen = get_x_at_y(aussenbande, target_y)
             
-            lane_width = abs(x_aussen - x_innen)
-            
             if x_innen < 0: # Innenbande links
-                target_x = x_innen + (lane_width * self.lane_ratio)
+                target_x = x_innen + self.lane_ratio
             else:           # Innenbande rechts
-                target_x = x_innen - (lane_width * self.lane_ratio)
+                target_x = x_innen - self.lane_ratio
                 
         # --- FALL 2: WIR SEHEN NUR DIE INNENBANDE (Oder haben Außen ignoriert) ---
         elif innenbande:
             x_innen = get_x_at_y(innenbande, target_y)
             if x_innen < 0:
-                target_x = x_innen + (self.assumed_lane_width * self.lane_ratio)
+                target_x = x_innen + self.lane_ratio
             else:
-                target_x = x_innen - (self.assumed_lane_width * self.lane_ratio)
+                target_x = x_innen - self.lane_ratio
                 
         # --- FALL 3: WIR SEHEN NUR DIE AUSSENBANDE (Oder haben Innen ignoriert) ---
         elif aussenbande:
             x_aussen = get_x_at_y(aussenbande, target_y)
             inv_ratio = 1.0 - self.lane_ratio 
             if x_aussen < 0: # Außenbande ist links
-                target_x = x_aussen + (self.assumed_lane_width * inv_ratio)
+                target_x = x_aussen + inv_ratio
             else:            # Außenbande ist rechts
-                target_x = x_aussen - (self.assumed_lane_width * inv_ratio)
+                target_x = x_aussen - inv_ratio
                 
         # Notfall
         else:
