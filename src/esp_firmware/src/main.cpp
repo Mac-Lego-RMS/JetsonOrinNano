@@ -285,11 +285,40 @@ private:
             serialPort->printf("ESP: Motor OK | Speed: %d\n", targetSpeed);
         } 
         else if (currentCmd == CMD_SERVO) {
+            // SCHUTZSPERRE
+
             uint8_t id = buffer[0];
-            uint16_t pos = (buffer[1] << 8) | buffer[2];
-            servo->WritePos(id, pos, 0, 0);
+            int16_t steerPct = (buffer[1] << 8) | buffer[2]; 
             
-            serialPort->printf("ESP: Servo OK | ID: %d | Pos: %d\n", id, pos);
+            // --- NEU: DYNAMISCHE HUB-BEGRENZUNG AUF 80% ---
+            const float MAX_THROW_FACTOR = 0.80; 
+            
+            // 1. Berechne den maximal möglichen Weg von der Mitte zum jeweiligen Anschlag
+            int maxDistRight = softwareCenterPos - rightLimit; 
+            int maxDistLeft = leftLimit - softwareCenterPos;
+            
+            // 2. Multipliziere den Weg mit dem Faktor (z.B. 80%) und addiere/subtrahiere ihn zur Mitte
+            int safeRight = softwareCenterPos - (maxDistRight * MAX_THROW_FACTOR);
+            int safeLeft = softwareCenterPos + (maxDistLeft * MAX_THROW_FACTOR);
+            
+            int physicalPos = softwareCenterPos;
+
+            // Grenzen für den empfangenen Prozentwert absichern
+            if (steerPct < -100) steerPct = -100;
+            if (steerPct > 100) steerPct = 100;
+
+            // Asymmetrisches Mapping mit den neuen, sanfteren Limits
+            if (steerPct > 0) {
+                physicalPos = map(steerPct, 0, 100, softwareCenterPos, safeLeft);
+            } 
+            else if (steerPct < 0) {
+                physicalPos = map(steerPct, -100, 0, safeRight, softwareCenterPos);
+            }
+
+            servo->WritePos(id, physicalPos, 0, 0);
+            
+            // Debug-Ausgabe zur Kontrolle (kannst du später auskommentieren)
+            serialPort->printf("ESP: Servo | CMD: %d%% | Limit(L/R): %d/%d | Pos: %d\n", steerPct, safeLeft, safeRight, physicalPos);
         }
         else if (currentCmd == CMD_LED) {
             bool turnOn = buffer[0];
