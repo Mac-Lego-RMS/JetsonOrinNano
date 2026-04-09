@@ -94,7 +94,7 @@ class WallFollower(Node):
         self.state = 'STARTING'    # Startzustand
         self.turn_phase = 'APPROACH'  # Bei Kurven: 'APPROACH', 'TURNING', 'EXIT'
         self.fahrtrichtung = None     # Wird automatisch erkannt
-        self.saved_target_angle = None
+        self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
         self.target_turns = 4
@@ -138,6 +138,7 @@ class WallFollower(Node):
 
         self.TRACK_WIDTH_M = 1.0
         self.ROBOT_WIDTH_M = 0.15
+        self.LIDAR_OFFSET_M = 0.10
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
         self.IDEAL_RADIUS_M = 0.45
@@ -945,7 +946,7 @@ class WallFollower(Node):
             
             # Annahme: self.lane_ratio ist ein Prozentwert (z.B. 0.5 für Mitte)
             # Falls ihr eine Konstante wie self.TRACK_WIDTH_M habt, setze sie statt 1.0 ein
-            offset_von_wand = 1.0 * self.lane_ratio 
+            offset_von_wand = self.lane_ratio 
             
             if x_innen < 0: # Innenbande links
                 target_x = x_innen + offset_von_wand
@@ -1751,9 +1752,23 @@ class WallFollower(Node):
         tangent_length_m = curve_radius_m * math.tan(alpha_rad / 2.0)
         
         # 3. Finalen Einlenkpunkt auf der y-Achse festlegen
-        entry_point_distance_m = intersection_y_m - tangent_length_m
+        # 3. Finalen Einlenkpunkt (für das LiDAR) auf der y-Achse festlegen
+        lidar_entry_dist_m = intersection_y_m - tangent_length_m
         
-        return curve_radius_m, entry_point_distance_m
+        # 4. KINEMATISCHER OFFSET (Drehpunkt auf die Hinterachse verschieben)
+        # Addiert 10 cm, da die Hinterachse 10 cm weiter weg ist als das LiDAR
+        real_axle_dist_m = lidar_entry_dist_m + self.LIDAR_OFFSET_M
+        
+        # 5. SICHERHEITS-CHECK: Echten Einlenkpunkt (Hinterachse) verpasst?
+        if real_axle_dist_m <= 0.0:
+            self.get_logger().warn(
+                f"NOT-EINLENKEN: Drehpunkt verpasst ({real_axle_dist_m:.2f} m). "
+                "Forciere sofortige Kurve."
+            )
+            # Setze auf 0.0, damit JEDER Trigger sofort feuert
+            real_axle_dist_m = 0.0 
+            
+        return curve_radius_m, real_axle_dist_m
 
     def check_turn_trigger(self, entry_point_distance_m):
         """
@@ -2082,7 +2097,6 @@ class WallFollower(Node):
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
         
         # Hinweis: außenbande fehlte in deinem Snippet, wird hier für den Methodenaufruf benötigt
-        außenbande = validated_clusters[0] if len(validated_clusters) > 0 else None
         front_wall_params, side_wall_params = self.test_extract_wall_lines(validated_clusters)
     
         # ==========================================
@@ -2095,10 +2109,8 @@ class WallFollower(Node):
             target_line_params, max_allowed_radius_m = self.test_calculate_target_line(validated_clusters, desired_wall_distance_m=0.6)
             self.visualize_hnf_line((1.0, 0, 0), m_id=550, farbe_name="rot", label="")
 
-            intersection_x, intersection_y, schnitt_winkel = self.test_get_intersection_point(target_line_params)
-            self.curve_radius_m, entry_point_distance_m = self.test_calculate_curve_geometry(
-                intersection_y, schnitt_winkel, max_allowed_radius_m
-            )
+            intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
+            self.curve_radius_m, entry_point_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius_m)
         
             # 1. Motor für die Annäherung aktivieren
             cmd = Twist()
@@ -2112,7 +2124,7 @@ class WallFollower(Node):
 
             if trigger_erreicht:
                 self.test_is_turning = True
-                self.saved_target_angle = schnitt_winkel
+                self.saved_intersection_angle = intersection_angle
                 self.start_turn_yaw = self.current_yaw
                 self.get_logger().warn(">>> TRIGGER ERREICHT - KURVE STARTET <<<")
                 
@@ -2126,7 +2138,7 @@ class WallFollower(Node):
             
             # Prüfung: Hat der Roboter sich weit genug gedreht?
             self.get_logger().info(f"Alte Winkelberchnung: {self.get_cluster_angle(self.front_wall)}")
-            turn_completed = self.test_check_turn_completion_fused(self.saved_target_angle, front_wall_params)
+            turn_completed = self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params)
             
             if turn_completed:
                 self.get_logger().info(">>> KURVE BEENDET! STOPPE ROBOTER <<<")
@@ -2246,7 +2258,6 @@ class WallFollower(Node):
             
             if front_dist < 1.20:
                 self.state = f"TURN_{self.fahrtrichtung.upper()}"
-                self.start_turn_yaw = self.current_yaw
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
                 self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
@@ -2305,19 +2316,23 @@ class WallFollower(Node):
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-            target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, None, self.lane_ratio)
+            #target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, None, self.lane_ratio)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, self.lane_ratio)
             
-            intersection_x, intersection_y, turn_angle = self.get_intersection_point(target_line_params)
+            #intersection_x, intersection_y, intersection_angle = self.get_intersection_point(target_line_params
+            intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             
-            curve_radius_m, entry_distance_m = self.calculate_curve_geometry(intersection_y, turn_angle, max_allowed_radius)
+            #curve_radius_m, entry_distance_m = self.calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
+            curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             
             # 2. Trigger prüfen
             # check_turn_trigger muss True zurückgeben, wenn die Distanz erreicht ist
-            if self.check_turn_trigger(entry_distance_m):
+            if self.test_check_turn_trigger(entry_distance_m):
                 self.get_logger().info("Trigger erreicht. Wechsle in EXECUTE-Phase.")
                 # Daten für die Abschlussprüfung einfrieren
-                self.saved_target_angle = turn_angle
-                self.saved_curve_radius_m = curve_radius_m        
+                self.saved_intersection_angle = intersection_angle
+                self.saved_curve_radius_m = curve_radius_m
+                self.start_turn_yaw = self.current_yaw
                 self.turn_phase = 'EXECUTE'
                 
         # ---------------------------------------------------------
@@ -2331,10 +2346,12 @@ class WallFollower(Node):
 
 
             # 3. Abschluss prüfen
-            if self.check_turn_completion_fused(self.saved_target_angle, front_wall_params):
+            if self.test_check_turn_completion_fused(self.saved_intersection_anglee, front_wall_params):
                 self.get_logger().info("Kurve physikalisch beendet.")
             
-                # Aufräumen und State zurücksetzen
+                cmd.linear.x = self.base_speed
+                cmd.angular.z = 0.0
+                self.pub_cmd_vel.publish(cmd)
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
                 self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle an die main_logic
     
