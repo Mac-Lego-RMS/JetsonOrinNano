@@ -1,38 +1,41 @@
-import numpy as np
-
 class Obstacle:
-    def __init__(self, cluster, color):
-        self.cluster = cluster
-        self.color = color  # "red" oder "green"
+    def __init__(self, color, zone_id=None, prov_x=None, prov_y=None):
+        """
+        Repräsentiert ein erkanntes Hindernis.
         
-        # Metrischer Schwerpunkt im lokalen Robotersystem (x=Querachse, y=Fahrtrichtung)
-        self.center_x_m = 0.0
-        self.center_y_m = 0.0
-        
-        self.is_valid = False
-        self.pass_direction = 0  # 1 = rechts vorbei, -1 = links vorbei
-        
-        self._process_cluster()
-        self._determine_pass_direction()
-
-    def _process_cluster(self):
-        """Berechnet den Massepunkt (Schwerpunkt) des Clusters. Muss bei jeder cluster - Aktualisierung mit aktualisiert werden"""
-        if not self.cluster or len(self.cluster) < 3:
-            self.is_valid = False
-            return
-            
-        # Annahme: cluster ist eine Liste von (x, y) Tupeln
-        points = np.array(self.cluster)
-        
-        # Schwerpunktberechnung (Mittelwert der x- und y-Koordinaten)
-        self.center_x_m, self.center_y_m = np.mean(points, axis=0)
-        self.is_valid = True
+        :param color: "red" oder "green"
+        :param zone_id: Optional. Integer für die feste Spielfeld-Position. 
+                        Wenn None, ist es eine frühe Sichtung ohne feste Position.
+        """
+        self.color = color.lower()
+        self.zone_id = zone_id
+        self.prov_x = prov_x
+        self.prov_y = prov_y
+        self.pass_direction = self._determine_pass_direction()
 
     def _determine_pass_direction(self):
         """Übersetzt die erkannte Farbe in eine mathematische Ausweichrichtung."""
         if self.color == "red":
-            self.pass_direction = 1   # Rechts ausweichen
+            return 1   # Rechts ausweichen
         elif self.color == "green":
-            self.pass_direction = -1  # Links ausweichen
+            return -1  # Links ausweichen
         else:
-            self.pass_direction = 0
+            return 0
+        
+    def set_prov_coords(self, x, y):
+        self.prov_x = x
+        self.prov_y = y
+            
+    @property
+    def is_localized(self):
+        """Prüft, ob das Hindernis bereits fest auf der Karte verortet wurde."""
+        return self.zone_id is not None
+        
+    def lock_position(self, zone_id):
+        """Fixiert die Position des Hindernisses nachträglich im topologischen Speicher."""
+        self.zone_id = zone_id
+
+    def __repr__(self):
+        loc_str = f"Zone:{self.zone_id}" if self.is_localized else "Sichtung (Unverortet)"
+        dir_str = "RECHTS" if self.pass_direction == 1 else "LINKS"
+        return f"<Obstacle {loc_str} Farbe:{self.color.upper()} Ausweichen:{dir_str}>"

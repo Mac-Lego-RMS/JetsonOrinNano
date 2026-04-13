@@ -21,6 +21,8 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from robot_vision.steering_lib import SteeringController
 
+from obstacle.py import Obstacle
+
 
 
 '''
@@ -116,6 +118,7 @@ class WallFollower(Node):
 
         # Object Detection Parameter
         self.current_obstacle_cmd = "CLEAR"
+        self.obstacle_memory = [None, None, None, None]
 
         # Standard-Werte für die Ideallinie auf der Geraden(z.B. Außenbahn)
         self.default_lane_ratio = 0.85 
@@ -975,171 +978,6 @@ class WallFollower(Node):
         self.get_logger().info(f"Zielpunkt: {target_x}, {target_y}")
         return (target_x, target_y)
 
-    def get_target_point_straight_cluster(self, innenbande, aussenbande):
-        """
-        Berechnet den Zielpunkt (Karotte) im perfekten Verhältnis zur Innenbande.
-        Mit absolutem Mindestabstand (Kraftfeld-Logik).
-        """
-        target_y = self.lookahead_dist_straight  
-        target_x = 0.0                  
-
-        def get_x_at_y(wall, target_y):
-            angle = self.get_cluster_angle(wall)
-            mean_x = sum(p[1] for p in wall) / len(wall)
-            mean_y = sum(p[2] for p in wall) / len(wall)
-            if angle is None: return mean_x
-            angle_rad = math.radians(angle)
-            dy = target_y - mean_y
-            return mean_x + (dy * math.tan(angle_rad))
-
-        # ==========================================
-        # NEU: DER "WAND-KUSCHLER" FIX (Single-Wall Tracking)
-        # ==========================================
-        # Wenn wir einem Hindernis ausweichen, verlassen wir uns NUR noch auf 
-        # die Bande, an der wir gerade entlangfahren. Das verhindert, dass 
-        # das passierte Hindernis die Spurbreiten-Rechnung zerschießt!
-        if self.current_obstacle_cmd != "CLEAR":
-            if self.lane_ratio < 0.5:
-                # Wir wollen ganz nah an die Innenbande (Ratio z.B. 0.20)
-                # -> Wir ignorieren die Außenbande (und das Hindernis dort) komplett!
-                aussenbande = None
-            else:
-                # Wir wollen ganz nah an die Außenbande (Ratio z.B. 0.85)
-                # -> Wir ignorieren die Innenbande komplett!
-                innenbande = None
-
-        # --- FALL 1: WIR SEHEN BEIDE BANDEN (Normalfall auf freier Strecke) ---
-        if innenbande and aussenbande:
-            x_innen = get_x_at_y(innenbande, target_y)
-            x_aussen = get_x_at_y(aussenbande, target_y)
-            
-            if x_innen < 0: # Innenbande links
-                target_x = x_innen + self.lane_ratio
-            else:           # Innenbande rechts
-                target_x = x_innen - self.lane_ratio
-                
-        # --- FALL 2: WIR SEHEN NUR DIE INNENBANDE (Oder haben Außen ignoriert) ---
-        elif innenbande:
-            x_innen = get_x_at_y(innenbande, target_y)
-            if x_innen < 0:
-                target_x = x_innen + self.lane_ratio
-            else:
-                target_x = x_innen - self.lane_ratio
-                
-        # --- FALL 3: WIR SEHEN NUR DIE AUSSENBANDE (Oder haben Innen ignoriert) ---
-        elif aussenbande:
-            x_aussen = get_x_at_y(aussenbande, target_y)
-            inv_ratio = 1.0 - self.lane_ratio 
-            if x_aussen < 0: # Außenbande ist links
-                target_x = x_aussen + inv_ratio
-            else:            # Außenbande ist rechts
-                target_x = x_aussen - inv_ratio
-                
-        # Notfall
-        else:
-            target_x = 0.0  
-
-        # ==========================================
-        # KRAFTFELD (MINDESTABSTAND ERZWINGEN)
-        # ==========================================
-        if innenbande:
-            # Wir prüfen, wo die Innenbande ist
-            x_innen_check = get_x_at_y(innenbande, target_y)
-            
-            if x_innen_check < 0:  
-                # Innenbande ist LINKS. Ziel MUSS mindestens +min_wall_dist entfernt sein
-                if target_x < x_innen_check + self.min_wall_dist:
-                    target_x = x_innen_check + self.min_wall_dist
-                    
-            else:                  
-                # Innenbande ist RECHTS. Ziel MUSS mindestens -min_wall_dist entfernt sein
-                if target_x > x_innen_check - self.min_wall_dist:
-                    target_x = x_innen_check - self.min_wall_dist
-
-        return (target_x, target_y)
-    
-    def get_target_point_turn(self, u_profile, x_soll, y_soll):
-        if u_profile[1] is None:
-            return None
-        else:
-            dist_front = self.get_closest_point_in_cluster(u_profile[1])[3]
-
-        if self.fahrtrichtung == "links":
-            if u_profile[0] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
-            elif u_profile[2] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
-            else: 
-                dist_side = None
-        else:
-            if u_profile[2] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
-            elif u_profile[0] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
-            else:
-                dist_side = None
-
-        delta_x =  dist_side - x_soll if dist_side is not None else None
-        delta_y = dist_front - y_soll
-
-        return (delta_x, delta_y)
-    
-    # Chatler Idee
-    def get_target_point_turn(self, u_profile, x_soll, y_soll):
-        if u_profile[1] is None:
-            return None
-            
-        # 1. Abstand zur Frontwand
-        dist_front = self.get_closest_point_in_cluster(u_profile[1])[3]
-        
-        # 2. WIE SCHIEF STEHT DER ROBOTER?
-        # Die Frontwand sollte idealerweise bei 90° sein.
-        angle_front_deg = self.get_cluster_angle(u_profile[1])
-        if angle_front_deg is None:
-            return None
-            
-        # Winkel-Differenz in Bogenmaß umrechnen (z.B. Frontwand bei 60° -> alpha = -30°)
-        alpha = math.radians(angle_front_deg - 90.0)
-
-        # 3. Seitenabstand bestimmen (Eure bestehende Logik)
-        dist_side = None
-        is_left_wall = False
-        
-        if self.fahrtrichtung == "links":
-            if u_profile[0] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
-                is_left_wall = False
-            elif u_profile[2] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
-                is_left_wall = True
-        else:
-            if u_profile[2] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[2])[3]
-                is_left_wall = True
-            elif u_profile[0] is not None:
-                dist_side = self.get_closest_point_in_cluster(u_profile[0])[3]
-                is_left_wall = False
-
-        # 4. "Ideale" Deltas berechnen (Skalare Distanzen)
-        delta_y_ideal = dist_front - y_soll
-        
-        if dist_side is not None:
-            # Vorzeichen-Logik: Wenn wir uns an der linken Wand orientieren, 
-            # muss das Ziel weiter nach links (-X) geschoben werden.
-            if is_left_wall:
-                delta_x_ideal = -(dist_side - x_soll)
-            else:
-                delta_x_ideal = (dist_side - x_soll)
-        else:
-            delta_x_ideal = 0.0
-
-        # 5. DIE LÖSUNG: Rotationsmatrix anwenden!
-        # Dreht die Koordinaten passend zur Schräglage des Roboters
-        delta_x = delta_x_ideal * math.cos(alpha) - delta_y_ideal * math.sin(alpha)
-        delta_y = delta_x_ideal * math.sin(alpha) + delta_y_ideal * math.cos(alpha)
-
-        return (delta_x, delta_y)
-
     def track_front_wall(self, point_data, last_front_wall):
         """
         Trackt die Frontwand während der Kurve durch ein mitwanderndes Suchfenster (ROI).
@@ -1246,6 +1084,60 @@ class WallFollower(Node):
         
         return results
         
+    def get_obstacles_from_camera(self, point_data):
+        if self.last_image_msg is None:
+            self.get_logger().info("Warte auf Kamera-Bild...", throttle_duration_sec=1.0)
+            return None
+        results = self.image_callback(self.last_image_msg)
+        if results is None: 
+            return None
+
+        detected_obstacles = []
+
+        for r in results:
+            for box in r.boxes:
+                if float(box.conf[0]) > 0.85:
+                    self.get_logger().info(f'Objekt erkannt: {self.model.names[int(box.cls[0])]} mit Konfidenz {box.conf[0]:.2f}')
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    center_x = (x1 + x2) / 2.0
+
+                    # 1. Nullpunkt in die Mitte des Bildes schieben
+                    # center_x ist 0 (ganz links) bis image_width (ganz rechts)
+                    pixel_from_center = center_x - (self.image_width / 2.0)
+                    
+                    # 2. Pixel in Grad umrechnen (Kamera FOV auf die Breite verteilen)
+                    cam_angle_deg = pixel_from_center * (self.camera_fov / self.image_width)
+                    
+                    # 3. Kalibrierung dazurechnen und in Bogenmaß (Radian) umwandeln
+                    cam_angle_rad = math.radians(cam_angle_deg + self.angle_calibration)
+                    
+                    self.get_logger().info(f'Kamerawinkel: {cam_angle_deg:.1f}° (nach Kalibrierung: {cam_angle_deg + self.angle_calibration:.1f}°)')
+
+                    # Lidar nach diesem Winkel durchsuchen
+                    obstacle_cluster = self.get_lidar_distance(cam_angle_rad, self.get_all_clusters_sorted(point_data))
+
+                    if obstacle_cluster is not None:
+                        # result enthält jetzt: (angle_deg, x, y, dist)
+                        obj_x, obj_y = self.get_weight_point_for_cluster(obstacle_cluster) 
+                        class_name = self.model.names[int(box.cls[0])].lower()
+                        # publish_marker bekommt jetzt direkt die rohen X- und Y-Werte!
+                        self.publish_marker(obj_x, obj_y, class_name, int(box.cls[0]))
+                        
+                        detected_obstacles.append((obj_x, obj_y, class_name))
+        return detected_obstacles
+
+    def get_weight_point_for_cluster(self, cluster):
+        # Fängt None UND leere Listen ([]) ab
+        if not cluster:
+            return None
+            
+        n = len(cluster)
+        sum_x = sum(p[1] for p in cluster)
+        sum_y = sum(p[2] for p in cluster)
+        
+        return sum_x / n, sum_y / n
+
+
     def get_lidar_distance(self, camera_angle_rad, clusters):
         walls = [self.front_wall, self.left_wall, self.right_wall]
         clusters_without_walls = [c for c in clusters if c not in walls and c is not None]
@@ -1253,6 +1145,7 @@ class WallFollower(Node):
         if not clusters_without_walls: 
             return None
             
+        best_cluster = None       # <--- NEU: Variable für das Sieger-Cluster
         best_closest_point = None
         min_dist = 4.0  # WICHTIG: Wir suchen zwingend das NÄCHSTE Objekt!
         best_angle_deg = 0.0
@@ -1287,11 +1180,12 @@ class WallFollower(Node):
                         min_dist = dist
                         best_closest_point = closest_point
                         best_angle_deg = angle_deg
+                        best_cluster = cluster  # <--- NEU: Das komplette Cluster speichern
                         
-        # Reparierter Log-Output (Druckt jetzt die echten Werte des Sieger-Clusters!)
-        if best_closest_point is not None:
+        # Reparierter Log-Output
+        if best_cluster is not None:
             self.get_logger().info(f"MATCH: Kamera {math.degrees(camera_angle_rad):.1f}° -> Lidar {best_angle_deg:.1f}° (Distanz: {min_dist:.2f}m)")
-            return best_closest_point
+            return best_cluster
             
         return None
 
@@ -1306,101 +1200,7 @@ class WallFollower(Node):
         """Berechnet den kleinsten Unterschied zwischen zwei Winkeln (Rad)."""
         # Sorgt dafür, dass der Unterschied auch über die 0/360° Grenze korrekt bleibt
         return math.atan2(math.sin(a - b), math.cos(a - b))
-        
-## SPielerei###
-    def calculate_intersection(self, c1, c2):
-        """
-        Berechnet den Schnittpunkt absolut robust über die Liniengleichung 
-        der Start- und Endpunkte (unabhängig von Winkel-Ungenauigkeiten!).
-        """
-        if not c1 or not c2 or len(c1) < 2 or len(c2) < 2:
-            return None
 
-        # Punkte von Wand 1
-        x1, y1 = c1[0][1], c1[0][2]
-        x2, y2 = c1[-1][1], c1[-1][2]
-        
-        # Punkte von Wand 2
-        x3, y3 = c2[0][1], c2[0][2]
-        x4, y4 = c2[-1][1], c2[-1][2]
-
-        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-        if abs(denom) < 1e-6:
-            return None # Wände sind exakt parallel
-
-        # Schnittpunkt (Px, Py)
-        px = ((x1*y2 - y1*x2)*(x3 - x4) - (x1 - x2)*(x3*y4 - y3*x4)) / denom
-        py = ((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / denom
-
-        return (px, py)
-
-    def generate_bezier_path_and_target(self, side_wall, front_wall, fahrtrichtung, is_right_wall, lookahead):
-        """
-        Generiert den Foxglove-Pfad UND extrahiert direkt den passenden 
-        Zielpunkt (Karotte) für die Lenkung.
-        """
-        intersection = self.calculate_intersection(side_wall, front_wall)
-        if not intersection:
-            return None
-
-        int_x, int_y = intersection
-        
-        # Abbiege-Abstand: Wie weit vor der Frontwand soll der neue Flur liegen?
-        lane_offset = 0.40 
-
-        # --- KONTROLLPUNKTE (System: X=Rechts, Y=Vorne) ---
-        p0 = (0.0, 0.0) # Start am Roboter
-        p1 = (0.0, 0.3) # Trägheit: Wir fahren erst einmal geradeaus (+Y)
-        
-        # Der Scheitelpunkt bleibt auf unserer Spur (X=0), exakt vor der Wand!
-        p2 = (0.0, int_y - lane_offset)
-        
-        if fahrtrichtung == "links":
-            # Ziel-Flur geht tief nach LINKS (-X)
-            p3 = (-1.5, int_y - lane_offset) 
-        else:
-            # Ziel-Flur geht tief nach RECHTS (+X)
-            p3 = (1.5, int_y - lane_offset) 
-
-        # --- PFAD GENERIEREN & KAROTTE SUCHEN ---
-        path_msg = Path()
-        path_msg.header.stamp = self.get_clock().now().to_msg()
-        path_msg.header.frame_id = self.rviz_frame
-        
-        target_pt = None
-
-        num_points = 25 
-        for i in range(num_points + 1):
-            t = i / float(num_points)
-            
-            term0 = (1 - t)**3
-            term1 = 3 * (1 - t)**2 * t
-            term2 = 3 * (1 - t) * t**2
-            term3 = t**3
-
-            pt_x = term0 * p0[0] + term1 * p1[0] + term2 * p2[0] + term3 * p3[0]
-            pt_y = term0 * p0[1] + term1 * p1[1] + term2 * p2[1] + term3 * p3[1]
-
-            pose = PoseStamped()
-            pose.header = path_msg.header
-            pose.pose.position.x = float(pt_x)
-            pose.pose.position.y = float(pt_y)
-            pose.pose.position.z = 0.0
-            pose.pose.orientation.w = 1.0 
-            path_msg.poses.append(pose)
-
-            # Karotte suchen (erster Punkt, der weit genug weg ist)
-            if target_pt is None:
-                dist_to_robot = math.hypot(pt_x, pt_y)
-                if dist_to_robot >= lookahead:
-                    target_pt = (pt_x, pt_y)
-
-        if target_pt is None:
-            target_pt = (p3[0], p3[1])
-
-        self.pub_path.publish(path_msg)
-        return target_pt   
-    
     def visualize_clusters(self, kandidaten_RVIZ):
         if self.fahrtrichtung == 'links':
             innenbande = self.left_wall
@@ -1504,67 +1304,6 @@ class WallFollower(Node):
         # Alles veröffentlichen, damit es in RViz2 auftaucht!
         self.pub_markers.publish(marker_array)
 
-    def calculate_steering_pid(self, target_x, target_y):
-        """
-        Berechnet den Lenkeinschlag für den Servo basierend auf der Karotte.
-        """
-        # 1. Fehler berechnen (Winkel zur Karotte)
-        # X=Rechts, Y=Vorne. atan2(-X, Y) liefert den Winkel in Radiant.
-        # Links lenken = Positiver Winkel, Rechts lenken = Negativer Winkel
-        error = math.atan2(-target_x, target_y)
-
-        # 2. PID-Anteile berechnen
-        # Wir nutzen deine Variablen aus der __init__ (self.turn_kp etc.)
-        p_out = self.turn_kp * error
-        
-        self.integral_error += error
-        i_out = self.turn_ki * self.integral_error
-        
-        d_out = self.turn_kd * (error - self.prev_error)
-        self.prev_error = error
-
-        # 3. Summe ziehen
-        steering_cmd = p_out + i_out + d_out
-        
-        # 4. Clamping (Sicherheitsbegrenzung für den Servo)
-        # Verhindert, dass der Servo übersteuert und kaputt geht.
-        if steering_cmd > self.max_turn_angle:
-            steering_cmd = self.max_turn_angle
-        elif steering_cmd < -self.max_turn_angle:
-            steering_cmd = -self.max_turn_angle
-
-        return steering_cmd
-
-    def transform_world_to_robot(point_world, robot_pose):
-        """
-        Transformiert einen Punkt vom Weltkoordinatensystem (Banden-Profil) 
-        in das lokale Roboterkoordinatensystem (Lidar).
-        
-        Parameter:
-        point_world : tuple (x_w, y_w) - Der Zielpunkt im Weltsystem in Metern.
-        robot_pose  : tuple (x_r, y_r, theta_r) - Die Pose des Roboters im Weltsystem.
-                    (x_r, y_r) in Metern, theta_r in Radiant.
-                    
-        Rückgabe:
-        tuple (x_b, y_b) - Die Koordinaten des Punktes relativ zum Roboter.
-        """
-        x_w, y_w = point_world
-        x_r, y_r, theta_r = robot_pose
-        
-        # 1. Translation berechnen (Verschiebung)
-        dx = x_w - x_r
-        dy = y_w - y_r
-        
-        # Trigonometrische Funktionen für die Rotation 
-        cos_theta = math.cos(theta_r)
-        sin_theta = math.sin(theta_r)
-        
-        # 2. Rotation anwenden (Rotationsmatrix)
-        x_b = dx * cos_theta + dy * sin_theta
-        y_b = -dx * sin_theta + dy * cos_theta
-        
-        return (x_b, y_b)
-    
     # -----------------------------------------------
     # Neue Koordinatensystem Idee für Kurvenfahrten
     # -----------------------------------------------
@@ -2161,8 +1900,38 @@ class WallFollower(Node):
     # State Maschine Obstacle Parcour
     # -----------------------------------------
 
-    def check_for_obstacles(self, point_data):
-        return "CLEAR"
+    def check_for_obstacle_color(self, point_data, turn_count, distance_to_straight=0.0):
+        current_straight = turn_count % 4
+        current_obstacle = self.obstacle_memory[current_straight]
+        if current_obstacle is None:
+            detected_obstacles = self.get_obstacles_from_camera(point_data)
+            if detected_obstacles:
+                # Sortieren nach Distanz (das nächste Objekt kommt auf Index 0)
+                detected_obstacles = list(filter(lambda x: x[0] > distance_to_straight))
+                detected_obstacles.sort(key=lambda x: x[0])
+                closest_x, closest_y, closest_color = detected_obstacles[0]
+                closest_dist = math.hypot(closest_x, closest_y)
+                if closest_dist < (distance_to_straight + 2.0):
+                    new_obstacle = Obstacle(closest_color, zone_id=None)
+                    self.obstacle_memory[current_straight] = new_obstacle
+                    self.new_obstacle.set_prov_coords(closest_x, closest_y)
+                    return new_obstacle
+                else:
+                    return None
+            else: 
+                return None
+        else:
+            return current_obstacle
+
+    def set_obstacle_position(self, point_data, u_profile):
+        current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count)
+        if current_obstacle is None:
+            return None
+        elif current_obstacle.is_localized():
+            return current_obstacle
+        else:
+
+
 
     def check_undetected_turn(self):
         total_gedreht = abs(self.current_yaw - self.yaw_offset)
@@ -2367,7 +2136,7 @@ class WallFollower(Node):
 
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
-        self.current_obstacle_cmd = self.check_for_obstacles(point_data)
+        self.current_obstacle_cmd = self.check_for_obstacles(point_data, straight_count)
         self.get_logger().info(f"Aktueller Status: {self.state}")
 
         if self.state == 'STARTING':
