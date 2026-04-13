@@ -4,6 +4,9 @@ from platform import node
 
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+import threading
 from sensor_msgs.msg import LaserScan, Imu, Image
 from geometry_msgs.msg import Twist, Point
 from visualization_msgs.msg import Marker, MarkerArray
@@ -65,11 +68,40 @@ from obstacle.py import Obstacle
 class WallFollower(Node):
     def __init__(self):
         super().__init__('wall_follower')
+
+        # --- MULTITHREADING SETUP ---
+        # MutuallyExclusive: Callbacks in dieser Gruppe blockieren sich nur gegenseitig.
+        # Wir trennen YOLO und LiDAR physisch voneinander.
+        self.sensor_cbg = MutuallyExclusiveCallbackGroup()
+        self.yolo_cbg = MutuallyExclusiveCallbackGroup()
         
-        # Subscriber für LiDAR-Daten 
-        self.sub_scan = self.create_subscription(LaserScan, '/ldlidar_node/scan', self.scan_callback, qos_profile_sensor_data)
-        self.last_point_data = []  # Hier speichern wir die rohen LiDAR-Punkte für die Kamera-Fusion
-        self.sub_imu = self.create_subscription(Imu, '/bno055/imu', self.imu_callback, 10)
+        # Thread-Lock für Datensicherheit beim Zugriff auf gemeinsame Variablen
+        self.data_lock = threading.Lock()
+        self.latest_yolo_results = [] # Hier speichert YOLO seine Boxen ab  
+        
+        self.img_sub = self.create_subscription(
+            Image, 
+            '/camera/image_raw', 
+            self.camera_sub_callback, 
+            qos_profile_sensor_data,
+            callback_group=self.yolo_cbg  # Läuft in eigenem Thread
+        )
+        
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            '/ldlidar_node/scan',
+            self.scan_callback,
+            qos_profile_sensor_data,
+            callback_group=self.sensor_cbg  # Läuft in eigenem Thread
+        )
+        
+        self.sub_imu = self.create_subscription(
+            Imu, 
+            '/bno055/imu', 
+            self.imu_callback, 
+            10,
+            callback_group=self.sensor_cbg
+        )
         
         # Publisher für Bewegung und RViz [cite: 1, 19]
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -173,23 +205,6 @@ class WallFollower(Node):
         self.lidar_height_offset = 0.05 # In Metern: Hebt/Senkt den Marker in RViz
         self.camera_to_lidar_dist = 0.03 # Falls die Kamera 3cm vor dem Lidar sitzt
 
-        # 2. Subscriptions
-        # Kamera-Bild   
-        self.last_image_msg = None  # Hier speichern wir das letzte Bild für die Fusion
-        self.image_width = None  # Breite des Kamerabildes (wird beim ersten Bild gesetzt)
-        self.img_sub = self.create_subscription(
-            Image, 
-            '/camera/image_raw', 
-            self.camera_sub_callback, 
-            qos_profile_sensor_data
-        )
-        # Lidar-Scan hinzufügen
-        self.scan_sub = self.create_subscription(
-            LaserScan,
-            '/ldlidar_node/scan',
-            self.scan_callback,
-            qos_profile_sensor_data
-        )
         
         # 3. Publisher
         self.marker_pub = self.create_publisher(Marker, '/detected_obstacles', 10)
@@ -293,7 +308,22 @@ class WallFollower(Node):
         self.last_raw_yaw = raw_yaw
     
     def camera_sub_callback(self, msg):
-        self.last_image_msg = msg
+        """Wird asynchron vom MultiThreadedExecutor aufgerufen. Blockiert den Lidar nicht!"""
+        cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        
+        if self.image_width is None:
+            self.image_width = cv_image.shape[1]     
+            
+        results = self.model(cv_image, verbose=False)
+
+        # DEBUG-BILD (Optional)
+        annotated_frame = results[0].plot()
+        debug_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+        self.pub_debug_img.publish(debug_msg)
+        
+        # Ergebnisse thread-sicher in die globale Variable schreiben
+        with self.data_lock:
+            self.latest_yolo_results = results
 
     def send_text(self, marker_array, m_id, text, x, y, color=(1.0, 1.0, 1.0), scale=0.15):
         """
@@ -938,7 +968,7 @@ class WallFollower(Node):
             if abs(nx) < 1e-6: return 0.0 
             return (d - ny * y_val) / nx
 
-# ==========================================
+        # ==========================================
         # 4. ZIELPUNKT BERECHNEN (Mit konstanter Spurbreite)
         # ==========================================
         if hnf_innen and hnf_aussen:
@@ -1065,31 +1095,13 @@ class WallFollower(Node):
     # --- YOLO - Function ---
     # -----------------------
 
-    def image_callback(self, msg):
-        if self.last_point_data is None: return
-
-        cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        self.image_width = cv_image.shape[1]     
-        results = self.model(cv_image, verbose=False)
-
-        # --- NEU: HIER WIRD DAS DEBUG-BILD ERSTELLT UND PUBLIZIERT ---
-        # 1. Bounding Boxes und Labels auf das Bild zeichnen
-        annotated_frame = results[0].plot()
-
-        # 2. Das OpenCV-Bild zurück in eine ROS-Message konvertieren
-        debug_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
-        # 3. Das Bild auf dem Topic /camera/yolo_debug veröffentlichen
-        self.pub_debug_img.publish(debug_msg)
-        # -------------------------------------------------------------
-        
-        return results
         
     def get_obstacles_from_camera(self, point_data):
-        if self.last_image_msg is None:
-            self.get_logger().info("Warte auf Kamera-Bild...", throttle_duration_sec=1.0)
-            return None
-        results = self.image_callback(self.last_image_msg)
-        if results is None: 
+        # 1. Thread-sicher die aktuellsten YOLO-Ergebnisse abholen
+        with self.data_lock:
+            results = self.latest_yolo_results
+            
+        if not results:
             return None
 
         detected_obstacles = []
@@ -1097,33 +1109,23 @@ class WallFollower(Node):
         for r in results:
             for box in r.boxes:
                 if float(box.conf[0]) > 0.85:
-                    self.get_logger().info(f'Objekt erkannt: {self.model.names[int(box.cls[0])]} mit Konfidenz {box.conf[0]:.2f}')
+                    self.get_logger().info(f'Objekt erkannt: {self.model.names[int(box.cls[0])]}')
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     center_x = (x1 + x2) / 2.0
 
-                    # 1. Nullpunkt in die Mitte des Bildes schieben
-                    # center_x ist 0 (ganz links) bis image_width (ganz rechts)
                     pixel_from_center = center_x - (self.image_width / 2.0)
-                    
-                    # 2. Pixel in Grad umrechnen (Kamera FOV auf die Breite verteilen)
                     cam_angle_deg = pixel_from_center * (self.camera_fov / self.image_width)
-                    
-                    # 3. Kalibrierung dazurechnen und in Bogenmaß (Radian) umwandeln
                     cam_angle_rad = math.radians(cam_angle_deg + self.angle_calibration)
-                    
-                    self.get_logger().info(f'Kamerawinkel: {cam_angle_deg:.1f}° (nach Kalibrierung: {cam_angle_deg + self.angle_calibration:.1f}°)')
 
-                    # Lidar nach diesem Winkel durchsuchen
                     obstacle_cluster = self.get_lidar_distance(cam_angle_rad, self.get_all_clusters_sorted(point_data))
 
                     if obstacle_cluster is not None:
-                        # result enthält jetzt: (angle_deg, x, y, dist)
                         obj_x, obj_y = self.get_weight_point_for_cluster(obstacle_cluster) 
                         class_name = self.model.names[int(box.cls[0])].lower()
-                        # publish_marker bekommt jetzt direkt die rohen X- und Y-Werte!
                         self.publish_marker(obj_x, obj_y, class_name, int(box.cls[0]))
                         
                         detected_obstacles.append((obj_x, obj_y, class_name))
+                        
         return detected_obstacles
 
     def get_weight_point_for_cluster(self, cluster):
@@ -1930,6 +1932,7 @@ class WallFollower(Node):
         elif current_obstacle.is_localized():
             return current_obstacle
         else:
+            return None
 
 
 
@@ -2157,8 +2160,14 @@ class WallFollower(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = WallFollower()
+    
+    # Der MultiThreadedExecutor verwaltet die parallelen Callback-Gruppen
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    
     try:
-        rclpy.spin(node)
+        # Startet alle Threads parallel
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
