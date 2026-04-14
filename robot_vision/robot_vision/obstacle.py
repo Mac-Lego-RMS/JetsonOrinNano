@@ -9,8 +9,6 @@ class Obstacle:
         """
         self.color = color.lower()
         self.zone_id = zone_id
-        self.prov_x = prov_x
-        self.prov_y = prov_y
         self.pass_direction = self._determine_pass_direction()
 
     def _determine_pass_direction(self):
@@ -21,10 +19,6 @@ class Obstacle:
             return -1  # Links ausweichen
         else:
             return 0
-        
-    def set_prov_coords(self, x, y):
-        self.prov_x = x
-        self.prov_y = y
             
     @property
     def is_localized(self):

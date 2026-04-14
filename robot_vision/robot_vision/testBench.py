@@ -1139,7 +1139,6 @@ class WallFollower(Node):
         
         return sum_x / n, sum_y / n
 
-
     def get_lidar_distance(self, camera_angle_rad, clusters):
         walls = [self.front_wall, self.left_wall, self.right_wall]
         clusters_without_walls = [c for c in clusters if c not in walls and c is not None]
@@ -1914,26 +1913,116 @@ class WallFollower(Node):
                 closest_x, closest_y, closest_color = detected_obstacles[0]
                 closest_dist = math.hypot(closest_x, closest_y)
                 if closest_dist < (distance_to_straight + 2.0):
-                    new_obstacle = Obstacle(closest_color, zone_id=None)
-                    self.obstacle_memory[current_straight] = new_obstacle
-                    self.new_obstacle.set_prov_coords(closest_x, closest_y)
-                    return new_obstacle
+                    return closest_color, None
                 else:
-                    return None
+                    return None, None
             else: 
-                return None
+                return None, None
         else:
-            return current_obstacle
+            return current_obstacle.color, current_obstacle
 
-    def set_obstacle_position(self, point_data, u_profile):
-        current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count)
-        if current_obstacle is None:
+    def set_obstacle_position(self, point_data, u_profile_hnf):
+        color, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count)
+        if color is None and current_obstacle is None:
             return None
         elif current_obstacle.is_localized():
             return current_obstacle
         else:
-            return None
+            detected_obstacles = self.get_obstacles_from_camera(point_data)
+            if detected_obstacles:
+                # Sortieren nach Distanz (das nächste Objekt kommt auf Index 0)
+                detected_obstacles.sort(key=lambda x: x[0])
+                closest_x, closest_y, closest_color = detected_obstacles[0]
 
+    def set_obstacle_position(self, point_data, u_profile_hnf):
+        """
+        Verarbeitet Sensordaten, berechnet die exakte physische Position eines Hindernisses 
+        und verortet es im topologischen Speicher des Roboters.
+        """
+        # 1. Existierendes Hindernis oder Farbe aus dem aktuellen Frame abfragen
+        color, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count)
+        
+        # Fall A: Kein Hindernis in Sicht und keines im Speicher
+        if color is None and current_obstacle is None:
+            return None
+            
+        # Fall B: Hindernis ist bereits millimetergenau verortet -> Nichts mehr tun
+        elif current_obstacle is not None and current_obstacle.is_localized:
+            return current_obstacle
+            
+        # Fall C: Hindernis gesehen, aber noch nicht verortet
+        else:
+            # Hole alle rohen Hindernis-Daten aus der Sensorfusion (Kamera + LiDAR)
+            detected_obstacles = self.get_obstacles_from_camera(point_data)
+            
+            if detected_obstacles:
+                # Sortieren nach echter Distanz zur Kamera/LiDAR (Luftlinie via Pythagoras)
+                detected_obstacles.sort(key=lambda x: math.hypot(x[0], x[1]))
+                closest_x, closest_y, closest_color = detected_obstacles[0]
+                
+                # ==========================================
+                # ZONEN-LOKALISIERUNG & WAND-ABSTAND
+                # ==========================================
+                # Entpacken der Wände aus dem U-Profil
+                front_hnf, side_hnf = u_profile_hnf 
+                
+                # Sicherheitscheck: Wenn die Frontwand (noch) nicht sauber erkannt 
+                # wurde, können wir nicht lokalisieren. Wir warten auf den nächsten Frame.
+                if front_hnf is None:
+                    return None #current_obstacle Welcher Rückgabewert ist sinnvoller?
+                    
+                # --- A. Distanz zur Frontwand (Für die Zonen-Zuweisung) ---
+                nx_f, ny_f, dist_to_front = front_hnf
+                block_to_front_wall_dist = abs(closest_x * nx_f + closest_y * ny_f - dist_to_front)
+                
+                # --- B. Distanz zur Seitenwand (Für die physische Hindernis-Position) ---
+                block_to_outer_wall_dist = self.get_obstacle_to_wall_distance(closest_x, closest_y, side_hnf)
+                
+                # --- C. Zone bestimmen ---
+                current_segment = self.turn_count % 4
+                zone_id = self._calculate_zone_id(block_to_front_wall_dist, block_to_outer_wall_dist)
+                
+                # ==========================================
+                # OBJEKT VERORTEN UND SPEICHERN
+                # ==========================================
+                if current_obstacle is not None:
+                    # Fixiert die Zone im Objekt
+                    current_obstacle.lock_position(zone_id)
+                    
+                    # (Optional) Du kannst diese Abstände auch in die Obstacle-Klasse 
+                    # schreiben, falls du sie später im Ausweichmanöver brauchst:
+                    # current_obstacle.dist_to_front = block_to_front_wall_dist
+                    # current_obstacle.dist_to_side = block_to_side_wall_dist
+                    
+                    # Im topologischen Gedächtnis des Roboters ablegen
+                    self.track_memory[current_segment] = current_obstacle
+                    
+                    # Sauberes Logging aller erfassten Metriken
+                    side_dist_str = f"{block_to_outer_wall_dist:.2f}m" if block_to_outer_wall_dist else "N/A"
+                    
+                    self.get_logger().info(
+                        f"+++ HINDERNIS GELOCKT: {closest_color.upper()} +++\n"
+                        f" -> Segment: {current_segment} | Zone: {zone_id}\n"
+                        f" -> Zur Frontwand: {block_to_front_wall_dist:.2f}m\n"
+                        f" -> Zur Seitenwand: {side_dist_str}"
+                    )
+                    
+            return current_obstacle
+
+    def get_obstacle_to_wall_distance(self, obstacle_x, obstacle_y, hnf_wall):
+        """
+        Berechnet den orthogonalen Abstand eines Punktes (Hindernis) zu einer Wand (HNF).
+        """
+        if hnf_wall is None:
+            return None
+            
+        nx, ny, d = hnf_wall
+        
+        # HNF-Abstandsformel: D = |x*nx + y*ny - d|
+        distance = abs(obstacle_x * nx + obstacle_y * ny - d)
+        
+        return distance
+                
 
 
     def check_undetected_turn(self):

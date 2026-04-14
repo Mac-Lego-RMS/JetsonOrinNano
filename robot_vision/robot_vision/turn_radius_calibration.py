@@ -205,6 +205,8 @@ class WallFollower(Node):
         self.start_wall_distance = None
         self.single_test_mode = False
 
+        self.lidar_to_turnpoint_distance = 0.10
+
         self.load_calibration()
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
@@ -832,7 +834,7 @@ class WallFollower(Node):
             if cluster is not None and len(cluster) > 0:
                 yaw_diff = abs(self.current_yaw - self.measure_start_yaw)
                 new_distance = self.get_closest_point_in_cluster(cluster)[3]
-                distance_diff = new_distance - self.start_wall_distance
+                distance_diff = new_distance - self.start_wall_distance - self.lidar_to_turnpoint_distance
                 #radius = distance_diff / 2.0
                 radius = distance_diff
 
