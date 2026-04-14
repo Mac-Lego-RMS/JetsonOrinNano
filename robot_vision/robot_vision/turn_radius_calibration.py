@@ -205,7 +205,7 @@ class WallFollower(Node):
         self.start_wall_distance = None
         self.single_test_mode = False
 
-        self.lidar_to_turnpoint_distance = 0.10
+        self.lidar_to_turnpoint_distance = 0.12
 
         self.load_calibration()
 
