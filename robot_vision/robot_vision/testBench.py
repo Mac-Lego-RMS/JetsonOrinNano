@@ -382,7 +382,7 @@ class WallFollower(Node):
         marker.color.a = 1.0
         marker_array.markers.append(marker)
     
-    def validate_clusters_straight(self, clusters):
+    def validate_clusters_straight(self, clusters): # np array upgraded
         # Wir nutzen while, da sich die Liste verkleinern kann
         while len(clusters) >= 3:
             
@@ -417,27 +417,27 @@ class WallFollower(Node):
                 self.get_logger().warn(f"Rechts und Front nicht orthogonal! Diff: {diff_0_1:.1f}°")
                 # Finde das kleinere der beiden Cluster in 'ordered' und lösche es aus 'clusters'
                 if len(ordered[0]) < len(ordered[1]):
-                    clusters.remove(ordered[0])
+                    clusters = [c for c in clusters if c is not ordered[0]]
                 else:
-                    clusters.remove(ordered[1])
+                    clusters = [c for c in clusters if c is not ordered[1]]
                 continue # Schleife sofort mit der bereinigten Liste neu starten
 
             # Check B: Sind Front und Links orthogonal?
             elif diff_1_2 < 70:
                 self.get_logger().warn(f"Front und Links nicht orthogonal! Diff: {diff_1_2:.1f}°")
                 if len(ordered[1]) < len(ordered[2]):
-                    clusters.remove(ordered[1])
+                    clusters = [c for c in clusters if c is not ordered[1]]
                 else:
-                    clusters.remove(ordered[2])
+                    clusters = [c for c in clusters if c is not ordered[2]]
                 continue
 
             # Check C: Sind Rechts und Links parallel? (Differenz sollte < 20° sein)
             elif diff_0_2 > 10:
                 self.get_logger().warn(f"Rechts und Links nicht parallel! Diff: {diff_0_2:.1f}°")
                 if len(ordered[0]) < len(ordered[2]):
-                    clusters.remove(ordered[0])
+                    clusters = [c for c in clusters if c is not ordered[0]]
                 else:
-                    clusters.remove(ordered[2])
+                    clusters = [c for c in clusters if c is not ordered[2]]
                 continue
 
             # --- ERFOLG ---
@@ -448,7 +448,7 @@ class WallFollower(Node):
         self.get_logger().warn(f"Kein gültiges U-Profil gefunden. Nur noch {len(clusters)} Cluster übrig.")
         return [None, None, None]
 
-    def validate_clusters_turn(self, front_wall, point_data):
+    def validate_clusters_turn(self, front_wall, point_data):   # np array upgraded
         '''Überprüft die Cluster in der Kurve. Es muss eine Frontwand geben, aber die Banden können auch fehlen (z.B. bei der ersten Kurve).
         Gibt die Cluster von rechts nach links zurück mit der Reihenfolge: [Rechte Bande, Frontwand, Linke Bande]. Fehlende Banden werden mit None ersetzt.'''
 
@@ -489,9 +489,9 @@ class WallFollower(Node):
             minimal_cluster_size = 25
             ordered = self.sort_clusters_right_to_left(clusters)
             u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
-            if front_wall_cluster in ordered:
+            if any(c is front_wall_cluster for c in ordered):
                 u_profile[1] = front_wall_cluster
-                fw_index = ordered.index(front_wall_cluster)
+                fw_index = next(i for i, c in enumerate(ordered) if c is front_wall_cluster)
             else: 
                 self.get_logger().warn("Frontwand nicht in den Clustern gefunden. Kann Kurvenprofil nicht validieren.")
                 return [None, None, None]
@@ -619,7 +619,7 @@ class WallFollower(Node):
         
         return sorted_clusters
 
-    def get_all_clusters_sorted(self, point_data): # Angepasst auf Normalvektor und Skalarprodukt
+    def get_all_clusters_sorted(self, point_data): # np array upgraded
         """
         Sucht ALLE zusammenhängenden Cluster und durchtrennt sie an 90°-Ecken.
         Nutzt die Manhattan-Norm für Lücken und das Skalarprodukt für Ecken.
@@ -629,7 +629,7 @@ class WallFollower(Node):
             return []
 
         # Nach Winkel sortieren (von rechts nach hinten nach links)
-        sorted_points = sorted(point_data, key=lambda p: p[0])
+        sorted_points = point_data[np.argsort(point_data[:, 0])]
 
         max_gap = 0.15      # Maximaler Abstand zwischen zwei Punkten (15cm)
         outlier_limit = 2   # Wie viele Punkte dürfen fehlen?
@@ -774,54 +774,46 @@ class WallFollower(Node):
         marker.action = Marker.DELETE
         marker_array.markers.append(marker)
 
-    def scan_callback(self, msg):
-        point_data = []
+    def scan_callback(self, msg):   # np array upgraded
+        ranges = np.array(msg.ranges)
 
-        for i, dist in enumerate(msg.ranges):
-            # Filtere ungültige Werte (inf, nan oder außerhalb der Reichweite)
-            if math.isinf(dist) or math.isnan(dist) or dist < 0.075 or dist > 3.0:
-                continue
+        # 1. Maske für gültige Werte erstellen (inf, nan oder außerhalb Reichweite filtern)
+        valid_mask = np.isfinite(ranges) & (ranges >= 0.075) & (ranges <= 3.0)
 
-            angle_lidar_rad = msg.angle_min + i * msg.angle_increment
-            
-            # Foxglove & Mathe Basis: X = Rechts, Y = Vorne
-            x_ros = dist * math.cos(angle_lidar_rad)    
-            y_ros = dist * math.sin(angle_lidar_rad)   
-            
-            # ========================================================
-            # 🚀 NEUES WINKEL-SYSTEM: 0° bis 360°, Startpunkt ist HINTEN
-            # ========================================================
-            # Roher Lidar-Winkel: 0°=Rechts, 90°=Vorne, 180°=Links, 270°/-90°=Hinten
-            # Wir addieren 90°, damit Hinten zu 0° wird und begrenzen auf 0-360.
-            # -> Hinten: 0° | Rechts: 90° | Vorne: 180° | Links: 270°
-            angle_lidar_deg = math.degrees(angle_lidar_rad)
-            angle_user_deg = (angle_lidar_deg + 90.0) % 360.0
+        # 2. Lidar-Winkel für alle Punkte generieren
+        angles_rad = msg.angle_min + np.arange(len(ranges)) * msg.angle_increment
 
-            # Speichern: (Normierter 0-360° Winkel, X_Rechts, Y_Vorne, Distanz)
-            point_data.append((angle_user_deg, x_ros, y_ros, dist))
+        # 3. Nur gültige Werte übernehmen
+        valid_ranges = ranges[valid_mask]
+        valid_angles_rad = angles_rad[valid_mask]
+
+        # 4. Koordinaten berechnen (Foxglove & Mathe Basis: X = Rechts, Y = Vorne)
+        x_ros = valid_ranges * np.cos(valid_angles_rad)
+        y_ros = valid_ranges * np.sin(valid_angles_rad)
+
+        # 5. Neues Winkel-System (0-360, Startpunkt ist Hinten)
+        angles_deg = np.degrees(valid_angles_rad)
+        user_angles_deg = np.mod(angles_deg + 90.0, 360.0)
+
+        # 6. Als N x 4 Array zusammenfügen: (Winkel, X, Y, Distanz)
+        point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
         #self.test_turn_main_logic(point_data)
         self.main_logic(point_data)
     
-    def get_closest_measure(self, point_data, target_angle):
-        """
-        Sucht den Punkt, der dem target_angle am nächsten ist,
-        unter Berücksichtigung des Kreisumschlags und negativer Winkel.
-        """
-        if not point_data:
+    def get_closest_measure(self, point_data, target_angle):    # np array upgraded
+        if len(point_data) == 0:
             return None
 
-        def get_angular_diff(a, b):
-            # Berechnet die kleinste Differenz auf einem 360-Grad-Kreis
-            # (a - b + 180) % 360 - 180 normiert das Ergebnis auf den Bereich [-180, 180]
-            diff = (a - b + 180) % 360 - 180
-            return abs(diff)
+        # Winkel-Differenzen für das gesamte Array auf einmal berechnen
+        diffs = (point_data[:, 0] - target_angle + 180.0) % 360.0 - 180.0
+        abs_diffs = np.abs(diffs)
 
-        # Wir suchen das Tupel, bei dem die Kreis-Differenz am kleinsten ist
-        closest_point = min(point_data, key=lambda p: get_angular_diff(p[0], target_angle))
+        # Index des kleinsten Abstands finden
+        closest_idx = np.argmin(abs_diffs)
         
-        return closest_point
+        return point_data[closest_idx]
     
     def get_closest_point_in_cluster(self, cluster):
         """
@@ -836,7 +828,7 @@ class WallFollower(Node):
         
         return closest_point
 
-    def merge_clusters(self, all_clusters, validated_clusters):# Angepasst auf neues Koordinatensystem
+    def merge_clusters(self, all_clusters, validated_clusters): # np array upgraded
         """
         Versucht, benachbarte Cluster zu einem einzigen Cluster zu verschmelzen.
         Nutzt den Normalenvektor, um nur den senkrechten Abstand (Offset) zu prüfen.
@@ -845,7 +837,8 @@ class WallFollower(Node):
         max_distance_gap = 0.05  
         max_angle_gap = 15.0      # 5 Grad maximale Winkelabweichung
 
-        remaining_clusters = [c for c in all_clusters if c not in validated_clusters]
+        valid_ids = [id(v) for v in validated_clusters]
+        remaining_clusters = [c for c in all_clusters if id(c) not in valid_ids]
         if not remaining_clusters:
             self.get_logger().info("Keine Cluster zum Mergen gefunden")
             return validated_clusters, []
@@ -910,8 +903,8 @@ class WallFollower(Node):
                     else:
                         pass # Optional: self.get_logger().info(f"Offset zu groß: {offset:.2f}m")
 
-            for c in clusters_to_remove:
-                remaining_clusters.remove(c)
+            remove_ids = [id(c) for c in clusters_to_remove]
+            remaining_clusters = [c for c in remaining_clusters if id(c) not in remove_ids]
 
             # Wir sortieren die Punkte nach ihrer geometrischen Position ENTLANG der Wand,
             # damit Rviz/Foxglove die Linie von Anfang bis Ende sauber durchzeichnet.
@@ -1009,38 +1002,26 @@ class WallFollower(Node):
         return (target_x, target_y)
 
     def track_front_wall(self, point_data, last_front_wall):
-        """
-        Trackt die Frontwand während der Kurve durch ein mitwanderndes Suchfenster (ROI).
-        Gibt die aktualisierte Wand und einen Boolean (turn_finished) zurück.
-        """
-        if not last_front_wall or not point_data:
+        if last_front_wall is None or len(point_data) == 0:
             return None
 
-        # 1. Wo war die Wand im letzten Frame? (Min/Max Winkel finden)
-        angles = [p[0] for p in last_front_wall]
-        min_angle = min(angles)
-        max_angle = max(angles)
-        #self.get_logger().info(f"Tracking-ROI: Min Winkel {min_angle:.1f}°, Max Winkel {max_angle:.1f}°")
+        # 1. Wo war die Wand im letzten Frame? 
+        # last_front_wall kann noch eine Liste oder schon ein Array sein
+        last_fw_array = np.array(last_front_wall)
+        min_angle = np.min(last_fw_array[:, 0])
+        max_angle = np.max(last_fw_array[:, 0])
 
-        # 2. Das dynamische Suchfenster (ROI) definieren
-        # Wir geben in Bewegungsrichtung mehr Toleranz (z.B. +30 Grad), 
-        # weil sich die Wand dorthin bewegt. Gegen die Bewegungsrichtung weniger (-10 Grad).
-        
+        # 2. Dynamisches Suchfenster (ROI)
         if self.fahrtrichtung == 'links':
-            # Wand wandert nach RECHTS (Winkel werden positiver)
             roi_min = min_angle - 5.0
             roi_max = max_angle + 30.0
         else:
-            # Wand wandert nach LINKS (Winkel werden negativer)
             roi_min = min_angle - 30.0
             roi_max = max_angle + 5.0
 
-        # 3. Scheuklappen aufsetzen: Punktewolke filtern!
-        roi_points = []
-        for p in point_data:
-            angle = p[0]
-            if roi_min <= angle <= roi_max:
-                roi_points.append(p)
+        # 3. Scheuklappen aufsetzen: NumPy Maske statt for-Schleife
+        mask = (point_data[:, 0] >= roi_min) & (point_data[:, 0] <= roi_max)
+        roi_points = point_data[mask]
 
         # 4. Nur diese gefilterten Punkte in Cluster aufteilen
         roi_clusters = self.get_all_clusters_sorted(roi_points)
@@ -1050,12 +1031,7 @@ class WallFollower(Node):
             self.get_logger().warn("ACHTUNG: Getrackte Wand im ROI verloren!")
             return last_front_wall
             
-        # Da wir alle anderen Wände weggefiltert haben, ist das größte Cluster 
-        # (Index 0) in diesem Bereich zu 99,9% unsere gesuchte Wand!
-        tracked_wall = roi_clusters[0]
-        
-
-        return tracked_wall
+        return roi_clusters[0]
 
     def update_avoidance_settings(self):
         """Passt Spur, Kurvenradius und Karotten-Distanz dynamisch an."""
@@ -1096,7 +1072,7 @@ class WallFollower(Node):
     # -----------------------
 
         
-    def get_obstacles_from_camera(self, point_data):
+    def get_obstacles_from_camera(self, point_data): 
         # 1. Thread-sicher die aktuellsten YOLO-Ergebnisse abholen
         with self.data_lock:
             results = self.latest_yolo_results
@@ -1139,9 +1115,10 @@ class WallFollower(Node):
         
         return sum_x / n, sum_y / n
 
-    def get_lidar_distance(self, camera_angle_rad, clusters):
+    def get_lidar_distance(self, camera_angle_rad, clusters):   # np array upgraded
         walls = [self.front_wall, self.left_wall, self.right_wall]
-        clusters_without_walls = [c for c in clusters if c not in walls and c is not None]
+        wall_ids = [id(w) for w in walls if w is not None]
+        clusters_without_walls = [c for c in clusters if id(c) not in wall_ids and c is not None]
         
         if not clusters_without_walls: 
             return None
@@ -1901,18 +1878,18 @@ class WallFollower(Node):
     # State Maschine Obstacle Parcour
     # -----------------------------------------
 
-    def check_for_obstacle_color(self, point_data, turn_count, distance_to_straight=0.0):
+    def check_for_obstacle_color(self, point_data, turn_count, min_distance_to_obstacle=0.0, max_distance_to_obstacle=2.0):
         current_straight = turn_count % 4
         current_obstacle = self.obstacle_memory[current_straight]
         if current_obstacle is None:
             detected_obstacles = self.get_obstacles_from_camera(point_data)
             if detected_obstacles:
                 # Sortieren nach Distanz (das nächste Objekt kommt auf Index 0)
-                detected_obstacles = list(filter(lambda x: x[0] > distance_to_straight))
+                detected_obstacles = list(filter(lambda x: x[0] > min_distance_to_obstacle))
                 detected_obstacles.sort(key=lambda x: x[0])
                 closest_x, closest_y, closest_color = detected_obstacles[0]
                 closest_dist = math.hypot(closest_x, closest_y)
-                if closest_dist < (distance_to_straight + 2.0):
+                if closest_dist < (min_distance_to_obstacle + max_distance_to_obstacle):
                     return closest_color, None
                 else:
                     return None, None
@@ -1920,19 +1897,6 @@ class WallFollower(Node):
                 return None, None
         else:
             return current_obstacle.color, current_obstacle
-
-    def set_obstacle_position(self, point_data, u_profile_hnf):
-        color, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count)
-        if color is None and current_obstacle is None:
-            return None
-        elif current_obstacle.is_localized():
-            return current_obstacle
-        else:
-            detected_obstacles = self.get_obstacles_from_camera(point_data)
-            if detected_obstacles:
-                # Sortieren nach Distanz (das nächste Objekt kommt auf Index 0)
-                detected_obstacles.sort(key=lambda x: x[0])
-                closest_x, closest_y, closest_color = detected_obstacles[0]
 
     def set_obstacle_position(self, point_data, u_profile_hnf):
         """
@@ -2052,6 +2016,8 @@ class WallFollower(Node):
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
+        self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.0)
+
         if self.fahrtrichtung is None:
             # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
             if self.left_wall and self.right_wall:
@@ -2102,6 +2068,10 @@ class WallFollower(Node):
         self.visualize_hnf_line(left_wall_hnf, m_id=111, farbe_name="blau", label="Links HNF")
         self.visualize_hnf_line(right_wall_hnf, m_id=112, farbe_name="gruen", label="Rechts HNF")
 
+        if front_wall_hnf is not None:
+            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[3] - 0.7)
+        else:
+            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.3)
 
         if self.fahrtrichtung == 'links':
             innenbande = self.left_wall
@@ -2165,6 +2135,7 @@ class WallFollower(Node):
         Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
         """
         cmd = Twist()
+        self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
         # ---------------------------------------------------------
@@ -2207,7 +2178,7 @@ class WallFollower(Node):
 
 
             # 3. Abschluss prüfen
-            if self.test_check_turn_completion_fused(self.saved_intersection_anglee, front_wall_params):
+            if self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params):
                 self.get_logger().info("Kurve physikalisch beendet.")
             
                 cmd.linear.x = self.base_speed
@@ -2228,7 +2199,6 @@ class WallFollower(Node):
 
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
-        self.current_obstacle_cmd = self.check_for_obstacles(point_data, straight_count)
         self.get_logger().info(f"Aktueller Status: {self.state}")
 
         if self.state == 'STARTING':
