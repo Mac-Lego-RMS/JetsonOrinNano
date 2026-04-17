@@ -26,8 +26,6 @@ from robot_vision.steering_lib import SteeringController
 
 from obstacle.py import Obstacle
 
-
-
 '''
 =============================================================
       📍 DEIN HARDWARE-KOORDINATENSYSTEM (Lidar & Foxglove)
@@ -59,11 +57,6 @@ from obstacle.py import Obstacle
 - Oben auf dem Bildschirm  = +Y
 - Rechts auf dem Bildschirm = +X
 ============================================================='''
-
-
-
-
-
 
 class WallFollower(Node):
     def __init__(self):
@@ -1001,7 +994,7 @@ class WallFollower(Node):
         self.get_logger().info(f"Zielpunkt: {target_x}, {target_y}")
         return (target_x, target_y)
 
-    def track_front_wall(self, point_data, last_front_wall):
+    def track_front_wall(self, point_data, last_front_wall):    # np array upgraded
         if last_front_wall is None or len(point_data) == 0:
             return None
 
@@ -1070,7 +1063,6 @@ class WallFollower(Node):
     # -----------------------
     # --- YOLO - Function ---
     # -----------------------
-
         
     def get_obstacles_from_camera(self, point_data): 
         # 1. Thread-sicher die aktuellsten YOLO-Ergebnisse abholen
@@ -2069,7 +2061,7 @@ class WallFollower(Node):
         self.visualize_hnf_line(right_wall_hnf, m_id=112, farbe_name="gruen", label="Rechts HNF")
 
         if front_wall_hnf is not None:
-            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[3] - 0.7)
+            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.7)
         else:
             self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.3)
 
@@ -2212,9 +2204,6 @@ class WallFollower(Node):
             
         elif self.state == 'STOPPED':
             self.execute_stop()
-
-
-
 
 def main(args=None):
     rclpy.init(args=args)
