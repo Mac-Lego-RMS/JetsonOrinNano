@@ -24,7 +24,7 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from robot_vision.steering_lib import SteeringController
 
-from obstacle.py import Obstacle
+from robot_vision.obstacle import Obstacle
 
 '''
 =============================================================
@@ -70,7 +70,7 @@ class WallFollower(Node):
         
         # Thread-Lock für Datensicherheit beim Zugriff auf gemeinsame Variablen
         self.data_lock = threading.Lock()
-        self.latest_yolo_results = [] # Hier speichert YOLO seine Boxen ab  
+        self.latest_yolo_results = [] # Hier speichert YOLO seine Boxen ab
         
         self.img_sub = self.create_subscription(
             Image, 
@@ -136,7 +136,7 @@ class WallFollower(Node):
         self.lookahead_dist_straight = 0.50    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.15       
 
-        self.lane_ratio = 0.5       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
+        self.lane_ratio = 0.80       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
         self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
         self.turn_exit_angle = 25
         self.max_wall_lenght_for_turn = 0.25
@@ -165,12 +165,12 @@ class WallFollower(Node):
         self.target_point = (0, 0)
 
         self.TRACK_WIDTH_M = 1.0
-        self.ROBOT_WIDTH_M = 0.15
-        self.LIDAR_OFFSET_M = 0.10
+        self.ROBOT_WIDTH_M = 0.12
+        self.LIDAR_OFFSET_M = 0.08
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.45
-        self.MIN_TURN_RADIUS_M = 0.2
+        self.IDEAL_RADIUS_M = 0.35
+        self.MIN_TURN_RADIUS_M = 0.30
 
         # --- TURN PID-REGLER PARAMETER ---
         self.turn_kp = 0.6
@@ -178,8 +178,8 @@ class WallFollower(Node):
         self.turn_ki = 0.0
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 150.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 150.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 300.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 300.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -1026,40 +1026,6 @@ class WallFollower(Node):
             
         return roi_clusters[0]
 
-    def update_avoidance_settings(self):
-        """Passt Spur, Kurvenradius und Karotten-Distanz dynamisch an."""
-        
-        # --- STANDARD-WERTE (Kein Hindernis) ---
-        if self.current_obstacle_cmd == "CLEAR" or self.fahrtrichtung is None:
-            self.lane_ratio = 0.85 
-            self.max_turn_angle = 0.635
-            self.lookahead_dist_straight = 0.60  # Entspannt vorausschauen
-            
-            # WICHTIG: Das hier lieber auskommentieren, sonst spammt es dein Terminal voll!
-            # self.get_logger().info("Keine Hindernisse erkannt. Fahre mit Standardparametern.")
-            return
-
-        # --- AUSWEICH-WERTE (Adrenalin-Modus) ---
-        # Karotte näher ranholen, um viel direkter und schärfer zu lenken!
-        self.lookahead_dist_straight = 0.35 
-
-        # Logik-Matrix
-        if self.fahrtrichtung == 'links': # Innenbande links
-            if self.current_obstacle_cmd == "RED":       # (Vorher AVOID_RIGHT) Rechts vorbei
-                self.lane_ratio = 0.85
-                self.max_turn_angle = 0.635 # Weite Kurve (Außen)
-            elif self.current_obstacle_cmd == "GREEN":   # (Vorher AVOID_LEFT) Links vorbei
-                self.lane_ratio = 0.20
-                self.max_turn_angle = 0.800 # Enge Kurve (Innen)
-
-        elif self.fahrtrichtung == 'rechts': # Innenbande rechts
-            if self.current_obstacle_cmd == "RED":       # (Vorher AVOID_RIGHT) Rechts vorbei
-                self.lane_ratio = 0.20
-                self.max_turn_angle = 0.800 # Enge Kurve (Innen)
-            elif self.current_obstacle_cmd == "GREEN":   # (Vorher AVOID_LEFT) Links vorbei
-                self.lane_ratio = 0.85  
-                self.max_turn_angle = 0.635 # Weite Kurve (Außen)
-
     # -----------------------
     # --- YOLO - Function ---
     # -----------------------
@@ -1465,7 +1431,7 @@ class WallFollower(Node):
         lidar_entry_dist_m = intersection_y_m - tangent_length_m
         
         # 4. KINEMATISCHER OFFSET (Drehpunkt auf die Hinterachse verschieben)
-        # Addiert 10 cm, da die Hinterachse 10 cm weiter weg ist als das LiDAR
+        # Addiert 10 cm, da die Hinterachse 8 cm weiter weg ist als das LiDAR
         real_axle_dist_m = lidar_entry_dist_m + self.LIDAR_OFFSET_M
         
         # 5. SICHERHEITS-CHECK: Echten Einlenkpunkt (Hinterachse) verpasst?
@@ -1475,7 +1441,7 @@ class WallFollower(Node):
                 "Forciere sofortige Kurve."
             )
             # Setze auf 0.0, damit JEDER Trigger sofort feuert
-            real_axle_dist_m = 0.0 
+            real_axle_dist_m = 0.0
             
         return curve_radius_m, real_axle_dist_m
 
@@ -1694,6 +1660,7 @@ class WallFollower(Node):
 
     def test_check_turn_completion_fused(self, target_angle, front_line_params):
         """Testet die Funktion check_turn_completion_fused() und loggt, ob die Kurve als abgeschlossen gilt."""
+        self.visualize_hnf_line(front_line_params, m_id=550, farbe_name="rot", label="front_wall")
         completed = self.check_turn_completion_fused(target_angle, front_line_params)
         status = "COMPLETED" if completed else "IN PROGRESS"
         self.get_logger().warn(f"Turn Completion Check: {status} (Current Gyro: {self.current_yaw:.2f}°, Target Angle: {target_angle:.2f}°)")
@@ -1979,8 +1946,6 @@ class WallFollower(Node):
         
         return distance
                 
-
-
     def check_undetected_turn(self):
         total_gedreht = abs(self.current_yaw - self.yaw_offset)
         min_total_rotation = self.target_turns * 87.0
@@ -2056,7 +2021,7 @@ class WallFollower(Node):
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
-        self.visualize_hnf_line(front_wall_hnf, m_id=110, farbe_name="rot", label="Front HNF")
+        self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
         self.visualize_hnf_line(left_wall_hnf, m_id=111, farbe_name="blau", label="Links HNF")
         self.visualize_hnf_line(right_wall_hnf, m_id=112, farbe_name="gruen", label="Rechts HNF")
 
@@ -2070,7 +2035,7 @@ class WallFollower(Node):
             innenbande_hnf = left_wall_hnf
             aussenbande = self.right_wall
             aussenbande_hnf = right_wall_hnf
-        elif self.fahrtrichtung == 'rechts':
+        else:
             innenbande = self.right_wall
             innenbande_hnf = right_wall_hnf
             aussenbande = self.left_wall
@@ -2083,14 +2048,14 @@ class WallFollower(Node):
                 self.state = f"TURN_{self.fahrtrichtung.upper()}"
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
-                self.get_logger().warn(f">>> {self.state} EINGELEITET bei {(self.start_turn_yaw - self.yaw_offset):.1f}° <<<")
+                self.get_logger().warn(f">>> {self.state} EINGELEITET<<<")
                 # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
                 self.prev_error = 0.0
                 self.integral_error = 0.0
                 return
             else:
-                if front_dist < 1.40:
-                    self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
+                #if front_dist < 1.40:
+                self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
         
         target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
         #target_x, target_y = self.get_target_point_straight_cluster(innenbande, aussenbande)
@@ -2116,7 +2081,7 @@ class WallFollower(Node):
         
         # 3. BEFEHLE AN ESP SETZEN
         cmd.linear.x = self.base_speed
-        cmd.angular.z = float(-steering_cmd)
+        cmd.angular.z = float(steering_cmd)
         self.pub_cmd_vel.publish(cmd)
         self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
         self.pub_cmd_vel.publish(cmd)
@@ -2141,7 +2106,8 @@ class WallFollower(Node):
             
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
             #target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, None, self.lane_ratio)
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, self.lane_ratio)
+            distance_to_outer_wall = 1.0 - self.lane_ratio
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, distance_to_outer_wall)
             
             #intersection_x, intersection_y, intersection_angle = self.get_intersection_point(target_line_params
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)

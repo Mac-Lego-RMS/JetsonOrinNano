@@ -140,8 +140,8 @@ class WallFollower(Node):
         self.turn_ki = 0.0
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 450.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 450.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 250.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 250.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -194,8 +194,12 @@ class WallFollower(Node):
         self.counter = 0
 
         # Mess Variablen
-        self.messwerte_x = np.array([-1.0, -0.95, -0.90, -0.85, -0.75, -0.65, -0.55, -0.45, 0.0, 0.45, 0.55, 0.65, 0.75, 0.85, 0.90, 0.95, 1.0])
-        self.messwerte_y = np.zeros(17)
+        self.messwerte_x = np.array([
+            -1.0, -0.75, -0.50, -0.30, -0.15, -0.05, 
+             0.0, 
+             0.05, 0.15, 0.30, 0.50, 0.75, 1.0
+        ])
+        self.messwerte_y = np.zeros(13)
         self.turn_polynom = None
         self.current_test_index = 0
 
@@ -751,8 +755,8 @@ class WallFollower(Node):
             self.measure_start_yaw = self.current_yaw
         # --- FIX FÜR INDEX 8 (Geradeausfahrt) ---
         # Da eine 180°-Drehung bei u=0 unmöglich ist, setzen wir R=0 und überspringen.
-        if self.current_test_index == 8 and self.test_state != "DONE":
-            self.messwerte_y[8] = 0.0
+        if self.current_test_index == 6 and self.test_state != "DONE":
+            self.messwerte_y[6] = 0.0
             self.get_logger().info("Index 8 (u=0.0) wird übersprungen (Geradeausfahrt).")
             
             if self.single_test_mode:
@@ -799,7 +803,7 @@ class WallFollower(Node):
                 # 2. Clusterwahl und Start der Messung
                 cluster = self.cluster_wahl(point_data)
                 if cluster is not None and len(cluster) > 0:
-                    self.start_wall_distance = (self.get_closest_point_in_cluster(cluster)[3]) + 0.08
+                    self.start_wall_distance = (self.get_closest_point_in_cluster(cluster)[3])
                     self.test_state = "APPLY_STEERING"
 
         # ---------------------------------------------------------
@@ -819,7 +823,7 @@ class WallFollower(Node):
             test_cmd.linear.x = self.turn_speed
             test_cmd.angular.z = float(u)
             self.pub_cmd_vel.publish(test_cmd)
-            if abs(self.current_yaw - self.measure_start_yaw) >= 80.0:
+            if abs(self.current_yaw - self.measure_start_yaw) >= 85.0:
                 test_cmd = Twist()
                 test_cmd.linear.x = 0.0
                 test_cmd.angular.z = 0.0

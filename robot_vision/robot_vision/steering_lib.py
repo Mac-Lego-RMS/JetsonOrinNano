@@ -44,7 +44,7 @@ class SteeringController:
         else:
             kappa_target = 1.0 / target_radius
 
-        if fahrtrichtung_ist_links:
+        if not fahrtrichtung_ist_links:
             kappa_target = -kappa_target
 
         u_base = np.polyval(self.poly_coeffs, kappa_target)
