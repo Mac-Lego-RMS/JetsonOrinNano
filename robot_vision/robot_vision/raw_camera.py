@@ -6,6 +6,7 @@ from cv_bridge import CvBridge
 from rclpy.qos import qos_profile_sensor_data
 import cv2
 import sys
+import gc
 
 class CsiCameraPublisher(Node):
     def __init__(self):
@@ -32,26 +33,37 @@ class CsiCameraPublisher(Node):
         self.get_logger().info('Kamera Node läuft. Publiziert auf Topic: /camera/image_raw')
 
     def gstreamer_pipeline(self, capture_width, capture_height, display_width, display_height, framerate, flip_method):
-        """Generiert den GStreamer-String für IMX219 Kameras"""
         return (
             "nvarguscamerasrc ! "
             "video/x-raw(memory:NVMM), "
             f"width=(int){capture_width}, height=(int){capture_height}, "
             f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
+            # WICHTIG: nvvidconv skaliert direkt im Grafikspeicher (NVMM)
             f"nvvidconv flip-method={flip_method} ! "
             f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
             "videoconvert ! "
-            # WICHTIG: max-buffers=1 hinzugefügt, um Speicherlecks zu verhindern!
-            "video/x-raw, format=(string)BGR ! appsink drop=true max-buffers=1 sync=false"
+            "video/x-raw, format=(string)BGR ! "
+            # NEU: queue mit leaky=2 (verwirft alte Bilder sofort, wenn der RAM voll ist)
+            "queue leaky=2 max-size-buffers=1 ! "
+            "appsink drop=true max-buffers=1 sync=false"
         )
 
     def timer_callback(self):
         ret, frame = self.cap.read()
         
         if ret:
-            self.error_counter = 0 # Reset bei Erfolg
+            self.error_counter = 0
             msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             self.publisher_.publish(msg)
+            
+            # --- MANUELLE SPEICHERREINIGUNG ---
+            # Wir löschen die Referenzen explizit
+            del frame
+            del msg
+            
+            # Alle 300 Frames (ca. alle 10 Sek.) den Müllsammler zwingen
+            if self.get_clock().now().nanoseconds % 300 == 0:
+                gc.collect()
         else:
             self.error_counter += 1
             self.get_logger().warning(f'Fehler beim Lesen des Bild-Frames. Versuch {self.error_counter}/10')
@@ -70,6 +82,7 @@ class CsiCameraPublisher(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = CsiCameraPublisher()
+    
     
     try:
         rclpy.spin(node)

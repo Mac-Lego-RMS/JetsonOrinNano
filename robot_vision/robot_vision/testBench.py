@@ -56,6 +56,18 @@ from robot_vision.obstacle import Obstacle
 🦊 FOXGLOVE ANSICHT (Top-Down):
 - Oben auf dem Bildschirm  = +Y
 - Rechts auf dem Bildschirm = +X
+
+-------------------------------------------------------------
+Zone Ids:
+
+20  |   21
+|   |   |
+10  |   11
+|   |   |
+00  |   01
+    ^
+    |
+   🤖
 ============================================================='''
 
 class WallFollower(Node):
@@ -186,12 +198,25 @@ class WallFollower(Node):
         # --------------------------------
         # --- YOLO - Global Parameters ---
         # --------------------------------
-
+        self.image_width = 1280
         self.bridge = CvBridge()
+
+        self.K = np.array([
+            [820.7558,   0.0000, 639.0000],
+            [  0.0000, 817.4016, 359.0000],
+            [  0.0000,   0.0000,   1.0000]
+        ])
+        
+        self.D = np.array([
+            [-0.05801], 
+            [ 0.22847], 
+            [-0.58155], 
+            [ 0.41406]
+        ])
         
         # 1. Das YOLO-Modell laden (TensorRT .engine)
         self.get_logger().info('Lade YOLO TensorRT Engine...')
-        #self.model = YOLO('/workspace/best.engine', task='detect')
+        self.model = YOLO('/workspace/best.engine', task='detect')
         self.get_logger().info('Modell erfolgreich geladen!')
         # In der __init__ Klasse hinzufügen:
         self.angle_calibration = 0.0  # In Grad: Korrigiert, wenn Lidar/Kamera verdreht sind
@@ -303,13 +328,22 @@ class WallFollower(Node):
     def camera_sub_callback(self, msg):
         """Wird asynchron vom MultiThreadedExecutor aufgerufen. Blockiert den Lidar nicht!"""
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        
-        if self.image_width is None:
-            self.image_width = cv_image.shape[1]     
-            
-        results = self.model(cv_image, verbose=False)
 
-        # DEBUG-BILD (Optional)
+        cv_image = cv2.rotate(cv_image, cv2.ROTATE_180)
+        
+        # Sicherheits-Check: Passt die Auflösung zur Kalibrierung?
+        if cv_image.shape[1] != 1280:
+            self.get_logger().warn(f'ACHTUNG: Kamera sendet {cv_image.shape[1]}px, aber Kalibrierung ist für 1280px!', once=True)
+            
+        results = self.model.predict(
+            cv_image, 
+            half=True,    # Nutzt FP16 (extrem wichtig für Orin Nano!)
+            imgsz=640,    # Festlegen auf 640, damit er nicht intern hochskaliert
+            device=0,     # Nutzt GPU
+            verbose=False
+        )
+
+        # DEBUG-BILD (Publiziert das YOLO-Bild mit Boxen)
         annotated_frame = results[0].plot()
         debug_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
         self.pub_debug_img.publish(debug_msg)
@@ -1031,7 +1065,6 @@ class WallFollower(Node):
     # -----------------------
         
     def get_obstacles_from_camera(self, point_data): 
-        # 1. Thread-sicher die aktuellsten YOLO-Ergebnisse abholen
         with self.data_lock:
             results = self.latest_yolo_results
             
@@ -1040,16 +1073,29 @@ class WallFollower(Node):
 
         detected_obstacles = []
 
+        # KONFIGURATION FÜR LINEARE ABBILDUNG
+        H_FOV = 120.0  
+        IMAGE_WIDTH = 640.0
+        CENTER_X = IMAGE_WIDTH / 2.0
+        DEG_PER_PIXEL = H_FOV / IMAGE_WIDTH 
+
         for r in results:
             for box in r.boxes:
                 if float(box.conf[0]) > 0.85:
-                    self.get_logger().info(f'Objekt erkannt: {self.model.names[int(box.cls[0])]}')
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     center_x = (x1 + x2) / 2.0
+                    
+                    pixel_offset = center_x - CENTER_X
+                    angle_offset_deg = pixel_offset * DEG_PER_PIXEL
+                    
+                    # --- FIX: VORZEICHEN GEÄNDERT ---
+                    # Minus statt Plus, damit Links (negativer Offset) zu > 180° führt
+                    # und Rechts (positiver Offset) zu < 180° führt.
+                    cam_angle_deg = 180.0 - angle_offset_deg + self.angle_calibration
+                    
+                    cam_angle_rad = math.radians(cam_angle_deg)
 
-                    pixel_from_center = center_x - (self.image_width / 2.0)
-                    cam_angle_deg = pixel_from_center * (self.camera_fov / self.image_width)
-                    cam_angle_rad = math.radians(cam_angle_deg + self.angle_calibration)
+                    #self.get_logger().info(f"Pixel: {center_x:.1f} -> Winkel: {cam_angle_deg:.1f}°")
 
                     obstacle_cluster = self.get_lidar_distance(cam_angle_rad, self.get_all_clusters_sorted(point_data))
 
@@ -1061,7 +1107,7 @@ class WallFollower(Node):
                         detected_obstacles.append((obj_x, obj_y, class_name))
                         
         return detected_obstacles
-
+    
     def get_weight_point_for_cluster(self, cluster):
         # Fängt None UND leere Listen ([]) ab
         if not cluster:
@@ -1737,9 +1783,11 @@ class WallFollower(Node):
     def test_turn_main_logic(self, point_data):
         self.fahrtrichtung = "links"
         self.state = 'TURN_LINKS'  # Wir testen die Linkskurve
+
+        #self.get_logger().info(f"{self.check_for_obstacle_color(point_data, 0, 0.0, 1.0)}")
         
         # Initialisiere die Test-Variable dynamisch, falls nicht vorhanden
-        if not hasattr(self, 'test_is_turning'):
+        '''        if not hasattr(self, 'test_is_turning'):
             self.test_is_turning = False
 
         # 1. Alle Cluster finden
@@ -1830,7 +1878,7 @@ class WallFollower(Node):
                 input("Test abgeschlossen. Roboter manuell umstellen und Enter drücken...")
                 self.begin = True  # Startet die Cluster-Auswahl neu
         self.counter = 0
-        return
+        return'''
         # ==========================================
 
     # -----------------------------------------
@@ -1843,19 +1891,48 @@ class WallFollower(Node):
         if current_obstacle is None:
             detected_obstacles = self.get_obstacles_from_camera(point_data)
             if detected_obstacles:
-                # Sortieren nach Distanz (das nächste Objekt kommt auf Index 0)
-                detected_obstacles = list(filter(lambda x: x[0] > min_distance_to_obstacle))
-                detected_obstacles.sort(key=lambda x: x[0])
-                closest_x, closest_y, closest_color = detected_obstacles[0]
-                closest_dist = math.hypot(closest_x, closest_y)
-                if closest_dist < (min_distance_to_obstacle + max_distance_to_obstacle):
-                    return closest_color, None
+                detected_obstacles = list(filter(lambda x: x[1] > min_distance_to_obstacle, detected_obstacles))
+                detected_obstacles.sort(key=lambda x: math.hypot(x[0], x[1]))
+                
+                if detected_obstacles:
+                    closest_x, closest_y, closest_color = detected_obstacles[0]
+                    closest_x, closest_y, closest_color = detected_obstacles[0]
+                    closest_dist = math.hypot(closest_x, closest_y)
+                    #self.get_logger().info(f"Abstand des Nächsten Obstacles: {closest_dist}m")
+                    if closest_dist < (min_distance_to_obstacle + max_distance_to_obstacle):
+                        return closest_color, None
+                    else:
+                        return None, None
                 else:
                     return None, None
             else: 
                 return None, None
         else:
             return current_obstacle.color, current_obstacle
+
+    def calculate_zone_id(self, obst_to_front_wall_dist, obst_to_outer_wall_dist):
+        zone_id = 0
+        if obst_to_front_wall_dist >= 0.80 and obst_to_front_wall_dist <= 1.20:
+            zone_id = 20
+        elif obst_to_front_wall_dist >= 1.30 and obst_to_front_wall_dist <= 1.70:
+            zone_id = 10
+        elif obst_to_front_wall_dist >= 1.80 and obst_to_front_wall_dist <= 2.20:
+            zone_id = 0
+        else:
+            self.get_logger().warn("Abstand zur Front_wall ist außerhalb des gültigen Bereichs.")
+            zone_id = None
+
+        if obst_to_outer_wall_dist >= 0.20 and obst_to_outer_wall_dist < 0.50:
+            zone_id += 1
+        elif obst_to_outer_wall_dist >= 0.50 and obst_to_outer_wall_dist <= 0.80:
+            zone_id += 0
+        else:
+            self.get_logger().warn("Abstand zur Side_wall ist außerhalb des gültigen Bereichs.")
+            zone_id = None
+
+        return zone_id
+
+        
 
     def set_obstacle_position(self, point_data, u_profile_hnf):
         """
@@ -1867,19 +1944,24 @@ class WallFollower(Node):
         
         # Fall A: Kein Hindernis in Sicht und keines im Speicher
         if color is None and current_obstacle is None:
+            self.get_logger().warn("Kein Hindernis erkannt.")
             return None
             
         # Fall B: Hindernis ist bereits millimetergenau verortet -> Nichts mehr tun
         elif current_obstacle is not None and current_obstacle.is_localized:
+            self.get_logger().info(f"Es gibt schon ein Hindernis")
             return current_obstacle
             
         # Fall C: Hindernis gesehen, aber noch nicht verortet
         else:
             # Hole alle rohen Hindernis-Daten aus der Sensorfusion (Kamera + LiDAR)
             detected_obstacles = self.get_obstacles_from_camera(point_data)
-            
+            self.get_logger().info(f"Wir suchen uns ein neues Hindernis")
+
+
             if detected_obstacles:
                 # Sortieren nach echter Distanz zur Kamera/LiDAR (Luftlinie via Pythagoras)
+                self.get_logger().info(f"Es gibt detected Obst")
                 detected_obstacles.sort(key=lambda x: math.hypot(x[0], x[1]))
                 closest_x, closest_y, closest_color = detected_obstacles[0]
                 
@@ -1887,46 +1969,47 @@ class WallFollower(Node):
                 # ZONEN-LOKALISIERUNG & WAND-ABSTAND
                 # ==========================================
                 # Entpacken der Wände aus dem U-Profil
-                front_hnf, side_hnf = u_profile_hnf 
+                front_hnf, side_hnf = u_profile_hnf
                 
                 # Sicherheitscheck: Wenn die Frontwand (noch) nicht sauber erkannt 
                 # wurde, können wir nicht lokalisieren. Wir warten auf den nächsten Frame.
-                if front_hnf is None:
-                    return None #current_obstacle Welcher Rückgabewert ist sinnvoller?
+                if front_hnf is None or side_hnf is None:
+                    self.get_logger().info(f"Front oder Side wall sind None")
+                    return None
                     
                 # --- A. Distanz zur Frontwand (Für die Zonen-Zuweisung) ---
                 nx_f, ny_f, dist_to_front = front_hnf
-                block_to_front_wall_dist = abs(closest_x * nx_f + closest_y * ny_f - dist_to_front)
+                obst_to_front_wall_dist = abs(closest_x * nx_f + closest_y * ny_f - dist_to_front)
+                
+                if obst_to_front_wall_dist < 0.90:
+                    self.get_logger().info(f"Obst zu nah an der front wall")
+                    return None
                 
                 # --- B. Distanz zur Seitenwand (Für die physische Hindernis-Position) ---
-                block_to_outer_wall_dist = self.get_obstacle_to_wall_distance(closest_x, closest_y, side_hnf)
+                obst_to_outer_wall_dist = self.get_obstacle_to_wall_distance(closest_x, closest_y, side_hnf)
                 
                 # --- C. Zone bestimmen ---
                 current_segment = self.turn_count % 4
-                zone_id = self._calculate_zone_id(block_to_front_wall_dist, block_to_outer_wall_dist)
+                zone_id = self.calculate_zone_id(obst_to_front_wall_dist, obst_to_outer_wall_dist)
+                self.get_logger().info(f"Zone id wurde detected: {zone_id}")
                 
                 # ==========================================
                 # OBJEKT VERORTEN UND SPEICHERN
                 # ==========================================
-                if current_obstacle is not None:
+                if zone_id is not None:
                     # Fixiert die Zone im Objekt
-                    current_obstacle.lock_position(zone_id)
-                    
-                    # (Optional) Du kannst diese Abstände auch in die Obstacle-Klasse 
-                    # schreiben, falls du sie später im Ausweichmanöver brauchst:
-                    # current_obstacle.dist_to_front = block_to_front_wall_dist
-                    # current_obstacle.dist_to_side = block_to_side_wall_dist
+                    current_obstacle = Obstacle(closest_color, zone_id)
                     
                     # Im topologischen Gedächtnis des Roboters ablegen
-                    self.track_memory[current_segment] = current_obstacle
+                    self.obstacle_memory[current_segment] = current_obstacle
                     
                     # Sauberes Logging aller erfassten Metriken
-                    side_dist_str = f"{block_to_outer_wall_dist:.2f}m" if block_to_outer_wall_dist else "N/A"
+                    side_dist_str = f"{obst_to_outer_wall_dist:.2f}m" if obst_to_outer_wall_dist else "N/A"
                     
                     self.get_logger().info(
                         f"+++ HINDERNIS GELOCKT: {closest_color.upper()} +++\n"
                         f" -> Segment: {current_segment} | Zone: {zone_id}\n"
-                        f" -> Zur Frontwand: {block_to_front_wall_dist:.2f}m\n"
+                        f" -> Zur Frontwand: {obst_to_front_wall_dist:.2f}m\n"
                         f" -> Zur Seitenwand: {side_dist_str}"
                     )
                     
@@ -1973,7 +2056,7 @@ class WallFollower(Node):
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
-        self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.0)
+        self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
 
         if self.fahrtrichtung is None:
             # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
@@ -2025,11 +2108,6 @@ class WallFollower(Node):
         self.visualize_hnf_line(left_wall_hnf, m_id=111, farbe_name="blau", label="Links HNF")
         self.visualize_hnf_line(right_wall_hnf, m_id=112, farbe_name="gruen", label="Rechts HNF")
 
-        if front_wall_hnf is not None:
-            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.7)
-        else:
-            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.3)
-
         if self.fahrtrichtung == 'links':
             innenbande = self.left_wall
             innenbande_hnf = left_wall_hnf
@@ -2038,8 +2116,29 @@ class WallFollower(Node):
         else:
             innenbande = self.right_wall
             innenbande_hnf = right_wall_hnf
-            aussenbande = self.left_wall
+            aussenbande = self.left_wall 
             aussenbande_hnf = left_wall_hnf
+
+        current_straight = self.turn_count % 4
+        current_obstacle = self.obstacle_memory[current_straight]
+        if current_obstacle is None:
+            self.get_logger().info(f"0")
+            current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
+
+        if current_obstacle is None:
+            self.get_logger().info(f"1")
+            if front_wall_hnf is not None:
+                self.get_logger().info(f"2")
+                self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.7)
+            else:
+                self.get_logger().info(f"3")
+                self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.3)
+        else: 
+            self.get_logger().info(f"4")
+            self.current_obstacle_cmd = current_obstacle.color
+            self.get_logger().info(f"Obst Position: {current_obstacle.zone_id}")
+
+        self.get_logger().info(f"Obst Cmd: {self.current_obstacle_cmd}")
 
         if front_wall_hnf is not None and self.fahrtrichtung is not None:
             _, _, front_dist = front_wall_hnf
@@ -2063,7 +2162,7 @@ class WallFollower(Node):
 
         # 2. PID-REGLER BERECHNEN
         # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
-        error = -target_x 
+        error = -target_x
         
         # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
         self.integral_error += error

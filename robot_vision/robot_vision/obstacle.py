@@ -1,5 +1,5 @@
 class Obstacle:
-    def __init__(self, color, zone_id=None, prov_x=None, prov_y=None):
+    def __init__(self, color, zone_id=None):
         """
         Repräsentiert ein erkanntes Hindernis.
         
