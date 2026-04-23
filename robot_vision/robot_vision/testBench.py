@@ -60,11 +60,11 @@ from robot_vision.obstacle import Obstacle
 -------------------------------------------------------------
 Zone Ids:
 
-20  |   21
-|   |   |
-10  |   11
-|   |   |
-00  |   01
+20  |   21     |
+|   |   |      |
+10  |   11     | <-- outer_wall
+|   |   |      |
+00  |   01     |
     ^
     |
    🤖
@@ -1932,7 +1932,46 @@ class WallFollower(Node):
 
         return zone_id
 
-        
+    def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, dist_front_wall):
+        is_left = (self.fahrtrichtung == "links")
+
+        if obstacle_cmd is None and obstacle is None:
+            self.lane_ratio = 0.5
+        elif obstacle_cmd is not None and obstacle is None:
+            if obstacle_cmd == "green":
+                if is_left:
+                    self.lane_ratio = 0.2
+                else: 
+                    self.lane_ratio = 0.8
+            else:
+                if is_left:
+                    self.lane_ratio = 0.8
+                else: 
+                    self.lane_ratio = 0.2
+        else:
+            obst_zone_id = obstacle.zone_id
+            if obst_zone_id <= 1:
+                obst_passed = dist_front_wall < 1.75
+            elif obst_zone_id <= 11:
+                obst_passed = dist_front_wall < 1.25
+            else:
+                obst_passed = dist_front_wall < 0.75
+            if obst_passed:
+                self.lane_ratio = 0.5
+            else:
+                obst_is_green = obstacle_cmd == "green"
+                obst_is_outer = obst_zone_id % 10 == 1
+                if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
+                    if obst_is_outer:
+                        self.lane_ratio = 0.3
+                    else:
+                        self.lane_ratio = 0.2
+                else:
+                    if obst_is_outer:
+                        self.lane_ratio = 0.8
+                    else:
+                        self.lane_ratio = 0.7
+
 
     def set_obstacle_position(self, point_data, u_profile_hnf):
         """
@@ -2122,23 +2161,20 @@ class WallFollower(Node):
         current_straight = self.turn_count % 4
         current_obstacle = self.obstacle_memory[current_straight]
         if current_obstacle is None:
-            self.get_logger().info(f"0")
             current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
 
         if current_obstacle is None:
-            self.get_logger().info(f"1")
             if front_wall_hnf is not None:
-                self.get_logger().info(f"2")
-                self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.7)
+                self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.7)
             else:
-                self.get_logger().info(f"3")
-                self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.3)
+                self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.3)
         else: 
-            self.get_logger().info(f"4")
             self.current_obstacle_cmd = current_obstacle.color
             self.get_logger().info(f"Obst Position: {current_obstacle.zone_id}")
 
         self.get_logger().info(f"Obst Cmd: {self.current_obstacle_cmd}")
+        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_hnf[2])
+        self.get_logger().info(f"Current Lane Ratio: {self.lane_ratio}")
 
         if front_wall_hnf is not None and self.fahrtrichtung is not None:
             _, _, front_dist = front_wall_hnf
@@ -2157,7 +2193,6 @@ class WallFollower(Node):
                 self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
         
         target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
-        #target_x, target_y = self.get_target_point_straight_cluster(innenbande, aussenbande)
         self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
 
         # 2. PID-REGLER BERECHNEN
