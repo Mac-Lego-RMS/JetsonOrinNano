@@ -1373,14 +1373,14 @@ class WallFollower(Node):
 
         return front_straight, side_straight
 
-    def calculate_target_line(self, side_line_params, front_line_params, obstacle, desired_wall_distance_m):
+    def calculate_target_line(self, side_line_params, front_line_params, obstacle, desired_lane_ratio):
         if front_line_params is None:
             return None, None
 
         n_xf, n_yf, d_f = front_line_params
         
         # 1. Basis-Zielgerade
-        d_ziel = d_f - desired_wall_distance_m
+        d_ziel = d_f - (1.0 - desired_lane_ratio)
         
         # 2. Hindernis auswerten
         if obstacle is not None and len(obstacle.cluster) > 0:
@@ -1629,10 +1629,10 @@ class WallFollower(Node):
         self.visualize_hnf_line(side_straight, m_id=300, farbe_name="blau", label="")
         return front_straight, side_straight
 
-    def test_calculate_target_line(self, u_profile, desired_wall_distance_m):
+    def test_calculate_target_line(self, u_profile, obstacle, desired_lane_ratio):
         '''Testet die Funktion calculate_target_line() und visualisiert die Ergebnisse in RViz.'''
         front_line_params, side_line_params = self.extract_wall_lines(u_profile)
-        target_line_params, max_radius = self.calculate_target_line(side_line_params, front_line_params, None, desired_wall_distance_m)
+        target_line_params, max_radius = self.calculate_target_line(side_line_params, front_line_params, obstacle, desired_lane_ratio)
         radius = f"{max_radius:.2f}" if max_radius is not None else "None"
         self.get_logger().info(f"Target Line HNF: {target_line_params}, Max Radius: {radius} m")
         self.visualize_hnf_line(target_line_params, m_id=400, farbe_name="gruen", label="")
@@ -1900,7 +1900,9 @@ class WallFollower(Node):
                     closest_dist = math.hypot(closest_x, closest_y)
                     #self.get_logger().info(f"Abstand des Nächsten Obstacles: {closest_dist}m")
                     if closest_dist < (min_distance_to_obstacle + max_distance_to_obstacle):
-                        return closest_color, None
+                        new_obstacle = Obstacle(closest_color, None)
+                        self.obstacle_memory[current_straight] = new_obstacle
+                        return closest_color,  new_obstacle
                     else:
                         return None, None
                 else:
@@ -1937,7 +1939,7 @@ class WallFollower(Node):
 
         if obstacle_cmd is None and obstacle is None:
             self.lane_ratio = 0.5
-        elif obstacle_cmd is not None and obstacle is None:
+        elif (obstacle_cmd is not None and obstacle is None) or (obstacle_cmd is not None and not obstacle.is_localized()):
             if obstacle_cmd == "green":
                 if is_left:
                     self.lane_ratio = 0.2
@@ -1972,7 +1974,6 @@ class WallFollower(Node):
                     else:
                         self.lane_ratio = 0.7
 
-
     def set_obstacle_position(self, point_data, u_profile_hnf):
         """
         Verarbeitet Sensordaten, berechnet die exakte physische Position eines Hindernisses 
@@ -1987,8 +1988,8 @@ class WallFollower(Node):
             return None
             
         # Fall B: Hindernis ist bereits millimetergenau verortet -> Nichts mehr tun
-        elif current_obstacle is not None and current_obstacle.is_localized:
-            self.get_logger().info(f"Es gibt schon ein Hindernis")
+        elif current_obstacle is not None and current_obstacle.is_localized():
+            self.get_logger().info(f"Es gibt schon ein Hindernis, dass localized ist")
             return current_obstacle
             
         # Fall C: Hindernis gesehen, aber noch nicht verortet
@@ -2014,15 +2015,15 @@ class WallFollower(Node):
                 # wurde, können wir nicht lokalisieren. Wir warten auf den nächsten Frame.
                 if front_hnf is None or side_hnf is None:
                     self.get_logger().info(f"Front oder Side wall sind None")
-                    return None
+                    return current_obstacle
                     
                 # --- A. Distanz zur Frontwand (Für die Zonen-Zuweisung) ---
                 nx_f, ny_f, dist_to_front = front_hnf
                 obst_to_front_wall_dist = abs(closest_x * nx_f + closest_y * ny_f - dist_to_front)
                 
-                if obst_to_front_wall_dist < 0.90:
+                if obst_to_front_wall_dist < 0.85:
                     self.get_logger().info(f"Obst zu nah an der front wall")
-                    return None
+                    return current_obstacle
                 
                 # --- B. Distanz zur Seitenwand (Für die physische Hindernis-Position) ---
                 obst_to_outer_wall_dist = self.get_obstacle_to_wall_distance(closest_x, closest_y, side_hnf)
@@ -2038,21 +2039,17 @@ class WallFollower(Node):
                 if zone_id is not None:
                     # Fixiert die Zone im Objekt
                     current_obstacle = Obstacle(closest_color, zone_id)
-                    
                     # Im topologischen Gedächtnis des Roboters ablegen
                     self.obstacle_memory[current_segment] = current_obstacle
-                    
                     # Sauberes Logging aller erfassten Metriken
                     side_dist_str = f"{obst_to_outer_wall_dist:.2f}m" if obst_to_outer_wall_dist else "N/A"
-                    
                     self.get_logger().info(
                         f"+++ HINDERNIS GELOCKT: {closest_color.upper()} +++\n"
                         f" -> Segment: {current_segment} | Zone: {zone_id}\n"
                         f" -> Zur Frontwand: {obst_to_front_wall_dist:.2f}m\n"
                         f" -> Zur Seitenwand: {side_dist_str}"
                     )
-                    
-            return current_obstacle
+                return current_obstacle
 
     def get_obstacle_to_wall_distance(self, obstacle_x, obstacle_y, hnf_wall):
         """
@@ -2160,7 +2157,7 @@ class WallFollower(Node):
 
         current_straight = self.turn_count % 4
         current_obstacle = self.obstacle_memory[current_straight]
-        if current_obstacle is None:
+        if current_obstacle is None or not current_obstacle.is_localized():
             current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
 
         if current_obstacle is None:
@@ -2174,7 +2171,7 @@ class WallFollower(Node):
 
         self.get_logger().info(f"Obst Cmd: {self.current_obstacle_cmd}")
         self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_hnf[2])
-        self.get_logger().info(f"Current Lane Ratio: {self.lane_ratio}")
+        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
 
         if front_wall_hnf is not None and self.fahrtrichtung is not None:
             _, _, front_dist = front_wall_hnf
@@ -2226,7 +2223,9 @@ class WallFollower(Node):
         Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
         """
         cmd = Twist()
-        self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
+        self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
+        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, 2.0)
+        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
         # ---------------------------------------------------------
@@ -2239,11 +2238,8 @@ class WallFollower(Node):
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-            #target_line_params, max_allowed_radius = self.calculate_target_line(front_wall_params, side_wall_params, None, self.lane_ratio)
-            distance_to_outer_wall = 1.0 - self.lane_ratio
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, distance_to_outer_wall)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, current_obstacle,self.lane_ratio)
             
-            #intersection_x, intersection_y, intersection_angle = self.get_intersection_point(target_line_params
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             
             #curve_radius_m, entry_distance_m = self.calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
