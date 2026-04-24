@@ -15,10 +15,12 @@ class CsiCameraPublisher(Node):
         self.publisher_ = self.create_publisher(Image, '/camera/image_raw', qos_profile_sensor_data)
         self.bridge = CvBridge()
         
+        # In der __init__ den Aufruf ändern:
         pipeline = self.gstreamer_pipeline(
-            capture_width=1280, capture_height=720, 
+            capture_width=640, capture_height=480, # Kleinstmöglicher nativer Modus
             display_width=640, display_height=360, 
-            framerate=30, flip_method=0
+            framerate=20, # 20 FPS reicht für WRO völlig und spart massiv RAM
+            flip_method=0
         )
         
         self.get_logger().info('Starte CSI-Kamera...')
@@ -33,18 +35,16 @@ class CsiCameraPublisher(Node):
         self.get_logger().info('Kamera Node läuft. Publiziert auf Topic: /camera/image_raw')
 
     def gstreamer_pipeline(self, capture_width, capture_height, display_width, display_height, framerate, flip_method):
-        return (
+                return (
             "nvarguscamerasrc ! "
             "video/x-raw(memory:NVMM), "
             f"width=(int){capture_width}, height=(int){capture_height}, "
             f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
-            # WICHTIG: nvvidconv skaliert direkt im Grafikspeicher (NVMM)
-            f"nvvidconv flip-method={flip_method} ! "
-            f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
+            "nvvidconv ! "
+            "video/x-raw, format=(string)BGRx ! "
             "videoconvert ! "
             "video/x-raw, format=(string)BGR ! "
-            # NEU: queue mit leaky=2 (verwirft alte Bilder sofort, wenn der RAM voll ist)
-            "queue leaky=2 max-size-buffers=1 ! "
+            # max-buffers=1 ist hier die Rettung
             "appsink drop=true max-buffers=1 sync=false"
         )
 

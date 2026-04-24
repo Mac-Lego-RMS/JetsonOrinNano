@@ -84,13 +84,7 @@ class WallFollower(Node):
         self.data_lock = threading.Lock()
         self.latest_yolo_results = [] # Hier speichert YOLO seine Boxen ab
         
-        self.img_sub = self.create_subscription(
-            Image, 
-            '/camera/image_raw', 
-            self.camera_sub_callback, 
-            qos_profile_sensor_data,
-            callback_group=self.yolo_cbg  # Läuft in eigenem Thread
-        )
+        
         
         self.scan_sub = self.create_subscription(
             LaserScan,
@@ -136,7 +130,7 @@ class WallFollower(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 4
+        self.target_turns = 12
         self.turn_count = 0
         self.locked_turn_count = 0  # Merkt sich, in welcher "Runde" das Hindernis stand
 
@@ -148,7 +142,8 @@ class WallFollower(Node):
         self.lookahead_dist_straight = 0.50    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.15       
 
-        self.lane_ratio = 0.80       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
+        self.standard_lane_ratio = 0.60
+        self.lane_ratio = self.standard_lane_ratio       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
         self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
         self.turn_exit_angle = 25
         self.max_wall_lenght_for_turn = 0.25
@@ -181,17 +176,17 @@ class WallFollower(Node):
         self.LIDAR_OFFSET_M = 0.08
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.35
+        self.IDEAL_RADIUS_M = 0.25
         self.MIN_TURN_RADIUS_M = 0.30
 
         # --- TURN PID-REGLER PARAMETER ---
-        self.turn_kp = 0.6
+        self.turn_kp = 0.9
         self.turn_kd = 0.0
         self.turn_ki = 0.0
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 300.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 300.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 275.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 275.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -218,6 +213,19 @@ class WallFollower(Node):
         self.get_logger().info('Lade YOLO TensorRT Engine...')
         self.model = YOLO('/workspace/best.engine', task='detect')
         self.get_logger().info('Modell erfolgreich geladen!')
+
+        self.get_logger().info('Starte TensorRT Warm-up...')
+        dummy_image = np.zeros((640, 640, 3), dtype=np.uint8)
+        self.model.predict(
+            dummy_image, 
+            half=True, 
+            imgsz=640, 
+            device=0, 
+            verbose=False
+        )
+        self.get_logger().info('Warm-up abgeschlossen. GPU ist bereit.')
+
+
         # In der __init__ Klasse hinzufügen:
         self.angle_calibration = 0.0  # In Grad: Korrigiert, wenn Lidar/Kamera verdreht sind
         self.lidar_height_offset = 0.05 # In Metern: Hebt/Senkt den Marker in RViz
@@ -232,6 +240,14 @@ class WallFollower(Node):
         # Variablen für die Fusion
         self.camera_fov = 115.0  # Dein Sichtfeld
         self.get_logger().info('YOLO Lidar Fusion Node gestartet.')
+
+        self.img_sub = self.create_subscription(
+            Image, 
+            '/camera/image_raw', 
+            self.camera_sub_callback, 
+            qos_profile_sensor_data,
+            callback_group=self.yolo_cbg  # Läuft in eigenem Thread
+        )
 
 
         ############ debug ##############
@@ -1057,7 +1073,7 @@ class WallFollower(Node):
         if not roi_clusters:
             self.get_logger().warn("ACHTUNG: Getrackte Wand im ROI verloren!")
             return last_front_wall
-            
+    
         return roi_clusters[0]
 
     # -----------------------
@@ -1383,7 +1399,7 @@ class WallFollower(Node):
         d_ziel = d_f - (1.0 - desired_lane_ratio)
         
         # 2. Hindernis auswerten
-        if obstacle is not None and len(obstacle.cluster) > 0:
+        if obstacle is not None and obstacle.is_localized:
             # Hier folgt die detaillierte Ausweichlogik basierend auf obstacle.farbe
             # ...
             # Beispielhaftes Überschreiben von d_ziel, falls Offset nötig ist:
@@ -1444,6 +1460,7 @@ class WallFollower(Node):
         
         # 3. Winkel berechnen (liefert jetzt Werte zwischen 0° und 180°)
         turn_angle_deg = math.degrees(math.acos(nx_clipped))
+        self.get_logger().info(f"Turn Angle Fehler: {turn_angle_deg:.1f}°")
 
         return intersection_x_m, intersection_y_m, turn_angle_deg
 
@@ -1541,11 +1558,12 @@ class WallFollower(Node):
         Kombiniert Gyro-Daten mit dem Wandwinkel für maximale Präzision am Kurvenausgang.
         """
         # 1. Grobe Prüfung via Gyro (Delta-Berechnung wie zuvor)
+        self.get_logger().info(f"turn_angle: {turn_angle:.1f}°, start_turn_yaw: {self.start_turn_yaw:.1f}, current_yaw: {self.current_yaw:.1f}")
         error_gyro = abs(turn_angle) - abs(self.current_yaw - self.start_turn_yaw)
         self.get_logger().info(f"Gyro Error: {error_gyro:.1f}°, target: {turn_angle:.1f}°")
         error_gyro = abs(error_gyro)
         # Wenn wir noch nicht einmal 75 Grad gedreht haben, sicher noch nicht fertig
-        if error_gyro > 180:
+        if error_gyro > 35.0:
             return False
         
         # 2. Präzise Prüfung via LiDAR-Winkel (falls Wand sichtbar)
@@ -1555,12 +1573,12 @@ class WallFollower(Node):
             wall_error_deg = math.degrees(math.atan2(abs(n_y), abs(n_x)))
             self.get_logger().info(f"Wall-Error {wall_error_deg:.1f}°")
             # Abbruchbedingung: Gyro ist nah dran UND Wand-Parallelität ist hoch
-            if wall_error_deg < 6.0:
+            if wall_error_deg < 8.0:
                 self.get_logger().info(f"Fused Match: Gyro {error_gyro:.1f}°, Wall-Error {wall_error_deg:.1f}°")
                 return True
 
         # 3. Fallback: Nur Gyro (falls LiDAR die Wand kurz verliert)
-        elif error_gyro <= 7.0:
+        elif error_gyro <= 10.0:
             self.get_logger().warn("Nur Gyro-Abschluss (Wand nicht erkannt)")
             return True
 
@@ -1934,12 +1952,12 @@ class WallFollower(Node):
 
         return zone_id
 
-    def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, dist_front_wall):
+    def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_hnf):
         is_left = (self.fahrtrichtung == "links")
 
         if obstacle_cmd is None and obstacle is None:
-            self.lane_ratio = 0.5
-        elif (obstacle_cmd is not None and obstacle is None) or (obstacle_cmd is not None and not obstacle.is_localized()):
+            self.lane_ratio = self.standard_lane_ratio
+        elif (obstacle_cmd is not None and obstacle is None) or (obstacle_cmd is not None and not obstacle.is_localized):
             if obstacle_cmd == "green":
                 if is_left:
                     self.lane_ratio = 0.2
@@ -1952,14 +1970,18 @@ class WallFollower(Node):
                     self.lane_ratio = 0.2
         else:
             obst_zone_id = obstacle.zone_id
-            if obst_zone_id <= 1:
-                obst_passed = dist_front_wall < 1.75
-            elif obst_zone_id <= 11:
-                obst_passed = dist_front_wall < 1.25
+            if front_wall_hnf is None:
+                obst_passed = False
             else:
-                obst_passed = dist_front_wall < 0.75
+                dist_front_wall = front_wall_hnf[2]
+                if obst_zone_id <= 1:
+                    obst_passed = dist_front_wall < 1.75
+                elif obst_zone_id <= 11:
+                    obst_passed = dist_front_wall < 1.25
+                else:
+                    obst_passed = dist_front_wall < 0.75
             if obst_passed:
-                self.lane_ratio = 0.5
+                self.lane_ratio = self.standard_lane_ratio
             else:
                 obst_is_green = obstacle_cmd == "green"
                 obst_is_outer = obst_zone_id % 10 == 1
@@ -1980,7 +2002,13 @@ class WallFollower(Node):
         und verortet es im topologischen Speicher des Roboters.
         """
         # 1. Existierendes Hindernis oder Farbe aus dem aktuellen Frame abfragen
-        color, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count)
+        front_hnf, side_hnf = u_profile_hnf
+        if front_hnf is None:
+            return None
+        
+        nx_f, ny_f, dist_to_front = front_hnf
+        
+        color, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, dist_to_front - 0.85)
         
         # Fall A: Kein Hindernis in Sicht und keines im Speicher
         if color is None and current_obstacle is None:
@@ -1988,7 +2016,7 @@ class WallFollower(Node):
             return None
             
         # Fall B: Hindernis ist bereits millimetergenau verortet -> Nichts mehr tun
-        elif current_obstacle is not None and current_obstacle.is_localized():
+        elif current_obstacle is not None and current_obstacle.is_localized:
             self.get_logger().info(f"Es gibt schon ein Hindernis, dass localized ist")
             return current_obstacle
             
@@ -2009,16 +2037,14 @@ class WallFollower(Node):
                 # ZONEN-LOKALISIERUNG & WAND-ABSTAND
                 # ==========================================
                 # Entpacken der Wände aus dem U-Profil
-                front_hnf, side_hnf = u_profile_hnf
                 
                 # Sicherheitscheck: Wenn die Frontwand (noch) nicht sauber erkannt 
                 # wurde, können wir nicht lokalisieren. Wir warten auf den nächsten Frame.
-                if front_hnf is None or side_hnf is None:
+                if side_hnf is None:
                     self.get_logger().info(f"Front oder Side wall sind None")
                     return current_obstacle
                     
                 # --- A. Distanz zur Frontwand (Für die Zonen-Zuweisung) ---
-                nx_f, ny_f, dist_to_front = front_hnf
                 obst_to_front_wall_dist = abs(closest_x * nx_f + closest_y * ny_f - dist_to_front)
                 
                 if obst_to_front_wall_dist < 0.85:
@@ -2157,7 +2183,7 @@ class WallFollower(Node):
 
         current_straight = self.turn_count % 4
         current_obstacle = self.obstacle_memory[current_straight]
-        if current_obstacle is None or not current_obstacle.is_localized():
+        if current_obstacle is None or not current_obstacle.is_localized:
             current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
 
         if current_obstacle is None:
@@ -2170,7 +2196,7 @@ class WallFollower(Node):
             self.get_logger().info(f"Obst Position: {current_obstacle.zone_id}")
 
         self.get_logger().info(f"Obst Cmd: {self.current_obstacle_cmd}")
-        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_hnf[2])
+        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_hnf)
         self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
 
         if front_wall_hnf is not None and self.fahrtrichtung is not None:
@@ -2224,7 +2250,7 @@ class WallFollower(Node):
         """
         cmd = Twist()
         self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
-        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, 2.0)
+        #self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, 2.0)
         self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
@@ -2238,6 +2264,8 @@ class WallFollower(Node):
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
+            self.visualize_hnf_line(front_wall_params, m_id=550, farbe_name="rot", label="Front HNF")
+            
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, current_obstacle,self.lane_ratio)
             
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
@@ -2268,12 +2296,13 @@ class WallFollower(Node):
             # 3. Abschluss prüfen
             if self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params):
                 self.get_logger().info("Kurve physikalisch beendet.")
-            
                 cmd.linear.x = self.base_speed
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
                 self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle an die main_logic
+                self.turn_count += 1
+                self.start_straight_yaw = self.current_yaw
     
     def execute_stop(self):
             cmd = Twist()
@@ -2287,7 +2316,7 @@ class WallFollower(Node):
 
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
-        self.get_logger().info(f"Aktueller Status: {self.state}")
+        self.get_logger().info(f"Aktueller Status: {self.state}, TurnCount: {self.turn_count}")
 
         if self.state == 'STARTING':
             self.execute_start(point_data)
