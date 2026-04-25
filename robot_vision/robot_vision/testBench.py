@@ -425,71 +425,115 @@ class WallFollower(Node):
         marker.color.a = 1.0
         marker_array.markers.append(marker)
     
-    def validate_clusters_straight(self, clusters): # np array upgraded
-        # Wir nutzen while, da sich die Liste verkleinern kann
-        while len(clusters) >= 3:
-            
-            # 1. Die aktuell größten 3 nehmen und von rechts nach links sortieren
-            ordered = self.sort_clusters_right_to_left(clusters[:3])
-            
-            # 2. Winkel berechnen
-            angles = [self.get_cluster_angle(c) for c in ordered]
+    def validate_clusters_straight(self, clusters): 
+        """
+        Ordnet die Cluster auf der Geraden zu (Rechts, Front, Links). 
+        Nutzt absolute geometrische Winkel und filtert Wände außerhalb des Spielfelds (1m).
+        """
+        u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
+        if not clusters:
+            return u_profile
 
-            if any(angle is None for angle in angles):
-                self.get_logger().warn("Fehler bei der Winkelberechnung. Überspringe...")
-                return [None, None, None]
+        side_candidates = []
+        front_candidates = []
 
-            # --- HILFSFUNKTION FÜR WINKEL-DIFFERENZ ---
-            # Berechnet den kleinsten Schnittwinkel zwischen zwei Geraden (0° bis 90°)
-            def get_angle_diff(a1, a2):
-                diff = abs(a1 - a2) % 180
-                if diff > 90:
-                    diff = 180 - diff
-                return diff
-
-            # Differenzen berechnen (0=Rechts, 1=Front, 2=Links)
-            diff_0_1 = get_angle_diff(angles[0], angles[1]) # Sollte ~90° sein (orthogonal)
-            diff_1_2 = get_angle_diff(angles[1], angles[2]) # Sollte ~90° sein (orthogonal)
-            diff_0_2 = get_angle_diff(angles[0], angles[2]) # Sollte ~0° sein (parallel)
-
-            # --- ÜBERPRÜFUNG ---
-            # Toleranz: Wir erlauben bis zu 20° Abweichung von der perfekten Geometrie
-            
-            # Check A: Sind Rechts und Front orthogonal? (Differenz sollte > 70° sein)
-            if diff_0_1 < 70:
-                self.get_logger().warn(f"Rechts und Front nicht orthogonal! Diff: {diff_0_1:.1f}°")
-                # Finde das kleinere der beiden Cluster in 'ordered' und lösche es aus 'clusters'
-                if len(ordered[0]) < len(ordered[1]):
-                    clusters = [c for c in clusters if c is not ordered[0]]
-                else:
-                    clusters = [c for c in clusters if c is not ordered[1]]
-                continue # Schleife sofort mit der bereinigten Liste neu starten
-
-            # Check B: Sind Front und Links orthogonal?
-            elif diff_1_2 < 70:
-                self.get_logger().warn(f"Front und Links nicht orthogonal! Diff: {diff_1_2:.1f}°")
-                if len(ordered[1]) < len(ordered[2]):
-                    clusters = [c for c in clusters if c is not ordered[1]]
-                else:
-                    clusters = [c for c in clusters if c is not ordered[2]]
+        # ==========================================
+        # 1. ABSOLUTE WINKEL- UND ABSTANDSKLASSIFIZIERUNG
+        # ==========================================
+        for c in clusters:
+            angle = self.get_cluster_angle(c)
+            if angle is None:
                 continue
 
-            # Check C: Sind Rechts und Links parallel? (Differenz sollte < 20° sein)
-            elif diff_0_2 > 10:
-                self.get_logger().warn(f"Rechts und Links nicht parallel! Diff: {diff_0_2:.1f}°")
-                if len(ordered[0]) < len(ordered[2]):
-                    clusters = [c for c in clusters if c is not ordered[0]]
-                else:
-                    clusters = [c for c in clusters if c is not ordered[2]]
-                continue
+            # Winkel auf 0-90° normalisieren
+            angle_norm = abs(angle) % 180
+            if angle_norm > 90:
+                angle_norm = 180 - angle_norm
 
-            # --- ERFOLG ---
+            # Seitenwände liegen nahe 0°
+            if angle_norm < 35.0:
+                # ABSTANDS-FILTER: Nur Seitenwände innerhalb von 1.0 Meter (X-Achse) zulassen
+                mean_x = sum(p[1] for p in c) / len(c)
+                if abs(mean_x) <= 1.0:
+                    side_candidates.append(c)
+                    
+            # Frontwände nahe 90°
+            elif angle_norm > 55.0:
+                front_candidates.append(c)
+
+        # ==========================================
+        # 2. SEITENWÄNDE ZUORDNEN & PLAUSIBILITÄT PRÜFEN
+        # ==========================================
+        if len(side_candidates) >= 2:
+            c1 = side_candidates[0] # Größte Wand
+            c2 = side_candidates[1] # Zweitgrößte Wand
             
-            # Gibt exakt zugeordnet zurück: (Rechte Bande, Frontwand, Linke Bande)
-            return ordered
-        # Wenn die Schleife abbricht (Liste hat weniger als 3 Cluster)
-        self.get_logger().warn(f"Kein gültiges U-Profil gefunden. Nur noch {len(clusters)} Cluster übrig.")
-        return [None, None, None]
+            mean_x1 = sum(p[1] for p in c1) / len(c1)
+            mean_x2 = sum(p[1] for p in c2) / len(c2)
+            
+            # Die physikalische Spurbreite berechnen
+            track_width = abs(mean_x1 - mean_x2)
+            
+            # Toleranz: Die Bahn ist 1.0m breit. Erlaube 25cm Toleranz für Rauschen/Wand-Knicke.
+            if 0.75 <= track_width <= 1.25:
+                # Plausibel! Räumlich sortieren und zuweisen.
+                ordered_sides = self.sort_clusters_right_to_left([c1, c2])
+                u_profile[0] = ordered_sides[0] # Rechts (+X)
+                u_profile[2] = ordered_sides[1] # Links (-X)
+            else:
+                self.get_logger().warn(f"Spurbreite unplausibel ({track_width:.2f}m). Verwerfe schwächere Wand.")
+                # Downgrade auf 1-Wand-Logik mit dem stärksten Cluster (c1)
+                if mean_x1 > 0:
+                    u_profile[0] = c1
+                else:
+                    u_profile[2] = c1
+                    
+        elif len(side_candidates) == 1:
+            c = side_candidates[0]
+            mean_x = sum(p[1] for p in c) / len(c)
+            
+            if mean_x > 0: 
+                u_profile[0] = c # Positiver X-Bereich -> Rechte Wand
+            else:
+                u_profile[2] = c # Negativer X-Bereich -> Linke Wand
+
+        # ==========================================
+        # 3. FRONTWAND ZUORDNEN (HARDWARE-FIX)
+        # ==========================================
+        if front_candidates:
+            # A) Y-Gruppierung (15 cm Toleranz)
+            groups = []
+            for c in front_candidates:
+                mean_y = sum(p[2] for p in c) / len(c)
+                placed = False
+                for g in groups:
+                    if abs(g['base_y'] - mean_y) < 0.15:
+                        g['clusters'].append(c)
+                        placed = True
+                        break
+                if not placed:
+                    groups.append({'base_y': mean_y, 'clusters': [c]})
+
+            # B) Breiten-Filter (> 35 cm)
+            valid_wall_groups = []
+            for g in groups:
+                all_x = [p[1] for c in g['clusters'] for p in c]
+                total_width = max(all_x) - min(all_x)
+                
+                if total_width > 0.35:
+                    valid_wall_groups.append(g)
+
+            # C) Zuweisung (Nächste gültige Wand nehmen)
+            if valid_wall_groups:
+                valid_wall_groups.sort(key=lambda g: g['base_y'])
+                winner_group = valid_wall_groups[0]['clusters']
+                winner_group.sort(key=len, reverse=True)
+                u_profile[1] = winner_group[0]
+            else:
+                front_candidates.sort(key=len, reverse=True)
+                u_profile[1] = front_candidates[0]
+
+        return u_profile
 
     def validate_clusters_turn(self, front_wall, point_data):   # np array upgraded
         '''Überprüft die Cluster in der Kurve. Es muss eine Frontwand geben, aber die Banden können auch fehlen (z.B. bei der ersten Kurve).
@@ -1803,7 +1847,14 @@ class WallFollower(Node):
         self.state = 'TURN_LINKS'  # Wir testen die Linkskurve
 
         #self.get_logger().info(f"{self.check_for_obstacle_color(point_data, 0, 0.0, 1.0)}")
-        
+        all_clusters = self.get_all_clusters_sorted(point_data)
+        validated_clusters = self.validate_clusters_straight(all_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+        self.right_wall = merged_validated_clusters[2]
+        self.front_wall = merged_validated_clusters[1]
+        self.left_wall  = merged_validated_clusters[0]
+        self.visualize_clusters(merged_validated_clusters)
+
         # Initialisiere die Test-Variable dynamisch, falls nicht vorhanden
         '''        if not hasattr(self, 'test_is_turning'):
             self.test_is_turning = False
