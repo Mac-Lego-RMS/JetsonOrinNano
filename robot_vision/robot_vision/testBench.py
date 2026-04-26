@@ -144,6 +144,8 @@ class WallFollower(Node):
 
         self.standard_lane_ratio = 0.60
         self.lane_ratio = self.standard_lane_ratio       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
+        self.base_obst_cmd = None
+        self.base_entry_distance = None
         self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
         self.turn_exit_angle = 25
         self.max_wall_lenght_for_turn = 0.25
@@ -176,8 +178,8 @@ class WallFollower(Node):
         self.LIDAR_OFFSET_M = 0.08
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.25
-        self.MIN_TURN_RADIUS_M = 0.30
+        self.IDEAL_RADIUS_M = 0.35
+        self.MIN_TURN_RADIUS_M = 0.20
 
         # --- TURN PID-REGLER PARAMETER ---
         self.turn_kp = 0.9
@@ -2301,6 +2303,8 @@ class WallFollower(Node):
         """
         cmd = Twist()
         self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
+        front_wall_dist = (0, 0, 2.0)
+        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_dist)
         #self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, 2.0)
         self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
         # ---------------------------------------------------------
@@ -2332,16 +2336,37 @@ class WallFollower(Node):
                 self.saved_intersection_angle = intersection_angle
                 self.saved_curve_radius_m = curve_radius_m
                 self.start_turn_yaw = self.current_yaw
+                self.base_obst_cmd = self.current_obstacle_cmd
+                self.base_entry_distance = entry_distance_m
                 self.turn_phase = 'EXECUTE'
                 
         # ---------------------------------------------------------
         # PHASE 2: AUSFÜHRUNG (Servo lenkt, Gyro prüft)
         # ---------------------------------------------------------
-        elif self.turn_phase == 'EXECUTE':
-            # 1. Servo-Befehl kontinuierlich senden
+        elif self.turn_phase == 'EXECUTE':          
+            # 3. Radius stur nach interpolierter Ratio berechnen
+            if self.current_obstacle_cmd != self.base_obst_cmd:
+                if self.current_obstacle_cmd is not None:
+                    is_left = (self.fahrtrichtung == "links")
+                    needs_inner = (self.current_obstacle_cmd == "green" and is_left) or (self.current_obstacle_cmd == "red" and not is_left)
+                    min_r = self.MIN_TURN_RADIUS_M
+                    max_r = self.base_entry_distance - 0.15
+                    
+                    if needs_inner:
+                        self.saved_curve_radius_m = min_r
+                    else:
+                        self.saved_curve_radius_m = min(max_r, self.MAX_KINEMATIC_RADIUS_M)
+                    
+                    self.get_logger().warn(f"MID-TURN AUSWEICHEN!. Radius: {self.saved_curve_radius_m:.2f}m")
+
+            # 4. Ausführen und Tracken
             self.execute_turn(self.saved_curve_radius_m)
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
-            front_wall_params = self.cluster_to_hnf(self.front_wall)
+            
+            if self.front_wall is not None:
+                front_wall_params = self.cluster_to_hnf(self.front_wall)
+            else:
+                front_wall_params = None
 
 
             # 3. Abschluss prüfen
