@@ -130,7 +130,7 @@ class WallFollower(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 12
+        self.target_turns = 4
         self.turn_count = 0
         self.locked_turn_count = 0  # Merkt sich, in welcher "Runde" das Hindernis stand
 
@@ -178,12 +178,12 @@ class WallFollower(Node):
         self.LIDAR_OFFSET_M = 0.08
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.35
+        self.IDEAL_RADIUS_M = 0.45
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 275.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 275.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 300.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 300.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -192,6 +192,10 @@ class WallFollower(Node):
         # --------------------------------
         self.image_width = 1280
         self.bridge = CvBridge()
+
+        # --- YOLO FPS THROTTLING ---
+        self.target_yolo_fps = 8.0  # Ziel: 8 Bilder pro Sekunde (anpassbar 7-10)
+        self.last_yolo_time = self.get_clock().now().nanoseconds / 1e9
 
         self.K = np.array([
             [820.7558,   0.0000, 639.0000],
@@ -340,6 +344,15 @@ class WallFollower(Node):
     
     def camera_sub_callback(self, msg):
         """Wird asynchron vom MultiThreadedExecutor aufgerufen. Blockiert den Lidar nicht!"""
+        
+        # --- 1. THROTTLE LOGIK (Frame Dropper) ---
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if (current_time - self.last_yolo_time) < (1.0 / self.target_yolo_fps):
+            return  # Verwirft das Bild stillschweigend -> 0% CPU Last für diesen Frame!
+            
+        self.last_yolo_time = current_time
+
+        # --- 2. AB HIER GANZ NORMAL WEITER ---
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
 
         cv_image = cv2.rotate(cv_image, cv2.ROTATE_180)
@@ -833,30 +846,27 @@ class WallFollower(Node):
         clusters.sort(key=len, reverse=True)
         return clusters
     
-    def get_cluster_angle(self, cluster): # Angepasst auf neues Koordinatensystem
+    def get_cluster_angle(self, cluster):
         if cluster is None or len(cluster) < 2:
             return None
-
-        n = len(cluster)
-        mean_x = sum(p[1] for p in cluster) / n
-        mean_y = sum(p[2] for p in cluster) / n
-
-        s_xx = 0.0
-        s_yy = 0.0
-        s_xy = 0.0
         
-        for p in cluster:
-            dx = p[1] - mean_x
-            dy = p[2] - mean_y
-            s_xx += dx * dx
-            s_yy += dy * dy
-            s_xy += dx * dy
-
-        # Wieder dein Original: s_yy - s_xx
-        # Dadurch bleiben Seitenwände bei 0° und Frontwände bei 90°
-        angle_rad = 0.5 * math.atan2(2.0 * s_xy, s_yy - s_xx)
+        # Wandle cluster (Liste) in ein NumPy Array um, falls es noch keins ist
+        pts = np.array(cluster) 
+        x = pts[:, 1]
+        y = pts[:, 2]
         
-        return math.degrees(angle_rad)
+        # Schwerpunkt und Kovarianz in NumPy (völlig ohne Loops)
+        x_mean = np.mean(x)
+        y_mean = np.mean(y)
+        dx = x - x_mean
+        dy = y - y_mean
+        
+        s_xx = np.sum(dx * dx)
+        s_yy = np.sum(dy * dy)
+        s_xy = np.sum(dx * dy)
+        
+        angle_rad = 0.5 * np.arctan2(2.0 * s_xy, s_yy - s_xx)
+        return np.degrees(angle_rad)
 
     def delete_marker(self, marker_array, m_id, ns="walls"):
         """Löscht einen Marker in einem bestimmten Namespace."""
@@ -2150,14 +2160,15 @@ class WallFollower(Node):
         
         return distance
                 
-    def check_undetected_turn(self):
+    def check_undetected_turn(self, front_wall_hnf):
         total_gedreht = abs(self.current_yaw - self.yaw_offset)
-        min_total_rotation = self.target_turns * 87.0
+        min_total_rotation = self.target_turns * 89.0
         if self.turn_count >= self.target_turns and total_gedreht >= min_total_rotation:
-            if self.front_wall is not None:
-                closest_f = self.get_closest_point_in_cluster(self.front_wall)
-                if closest_f is not None and closest_f[3] < 1.80:
+            if front_wall_hnf is not None:
+                closest_f = front_wall_hnf[2]
+                if closest_f < 1.50:
                     self.state = 'STOPPED'
+                    self.get_logger
                     return
                 
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
@@ -2215,7 +2226,6 @@ class WallFollower(Node):
 
         self.get_logger().info(f"Verfolge die Spur... Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
 
-        self.check_undetected_turn()
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
         self.right_wall = merged_validated_clusters[2]
@@ -2224,6 +2234,12 @@ class WallFollower(Node):
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
+        self.check_undetected_turn(front_wall_hnf)
+
+        if self.turn_count >= self.target_turns and front_wall_hnf[2] < 1.50:
+            self.state = 'STOPPED'
+            return
 
         self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
         self.visualize_hnf_line(left_wall_hnf, m_id=111, farbe_name="blau", label="Links HNF")
@@ -2419,7 +2435,7 @@ def main(args=None):
     node = WallFollower()
     
     # Der MultiThreadedExecutor verwaltet die parallelen Callback-Gruppen
-    executor = MultiThreadedExecutor(num_threads=4)
+    executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
     
     try:
