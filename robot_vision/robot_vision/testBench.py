@@ -468,7 +468,9 @@ class WallFollower(Node):
                     
             # Frontwände liegen quer vor dem Roboter (> 45°)
             else:
-                front_candidates.append(c)
+                mean_y = sum(p[2] for p in c) / len(c)
+                if mean_y >= 0.85:
+                    front_candidates.append(c)
 
         # ==========================================
         # 2. SEITENWÄNDE ZUORDNEN & PLAUSIBILITÄT PRÜFEN
