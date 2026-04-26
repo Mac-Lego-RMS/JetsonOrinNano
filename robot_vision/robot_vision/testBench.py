@@ -160,7 +160,7 @@ class WallFollower(Node):
         
 
         # --- PID-REGLER PARAMETER ---
-        self.kp = 2.0   # Lenkt hart zur Karotte
+        self.kp = 1.4   # Lenkt hart zur Karotte
         self.kd = 0   # Verhindert das Schlingern (Dämpfung)
         self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
         
@@ -180,11 +180,6 @@ class WallFollower(Node):
         self.MAX_KINEMATIC_RADIUS_M = 1.2
         self.IDEAL_RADIUS_M = 0.35
         self.MIN_TURN_RADIUS_M = 0.20
-
-        # --- TURN PID-REGLER PARAMETER ---
-        self.turn_kp = 0.9
-        self.turn_kd = 0.0
-        self.turn_ki = 0.0
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
         self.base_speed = 275.0  # Normale Geschwindigkeit auf der Geraden
@@ -355,10 +350,11 @@ class WallFollower(Node):
             
         results = self.model.predict(
             cv_image, 
-            half=True,    # Nutzt FP16 (extrem wichtig für Orin Nano!)
-            imgsz=640,    # Festlegen auf 640, damit er nicht intern hochskaliert
-            device=0,     # Nutzt GPU
-            verbose=False
+            half=True,    
+            imgsz=640,    
+            device=0,     
+            verbose=False,
+            conf=0.9      # <--- Hier setzen wir das Minimum auf 90%
         )
 
         # DEBUG-BILD (Publiziert das YOLO-Bild mit Boxen)
@@ -428,39 +424,37 @@ class WallFollower(Node):
         marker_array.markers.append(marker)
     
     def validate_clusters_straight(self, clusters): 
-        """
-        Ordnet die Cluster auf der Geraden zu (Rechts, Front, Links). 
-        Nutzt absolute geometrische Winkel und filtert Wände außerhalb des Spielfelds (1m).
-        """
         u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
         if not clusters:
+            self.get_logger().warn("Keine Cluster gefunden. Kann Kurvenprofil nicht validieren.")
             return u_profile
 
         side_candidates = []
         front_candidates = []
 
         # ==========================================
-        # 1. ABSOLUTE WINKEL- UND ABSTANDSKLASSIFIZIERUNG
+        # 1. LOKALE WINKEL- UND ABSTANDSKLASSIFIZIERUNG (OHNE GYRO)
         # ==========================================
         for c in clusters:
-            angle = self.get_cluster_angle(c)
-            if angle is None:
+            raw_angle = self.get_cluster_angle(c)
+            if raw_angle is None:
                 continue
 
             # Winkel auf 0-90° normalisieren
-            angle_norm = abs(angle) % 180
+            angle_norm = abs(raw_angle) % 180
             if angle_norm > 90:
                 angle_norm = 180 - angle_norm
 
-            # Seitenwände liegen nahe 0°
-            if angle_norm < 35.0:
-                # ABSTANDS-FILTER: Nur Seitenwände innerhalb von 1.0 Meter (X-Achse) zulassen
-                mean_x = sum(p[1] for p in c) / len(c)
-                if abs(mean_x) <= 1.0:
+            # Seitenwände liegen lokal nahe 0° (Wir trennen hart bei 45°)
+            if angle_norm <= 45.0:
+                mean_x_local = sum(p[1] for p in c) / len(c)
+                
+                # ABSTANDS-FILTER: Nur Wände zulassen, die lokal max 1.0m seitlich entfernt sind
+                if abs(mean_x_local) <= 1.0:
                     side_candidates.append(c)
                     
-            # Frontwände nahe 90°
-            elif angle_norm > 55.0:
+            # Frontwände liegen quer vor dem Roboter (> 45°)
+            else:
                 front_candidates.append(c)
 
         # ==========================================
@@ -477,6 +471,7 @@ class WallFollower(Node):
             track_width = abs(mean_x1 - mean_x2)
             
             # Toleranz: Die Bahn ist 1.0m breit. Erlaube 25cm Toleranz für Rauschen/Wand-Knicke.
+            # self.get_logger().info(f"Spurbreite: {track_width:.2f}m")
             if 0.75 <= track_width <= 1.25:
                 # Plausibel! Räumlich sortieren und zuweisen.
                 ordered_sides = self.sort_clusters_right_to_left([c1, c2])
@@ -507,6 +502,14 @@ class WallFollower(Node):
             groups = []
             for c in front_candidates:
                 mean_y = sum(p[2] for p in c) / len(c)
+                
+                # ==========================================
+                # HINTEN-FILTER: Alles hinter dem Roboter (-Y) 
+                # oder näher als 20cm ignorieren
+                # ==========================================
+                if mean_y < 0.20:
+                    continue  # Überspringt diesen Cluster sofort
+                
                 placed = False
                 for g in groups:
                     if abs(g['base_y'] - mean_y) < 0.15:
@@ -533,7 +536,8 @@ class WallFollower(Node):
                 u_profile[1] = winner_group[0]
             else:
                 front_candidates.sort(key=len, reverse=True)
-                u_profile[1] = front_candidates[0]
+                if front_candidates:
+                    u_profile[1] = front_candidates[0]
 
         return u_profile
 
@@ -1102,11 +1106,11 @@ class WallFollower(Node):
 
         # 2. Dynamisches Suchfenster (ROI)
         if self.fahrtrichtung == 'links':
-            roi_min = min_angle - 5.0
-            roi_max = max_angle + 30.0
-        else:
             roi_min = min_angle - 30.0
             roi_max = max_angle + 5.0
+        else:
+            roi_min = min_angle - 5.0
+            roi_max = max_angle + 30.0
 
         # 3. Scheuklappen aufsetzen: NumPy Maske statt for-Schleife
         mask = (point_data[:, 0] >= roi_min) & (point_data[:, 0] <= roi_max)
@@ -1119,7 +1123,7 @@ class WallFollower(Node):
         if not roi_clusters:
             self.get_logger().warn("ACHTUNG: Getrackte Wand im ROI verloren!")
             return last_front_wall
-    
+
         return roi_clusters[0]
 
     # -----------------------
@@ -1253,7 +1257,7 @@ class WallFollower(Node):
             innenbande = self.right_wall
             aussenbande = self.left_wall
             
-        target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
+        #target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
         
         marker_array = MarkerArray()
 
@@ -1609,7 +1613,7 @@ class WallFollower(Node):
         self.get_logger().info(f"Gyro Error: {error_gyro:.1f}°, target: {turn_angle:.1f}°")
         error_gyro = abs(error_gyro)
         # Wenn wir noch nicht einmal 75 Grad gedreht haben, sicher noch nicht fertig
-        if error_gyro > 35.0:
+        if error_gyro > 20.0:
             return False
         
         # 2. Präzise Prüfung via LiDAR-Winkel (falls Wand sichtbar)
@@ -1619,7 +1623,7 @@ class WallFollower(Node):
             wall_error_deg = math.degrees(math.atan2(abs(n_y), abs(n_x)))
             self.get_logger().info(f"Wall-Error {wall_error_deg:.1f}°")
             # Abbruchbedingung: Gyro ist nah dran UND Wand-Parallelität ist hoch
-            if wall_error_deg < 8.0:
+            if wall_error_deg < 18.0:
                 self.get_logger().info(f"Fused Match: Gyro {error_gyro:.1f}°, Wall-Error {wall_error_deg:.1f}°")
                 return True
 
@@ -1849,6 +1853,7 @@ class WallFollower(Node):
         self.state = 'TURN_LINKS'  # Wir testen die Linkskurve
 
         #self.get_logger().info(f"{self.check_for_obstacle_color(point_data, 0, 0.0, 1.0)}")
+        self.start_straight_yaw = self.current_yaw
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
@@ -1993,7 +1998,8 @@ class WallFollower(Node):
             zone_id = 0
         else:
             self.get_logger().warn("Abstand zur Front_wall ist außerhalb des gültigen Bereichs.")
-            zone_id = None
+            return None
+            
 
         if obst_to_outer_wall_dist >= 0.20 and obst_to_outer_wall_dist < 0.50:
             zone_id += 1
@@ -2316,6 +2322,8 @@ class WallFollower(Node):
             self.pub_cmd_vel.publish(cmd)
             # 1. Wände tracken und Geometrie berechnen
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
+            front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+            self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
