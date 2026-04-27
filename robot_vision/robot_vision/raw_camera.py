@@ -35,16 +35,16 @@ class CsiCameraPublisher(Node):
         self.get_logger().info('Kamera Node läuft. Publiziert auf Topic: /camera/image_raw')
 
     def gstreamer_pipeline(self, capture_width, capture_height, display_width, display_height, framerate, flip_method):
-                return (
-            "nvarguscamerasrc ! "
-            "video/x-raw(memory:NVMM), "
-            f"width=(int){capture_width}, height=(int){capture_height}, "
-            f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
-            "nvvidconv ! "
-            "video/x-raw, format=(string)BGRx ! "
+        return (
+            "nvarguscamerasrc sensor-id=0 sensor-mode=4 ! "
+            "video/x-raw(memory:NVMM), width=(int)1280, height=(int)720, format=(string)NV12, framerate=(fraction)60/1 ! "
+            f"nvvidconv flip-method={flip_method} ! "
+            f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
             "videoconvert ! "
             "video/x-raw, format=(string)BGR ! "
-            # max-buffers=1 ist hier die Rettung
+            # --- DER FIX: HARDWARE-DROSSELUNG ---
+            "videorate ! "
+            "video/x-raw, framerate=8/1 ! "
             "appsink drop=true max-buffers=1 sync=false"
         )
 

@@ -142,7 +142,7 @@ class WallFollower(Node):
         self.lookahead_dist_straight = 0.50    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.15       
 
-        self.standard_lane_ratio = 0.60
+        self.standard_lane_ratio = 0.30
         self.lane_ratio = self.standard_lane_ratio       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
         self.base_obst_cmd = None
         self.base_entry_distance = None
@@ -178,12 +178,12 @@ class WallFollower(Node):
         self.LIDAR_OFFSET_M = 0.08
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.45
+        self.IDEAL_RADIUS_M = 0.35
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 300.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 300.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 275.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 275.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -212,7 +212,7 @@ class WallFollower(Node):
         
         # 1. Das YOLO-Modell laden (TensorRT .engine)
         self.get_logger().info('Lade YOLO TensorRT Engine...')
-        self.model = YOLO('/workspace/best.engine', task='detect')
+        self.model = YOLO('/workspace/wro_model.engine', task='detect')
         self.get_logger().info('Modell erfolgreich geladen!')
 
         self.get_logger().info('Starte TensorRT Warm-up...')
@@ -345,14 +345,6 @@ class WallFollower(Node):
     def camera_sub_callback(self, msg):
         """Wird asynchron vom MultiThreadedExecutor aufgerufen. Blockiert den Lidar nicht!"""
         
-        # --- 1. THROTTLE LOGIK (Frame Dropper) ---
-        current_time = self.get_clock().now().nanoseconds / 1e9
-        if (current_time - self.last_yolo_time) < (1.0 / self.target_yolo_fps):
-            return  # Verwirft das Bild stillschweigend -> 0% CPU Last für diesen Frame!
-            
-        self.last_yolo_time = current_time
-
-        # --- 2. AB HIER GANZ NORMAL WEITER ---
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
 
         cv_image = cv2.rotate(cv_image, cv2.ROTATE_180)
@@ -367,7 +359,7 @@ class WallFollower(Node):
             imgsz=640,    
             device=0,     
             verbose=False,
-            conf=0.9      # <--- Hier setzen wir das Minimum auf 90%
+            conf=0.70      # Minimum auf 70%
         )
 
         # DEBUG-BILD (Publiziert das YOLO-Bild mit Boxen)
@@ -727,7 +719,7 @@ class WallFollower(Node):
         
         return sorted_clusters
 
-    def get_all_clusters_sorted_numpy(self, point_data):
+    def get_all_clusters_sorted(self, point_data):
         if len(point_data) < 2:
             return []
 
@@ -872,8 +864,8 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        self.test_turn_main_logic(point_data)
-        #self.main_logic(point_data)
+        #self.test_turn_main_logic(point_data)
+        self.main_logic(point_data)
     
     def get_closest_measure(self, point_data, target_angle):    # np array upgraded
         if len(point_data) == 0:
@@ -893,7 +885,7 @@ class WallFollower(Node):
         Gibt den Punkt eines Clusters zurück, der den kürzesten Abstand zum LiDAR hat.
         cluster: Liste von Punkten im Format (angle, x, y, dist)
         """
-        if not cluster:
+        if cluster is None or len(cluster) == 0:
             return None
 
         # Sucht das Element im Cluster, bei dem der Wert an Index 3 (dist) am kleinsten ist
@@ -962,15 +954,19 @@ class WallFollower(Node):
                     continue
 
                 if get_angle_diff(angle, other_angle) < max_angle_gap:
-                    ox = sum(p[1] for p in other) / len(other)
-                    oy = sum(p[2] for p in other) / len(other)
+                    
+                    # 1. NumPy-Optimierung: Vektorisierte Mittelwertberechnung
+                    ox = np.mean(other[:, 1])
+                    oy = np.mean(other[:, 2])
 
                     # Der Offset wird nun mit dem echten Normalenvektor geprüft
                     offset = abs((ox - bx) * nx + (oy - by) * ny)
 
                     if offset < max_distance_gap:
-                        #self.get_logger().info(f"Wand gemergt! (Offset: {offset:.2f}m)")
-                        valid_cluster.extend(other)
+                        # 2. Referenz-Fix: Das Array direkt in der Hauptliste überschreiben!
+                        # (Ersetze 'validated_clusters' durch den echten Namen deiner äußeren Liste, falls abweichend)
+                        validated_clusters[i] = np.vstack((validated_clusters[i], other))
+                        
                         clusters_to_remove.append(other)
                         combined_clusters[i].append(other)
                     else:
@@ -981,7 +977,12 @@ class WallFollower(Node):
 
             # Wir sortieren die Punkte nach ihrer geometrischen Position ENTLANG der Wand,
             # damit Rviz/Foxglove die Linie von Anfang bis Ende sauber durchzeichnet.
-            valid_cluster.sort(key=lambda p: p[1] * dir_x + p[2] * dir_y)
+            # Vektorisierte Projektion der Punkte auf den Richtungsvektor (x*dir_x + y*dir_y)
+            projections = valid_cluster[:, 1] * dir_x + valid_cluster[:, 2] * dir_y
+            
+            # Array anhand der projizierten Werte sortieren
+            sort_indices = np.argsort(projections)
+            valid_cluster = valid_cluster[sort_indices]
 
         return validated_clusters, combined_clusters
 
@@ -1125,9 +1126,17 @@ class WallFollower(Node):
         CENTER_X = IMAGE_WIDTH / 2.0
         DEG_PER_PIXEL = H_FOV / IMAGE_WIDTH 
 
+        # Eindeutiges Mapping: Überschreibt die Namen der TensorRT-Engine.
+        # Falls die Farben in der Praxis vertauscht sind, tausche hier 0 und 1.
+        class_mapping = {
+            0: 'green',
+            2: 'red',
+            1: 'pink'
+        }
+
         for r in results:
             for box in r.boxes:
-                if float(box.conf[0]) > 0.85:
+                if float(box.conf[0]) > 0.80:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     center_x = (x1 + x2) / 2.0
                     
@@ -1135,20 +1144,19 @@ class WallFollower(Node):
                     angle_offset_deg = pixel_offset * DEG_PER_PIXEL
                     
                     # --- FIX: VORZEICHEN GEÄNDERT ---
-                    # Minus statt Plus, damit Links (negativer Offset) zu > 180° führt
-                    # und Rechts (positiver Offset) zu < 180° führt.
                     cam_angle_deg = 180.0 - angle_offset_deg + self.angle_calibration
-                    
                     cam_angle_rad = math.radians(cam_angle_deg)
-
-                    #self.get_logger().info(f"Pixel: {center_x:.1f} -> Winkel: {cam_angle_deg:.1f}°")
 
                     obstacle_cluster = self.get_lidar_distance(cam_angle_rad, self.get_all_clusters_sorted(point_data))
 
                     if obstacle_cluster is not None:
                         obj_x, obj_y = self.get_weight_point_for_cluster(obstacle_cluster) 
-                        class_name = self.model.names[int(box.cls[0])].lower()
-                        self.publish_marker(obj_x, obj_y, class_name, int(box.cls[0]))
+                        
+                        # --- FIX: Hardcodiertes Mapping statt self.model.names ---
+                        class_id = int(box.cls[0])
+                        class_name = class_mapping.get(class_id, f"unknown_{class_id}")
+                        
+                        self.publish_marker(obj_x, obj_y, class_name, class_id)
                         
                         detected_obstacles.append((obj_x, obj_y, class_name))
                         
@@ -1156,7 +1164,7 @@ class WallFollower(Node):
     
     def get_weight_point_for_cluster(self, cluster):
         # Fängt None UND leere Listen ([]) ab
-        if not cluster:
+        if cluster is None or len(cluster) == 0:
             return None
             
         n = len(cluster)
@@ -1955,11 +1963,11 @@ class WallFollower(Node):
                     closest_x, closest_y, closest_color = detected_obstacles[0]
                     closest_x, closest_y, closest_color = detected_obstacles[0]
                     closest_dist = math.hypot(closest_x, closest_y)
-                    #self.get_logger().info(f"Abstand des Nächsten Obstacles: {closest_dist}m")
-                    if closest_dist < (min_distance_to_obstacle + max_distance_to_obstacle):
+                    if closest_dist < max_distance_to_obstacle and closest_dist > min_distance_to_obstacle:
                         new_obstacle = Obstacle(closest_color, None)
                         self.obstacle_memory[current_straight] = new_obstacle
-                        return closest_color,  new_obstacle
+                        self.get_logger().warn(f"+++ HINDERNIS GELOCKT: {closest_color.upper()}, {closest_dist:.2f} m auf Gerade: {current_straight}+++")
+                        return closest_color, new_obstacle
                     else:
                         return None, None
                 else:
@@ -2163,7 +2171,7 @@ class WallFollower(Node):
 
         if self.fahrtrichtung is None:
             # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
-            if self.left_wall and self.right_wall:
+            if (self.left_wall is not None and len(self.left_wall) > 0) and (self.right_wall is not None and len(self.right_wall) > 0):
                     # Echte physikalische Länge in Metern berechnen (Satz des Pythagoras)
                     left_len = math.hypot(self.left_wall[0][1] - self.left_wall[-1][1], self.left_wall[0][2] - self.left_wall[-1][2])
                     right_len = math.hypot(self.right_wall[0][1] - self.right_wall[-1][1], self.right_wall[0][2] - self.right_wall[-1][2])
@@ -2244,6 +2252,9 @@ class WallFollower(Node):
         self.get_logger().info(f"Obst Cmd: {self.current_obstacle_cmd}")
         self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_hnf)
         self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
+
+        if front_wall_hnf is not None and aussenbande_hnf is not None:
+            self.check_for_obstacle_color(point_data, (self.turn_count + 1), front_wall_hnf[2] - 0.75, 2.0)
 
         if front_wall_hnf is not None and self.fahrtrichtung is not None:
             _, _, front_dist = front_wall_hnf
@@ -2381,6 +2392,7 @@ class WallFollower(Node):
             cmd.angular.z = 0.0
             self.pub_cmd_vel.publish(cmd)
             self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
+            self.get_logger().warn(f">>> Erkannte Obst {self.obstacle_memory}")
             self.destroy_node()
             rclpy.shutdown()
             return
