@@ -727,124 +727,92 @@ class WallFollower(Node):
         
         return sorted_clusters
 
-    def get_all_clusters_sorted(self, point_data): # np array upgraded
-        """
-        Sucht ALLE zusammenhängenden Cluster und durchtrennt sie an 90°-Ecken.
-        Nutzt die Manhattan-Norm für Lücken und das Skalarprodukt für Ecken.
-        point_data: Liste aus (Winkel_deg, x, y, dist)
-        """
+    def get_all_clusters_sorted_numpy(self, point_data):
         if len(point_data) < 2:
             return []
 
-        # Nach Winkel sortieren (von rechts nach hinten nach links)
-        sorted_points = point_data[np.argsort(point_data[:, 0])]
+        # 1. Sortieren
+        points = point_data[np.argsort(point_data[:, 0])]
+        x = points[:, 1]
+        y = points[:, 2]
 
-        max_gap = 0.15      # Maximaler Abstand zwischen zwei Punkten (15cm)
-        outlier_limit = 2   # Wie viele Punkte dürfen fehlen?
-        
-        clusters = []
-        current_cluster = []
-        
-        i = 0
-        while i < len(sorted_points):
-            p_curr = sorted_points[i]
-            
-            if not current_cluster:
-                current_cluster.append(p_curr)
-                i += 1
-                continue
-            
-            p_last = current_cluster[-1]
-            
-            # 1. MANHATTAN-DISTANZ (Lückenerkennung)
-            dx = abs(p_curr[1] - p_last[1])
-            dy = abs(p_curr[2] - p_last[2])
-            dist_manhattan = dx + dy
-            
-            if dist_manhattan < max_gap:
-                
-                # =========================================================
-                # 2. NEUE ECKEN-ERKENNUNG (Skalarprodukt / Dot-Product)
-                # =========================================================
-                is_corner = False
-                
-                # Wir brauchen mindestens 5 Punkte Historie, um einen Trend zu sehen
-                if len(current_cluster) >= 5:
-                    # Vektor A: Die Wand der Vergangenheit (Punkt vor 5 Steps bis letzter Punkt)
-                    p_past = current_cluster[-5]
-                    vec_a_x = p_last[1] - p_past[1]
-                    vec_a_y = p_last[2] - p_past[2]
-                    len_a = math.hypot(vec_a_x, vec_a_y)
-                    
-                    # Vektor B: Der neue Schritt (Letzter Punkt zum aktuellen Punkt)
-                    vec_b_x = p_curr[1] - p_last[1]
-                    vec_b_y = p_curr[2] - p_last[2]
-                    len_b = math.hypot(vec_b_x, vec_b_y)
-                    
-                    if len_a > 0.01 and len_b > 0.01:
-                        # Vektoren normalisieren (Länge 1)
-                        vec_a_x /= len_a
-                        vec_a_y /= len_a
-                        vec_b_x /= len_b
-                        vec_b_y /= len_b
-                        
-                        # Skalarprodukt: Gibt den Kosinus des eingeschlossenen Winkels
-                        # 1.0 = Gleiche Richtung (Gerade Wand)
-                        # 0.0 = 90 Grad (Perfekte Ecke)
-                        # -1.0 = 180 Grad (Umdrehen)
-                        dot_product = (vec_a_x * vec_b_x) + (vec_a_y * vec_b_y)
-                        
-                        # Wenn das Skalarprodukt unter 0.7 fällt (entspricht ca. > 45 Grad Knick), 
-                        # haben wir eine Ecke erreicht!
-                        if dot_product < 0.70:
-                            is_corner = True
+        # Split-Maske initialisieren (True = Hier beginnt ein neues Cluster)
+        split_mask = np.zeros(len(points), dtype=bool)
 
-                # =========================================================
-                # 3. ENTSCHEIDUNG TREFFEN
-                # =========================================================
-                if is_corner:
-                    # Ecke erkannt! Wir beenden die alte Wand und starten sofort eine neue.
-                    # Der aktuelle Punkt (p_curr) ist der allererste Punkt der neuen Wand!
-                    clusters.append(current_cluster)
-                    current_cluster = [p_curr]
-                else:
-                    # Keine Ecke, Punkt gehört zur aktuellen Wand
-                    current_cluster.append(p_curr)
-                
-                i += 1
-                    
-            else:
-                # 4. AUSREISSER-LOGIK (Lücken überbrücken)
-                found_connection = False
-                for look_ahead in range(1, outlier_limit + 1):
-                    if i + look_ahead < len(sorted_points):
-                        p_future = sorted_points[i + look_ahead]
-                        dist_future = abs(p_future[1] - p_last[1]) + abs(p_future[2] - p_last[2])
-                        
-                        if dist_future < max_gap:
-                            i += look_ahead
-                            found_connection = True
-                            break
-                
-                if not found_connection:
-                    clusters.append(current_cluster)
-                    current_cluster = [p_curr]
-                    i += 1
+        # ==========================================
+        # 2. LÜCKENERKENNUNG (Manhattan-Distanz)
+        # ==========================================
+        dx = np.diff(x)
+        dy = np.diff(y)
+        dist_manhattan = np.abs(dx) + np.abs(dy)
         
-        if current_cluster:
-            clusters.append(current_cluster)
+        # Ein Split passiert primär, wenn die Distanz > 0.15m ist
+        split_mask[1:] = dist_manhattan >= 0.15
 
-        # 5. WRAP-AROUND-FIX (Wenn die Wand bei 180 / -180 Grad durchschnitten wurde)
+        # ==========================================
+        # 3. AUSREISSER-LOGIK (Vektorisiert)
+        # ==========================================
+        # Look-ahead 1 (Abstand zu i-2)
+        if len(points) > 2:
+            dist_2 = np.abs(x[2:] - x[:-2]) + np.abs(y[2:] - y[:-2])
+            fix_2 = (split_mask[2:]) & (dist_2 < 0.15)
+            split_mask[2:][fix_2] = False # Split aufheben, Lücke überbrückt
+
+        # Look-ahead 2 (Abstand zu i-3)
+        if len(points) > 3:
+            dist_3 = np.abs(x[3:] - x[:-3]) + np.abs(y[3:] - y[:-3])
+            fix_3 = (split_mask[3:]) & (dist_3 < 0.15)
+            split_mask[3:][fix_3] = False # Split aufheben, Lücke überbrückt
+
+        # ==========================================
+        # 4. ECKEN-ERKENNUNG (Skalarprodukt)
+        # ==========================================
+        if len(points) > 5:
+            # Vektor A (i-5 zu i-1)
+            vec_a_x = x[4:-1] - x[:-5]
+            vec_a_y = y[4:-1] - y[:-5]
+            
+            # Vektor B (i-1 zu i)
+            vec_b_x = x[5:] - x[4:-1]
+            vec_b_y = y[5:] - y[4:-1]
+
+            len_a = np.hypot(vec_a_x, vec_a_y)
+            len_b = np.hypot(vec_b_x, vec_b_y)
+
+            # Division durch Null abfangen
+            valid = (len_a > 0.01) & (len_b > 0.01)
+
+            dot_product = np.ones(len(points) - 5)
+            dot_product[valid] = (
+                (vec_a_x[valid] / len_a[valid]) * (vec_b_x[valid] / len_b[valid]) +
+                (vec_a_y[valid] / len_a[valid]) * (vec_b_y[valid] / len_b[valid])
+            )
+
+            # Split einfügen, wenn Winkel > 45° (< 0.70)
+            corner_splits = dot_product < 0.70
+            split_mask[5:][corner_splits] = True
+
+        # ==========================================
+        # 5. ARRAY ZERSCHNEIDEN & WRAP-AROUND
+        # ==========================================
+        # Indizes finden, an denen split_mask True ist
+        split_indices = np.where(split_mask)[0]
+        clusters_raw = np.split(points, split_indices)
+        
+        # Leere Cluster filtern (passiert, falls Index 0 True wäre)
+        clusters = [c for c in clusters_raw if len(c) >= 3]
+
+        # Wrap-around-Fix
         if len(clusters) > 1:
             first_p = clusters[0][0]
             last_p = clusters[-1][-1]
             dist_wrap = abs(first_p[1] - last_p[1]) + abs(first_p[2] - last_p[2])
             
-            if dist_wrap < max_gap:
-                clusters[0] = clusters[-1] + clusters[0]
+            if dist_wrap < 0.15:
+                # Kombiniere das letzte und erste Cluster mit vstack
+                clusters[0] = np.vstack((clusters[-1], clusters[0]))
                 clusters.pop()
 
-        # Rückgabe: Die größten Wände zuerst
         clusters.sort(key=len, reverse=True)
         return clusters
     
@@ -904,8 +872,8 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        #self.test_turn_main_logic(point_data)
-        self.main_logic(point_data)
+        self.test_turn_main_logic(point_data)
+        #self.main_logic(point_data)
     
     def get_closest_measure(self, point_data, target_angle):    # np array upgraded
         if len(point_data) == 0:
@@ -1867,12 +1835,13 @@ class WallFollower(Node):
         #self.get_logger().info(f"{self.check_for_obstacle_color(point_data, 0, 0.0, 1.0)}")
         self.start_straight_yaw = self.current_yaw
         all_clusters = self.get_all_clusters_sorted(point_data)
-        validated_clusters = self.validate_clusters_straight(all_clusters)
+        self.visualize_clusters(all_clusters)
+        '''        validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
         self.right_wall = merged_validated_clusters[2]
         self.front_wall = merged_validated_clusters[1]
         self.left_wall  = merged_validated_clusters[0]
-        self.visualize_clusters(merged_validated_clusters)
+        self.visualize_clusters(merged_validated_clusters)'''
 
         # Initialisiere die Test-Variable dynamisch, falls nicht vorhanden
         '''        if not hasattr(self, 'test_is_turning'):
