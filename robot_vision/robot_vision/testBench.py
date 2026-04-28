@@ -434,120 +434,119 @@ class WallFollower(Node):
     def validate_clusters_straight(self, clusters): 
         u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
         if not clusters:
-            self.get_logger().warn("Keine Cluster gefunden. Kann Kurvenprofil nicht validieren.")
             return u_profile
 
         side_candidates = []
         front_candidates = []
 
         # ==========================================
-        # 1. LOKALE WINKEL- UND ABSTANDSKLASSIFIZIERUNG (OHNE GYRO)
+        # 1. GYRO-KOMPENSATION (Virtueller Spur-Frame)
         # ==========================================
+        # Differenz berechnen: Wie weit steht der Roboter schräg in der Bahn?
+        delta_yaw = self.current_yaw - self.start_straight_yaw
+        delta_rad = math.radians(delta_yaw)
+        cos_d = math.cos(delta_rad)
+        sin_d = math.sin(delta_rad)
+
         for c in clusters:
             raw_angle = self.get_cluster_angle(c)
             if raw_angle is None:
                 continue
 
-            # Winkel auf 0-90° normalisieren
-            angle_norm = abs(raw_angle) % 180
-            if angle_norm > 90:
-                angle_norm = 180 - angle_norm
+            # A) WINKEL KOMPENSIEREN
+            # Wir rechnen den lokalen Wandwinkel in den globalen Spur-Winkel um
+            lane_angle = (raw_angle + delta_yaw) % 180
+            if lane_angle > 90:
+                lane_angle -= 180
+            elif lane_angle < -90:
+                lane_angle += 180
+            
+            angle_norm = abs(lane_angle)
 
-            # Seitenwände liegen lokal nahe 0° (Wir trennen hart bei 45°)
+            # B) POSITION KOMPENSIEREN (Virtuelle Rotation)
+            mean_x_local = sum(p[1] for p in c) / len(c)
+            mean_y_local = sum(p[2] for p in c) / len(c)
+
+            # Rotation der Koordinaten zurück in die ideale Fahrtrichtung
+            ideal_x = mean_x_local * cos_d - mean_y_local * sin_d
+            ideal_y = mean_x_local * sin_d + mean_y_local * cos_d
+
+            # C) KLASSIFIZIEREN (Basierend auf idealen Werten)
+            # Seitenwände liegen in der idealen Spur bei ~0°
             if angle_norm <= 45.0:
-                mean_x_local = sum(p[1] for p in c) / len(c)
-                
-                # ABSTANDS-FILTER: Nur Wände zulassen, die lokal max 1.0m seitlich entfernt sind
-                if abs(mean_x_local) <= 1.0:
-                    side_candidates.append(c)
-                    
-            # Frontwände liegen quer vor dem Roboter (> 45°)
+                # Wir lassen einen großzügigen X-Bereich von 1.5m zu
+                if abs(ideal_x) <= 1.5:
+                    side_candidates.append({'cluster': c, 'ideal_x': ideal_x})
             else:
-                mean_y = sum(p[2] for p in c) / len(c)
-                if mean_y >= 0.85:
-                    front_candidates.append(c)
+                # Frontwände liegen bei ~90°
+                if ideal_y >= 0.20:
+                    front_candidates.append({'cluster': c, 'ideal_y': ideal_y})
 
         # ==========================================
-        # 2. SEITENWÄNDE ZUORDNEN & PLAUSIBILITÄT PRÜFEN
+        # 2. SEITENWÄNDE ZUORDNEN
         # ==========================================
         if len(side_candidates) >= 2:
-            c1 = side_candidates[0] # Größte Wand
-            c2 = side_candidates[1] # Zweitgrößte Wand
+            # Sortierung nach idealer X-Position (Rechts ist positiv, Links negativ)
+            side_candidates.sort(key=lambda item: item['ideal_x'], reverse=True)
             
-            mean_x1 = sum(p[1] for p in c1) / len(c1)
-            mean_x2 = sum(p[1] for p in c2) / len(c2)
+            c_right = side_candidates[0]
+            c_left = side_candidates[-1]
             
-            # Die physikalische Spurbreite berechnen
-            track_width = abs(mean_x1 - mean_x2)
+            track_width = abs(c_right['ideal_x'] - c_left['ideal_x'])
             
-            # Toleranz: Die Bahn ist 1.0m breit. Erlaube 25cm Toleranz für Rauschen/Wand-Knicke.
-            # self.get_logger().info(f"Spurbreite: {track_width:.2f}m")
-            if 0.75 <= track_width <= 1.25:
-                # Plausibel! Räumlich sortieren und zuweisen.
-                ordered_sides = self.sort_clusters_right_to_left([c1, c2])
-                u_profile[0] = ordered_sides[0] # Rechts (+X)
-                u_profile[2] = ordered_sides[1] # Links (-X)
+            if 0.70 <= track_width <= 1.30:
+                u_profile[0] = c_right['cluster']
+                u_profile[2] = c_left['cluster']
             else:
-                self.get_logger().warn(f"Spurbreite unplausibel ({track_width:.2f}m). Verwerfe schwächere Wand.")
-                # Downgrade auf 1-Wand-Logik mit dem stärksten Cluster (c1)
-                if mean_x1 > 0:
-                    u_profile[0] = c1
+                # Downgrade: Nimm den längsten Cluster
+                side_candidates.sort(key=lambda item: len(item['cluster']), reverse=True)
+                best_c = side_candidates[0]
+                if best_c['ideal_x'] > 0:
+                    u_profile[0] = best_c['cluster']
                 else:
-                    u_profile[2] = c1
+                    u_profile[2] = best_c['cluster']
                     
         elif len(side_candidates) == 1:
-            c = side_candidates[0]
-            mean_x = sum(p[1] for p in c) / len(c)
-            
-            if mean_x > 0: 
-                u_profile[0] = c # Positiver X-Bereich -> Rechte Wand
+            best_c = side_candidates[0]
+            if best_c['ideal_x'] > 0:
+                u_profile[0] = best_c['cluster']
             else:
-                u_profile[2] = c # Negativer X-Bereich -> Linke Wand
+                u_profile[2] = best_c['cluster']
 
         # ==========================================
-        # 3. FRONTWAND ZUORDNEN (HARDWARE-FIX)
+        # 3. FRONTWAND ZUORDNEN
         # ==========================================
         if front_candidates:
-            # A) Y-Gruppierung (15 cm Toleranz)
             groups = []
-            for c in front_candidates:
-                mean_y = sum(p[2] for p in c) / len(c)
-                
-                # ==========================================
-                # HINTEN-FILTER: Alles hinter dem Roboter (-Y) 
-                # oder näher als 20cm ignorieren
-                # ==========================================
-                if mean_y < 0.20:
-                    continue  # Überspringt diesen Cluster sofort
+            for item in front_candidates:
+                c = item['cluster']
+                ideal_y = item['ideal_y']
                 
                 placed = False
                 for g in groups:
-                    if abs(g['base_y'] - mean_y) < 0.15:
+                    if abs(g['base_y'] - ideal_y) < 0.15:
                         g['clusters'].append(c)
                         placed = True
                         break
                 if not placed:
-                    groups.append({'base_y': mean_y, 'clusters': [c]})
+                    groups.append({'base_y': ideal_y, 'clusters': [c]})
 
-            # B) Breiten-Filter (> 35 cm)
             valid_wall_groups = []
             for g in groups:
-                all_x = [p[1] for c in g['clusters'] for p in c]
-                total_width = max(all_x) - min(all_x)
+                # Breite im idealen Frame berechnen
+                all_x_ideal = [p[1] * cos_d - p[2] * sin_d for cl in g['clusters'] for p in cl]
+                total_width = max(all_x_ideal) - min(all_x_ideal)
                 
                 if total_width > 0.35:
                     valid_wall_groups.append(g)
 
-            # C) Zuweisung (Nächste gültige Wand nehmen)
             if valid_wall_groups:
                 valid_wall_groups.sort(key=lambda g: g['base_y'])
-                winner_group = valid_wall_groups[0]['clusters']
-                winner_group.sort(key=len, reverse=True)
-                u_profile[1] = winner_group[0]
+                u_profile[1] = sorted(valid_wall_groups[0]['clusters'], key=len, reverse=True)[0]
             else:
-                front_candidates.sort(key=len, reverse=True)
+                front_candidates.sort(key=lambda item: len(item['cluster']), reverse=True)
                 if front_candidates:
-                    u_profile[1] = front_candidates[0]
+                    u_profile[1] = front_candidates[0]['cluster']
 
         return u_profile
 
@@ -2241,6 +2240,50 @@ class WallFollower(Node):
                     self.get_logger
                     return
                 
+    def auto_calibrate_straight_yaw(self, left_wall, right_wall):
+        """
+        Korrigiert den start_straight_yaw dynamisch anhand langer, stabiler Seitenwände.
+        Verhindert das Driften des virtuellen Koordinatensystems durch schlechte Kurvenausgänge.
+        """
+        best_wall = None
+        max_len = 0.0
+
+        # 1. Längste sichtbare Seitenwand finden
+        for w in [left_wall, right_wall]:
+            if w is not None and len(w) >= 5:
+                # Euklidische Länge der Wand berechnen
+                w_len = math.hypot(w[0][1] - w[-1][1], w[0][2] - w[-1][2])
+                if w_len > max_len:
+                    max_len = w_len
+                    best_wall = w
+
+        # 2. Nur kalibrieren, wenn die Wand lang genug ist (z.B. > 60 cm), 
+        # um kurze Störfragmente oder ausweichende Hindernisse zu ignorieren.
+        if best_wall is not None and max_len > 0.60:
+            wall_angle_local = self.get_cluster_angle(best_wall)
+            
+            if wall_angle_local is not None:
+                # Normieren: Seitenwände liegen um 0° (parallel zur Y-Achse)
+                local_angle_norm = wall_angle_local % 180
+                if local_angle_norm > 90:
+                    local_angle_norm -= 180
+
+                # 3. Echten Spur-Winkel berechnen
+                # (Falls dein Gyro invertiert ist, musst du das Vorzeichen hier evtl. umdrehen: - local_angle_norm)
+                measured_track_yaw = self.current_yaw + local_angle_norm
+                measured_track_yaw = (measured_track_yaw + 180) % 360 - 180
+
+                # 4. Abweichung zwischen Messung und aktuellem Referenzwert
+                diff = (measured_track_yaw - self.start_straight_yaw + 180) % 360 - 180
+
+                # 5. Sanity-Check: Wir korrigieren nur, wenn der Fehler < 30° ist. 
+                # Das verhindert wilde Sprünge, falls das LiDAR extremen Müll liefert.
+                if abs(diff) < 30.0:
+                    # LOW-PASS FILTER: Wir korrigieren pro Frame nur um 15% (0.15).
+                    # Zieht den Wert in wenigen Millisekunden glatt, ohne dass der Regler zuckt.
+                    self.start_straight_yaw += diff * 0.15
+                    self.start_straight_yaw = (self.start_straight_yaw + 180) % 360 - 180
+                
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
             self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
             self.start_straight_yaw = self.current_yaw
@@ -2295,20 +2338,26 @@ class WallFollower(Node):
         marker_array = MarkerArray()
         all_clusters = self.get_all_clusters_sorted(point_data)
 
-        self.get_logger().info(f"Verfolge die Spur... Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
+        #self.get_logger().info(f"Verfolge die Spur... Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
 
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
-        self.front_wall = merged_validated_clusters[1]
+        
         self.left_wall  = merged_validated_clusters[0]
+        self.front_wall = merged_validated_clusters[1]
+        self.right_wall = merged_validated_clusters[2]
+
+        # ---> AUTO-KALIBRIERUNG DER SPUR <---
+        self.auto_calibrate_straight_yaw(self.left_wall, self.right_wall)
+
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
         self.check_undetected_turn(front_wall_hnf)
 
-        if self.turn_count >= self.target_turns and front_wall_hnf[2] < 1.50:
+        # FIX: Auf None prüfen, bevor der Index abgefragt wird
+        if self.turn_count >= self.target_turns and front_wall_hnf is not None and front_wall_hnf[2] < 1.50:
             self.state = 'STOPPED'
             return
 
@@ -2339,7 +2388,7 @@ class WallFollower(Node):
             self.current_obstacle_cmd = current_obstacle.color
 
         self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_hnf)
-        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
+        #self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
 
         if front_wall_hnf is not None and aussenbande_hnf is not None:
             self.check_for_obstacle_color(point_data, (self.turn_count + 1), front_wall_hnf[2] - 0.75, 2.0)
@@ -2364,29 +2413,25 @@ class WallFollower(Node):
         self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
 
         # 2. PID-REGLER BERECHNEN
-        # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
         error = -target_x
         
-        # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
         self.integral_error += error
         self.integral_error = max(-1.0, min(1.0, self.integral_error))
         
-        # Derivative berechnen (Veränderung zum letzten Frame)
         derivative = error - self.prev_error
         self.prev_error = error
         
-        # Stellgröße (Lenkbefehl) berechnen
         steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
         
         # Auf ROS-Grenzen (-1.0 bis 1.0) kappen
         steering_cmd = max(-1.0, min(1.0, steering_cmd))
         
         # 3. BEFEHLE AN ESP SETZEN
-        cmd.linear.x = self.base_speed
+        cmd.linear.x = float(self.base_speed)
         cmd.angular.z = float(steering_cmd)
         self.pub_cmd_vel.publish(cmd)
-        self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
-        self.pub_cmd_vel.publish(cmd)
+        
+        #self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
         self.pub_markers.publish(marker_array)
 
     def handle_turn_maneuver(self, point_data):
@@ -2397,33 +2442,61 @@ class WallFollower(Node):
         self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
         front_wall_dist = (0, 0, 2.0)
         self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_dist)
-        #self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, 2.0)
-        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
+        
         # ---------------------------------------------------------
-        # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
+        # PHASE 1: ANNÄHERUNG (Berechnen, Lenken & auf Trigger warten)
         # ---------------------------------------------------------
         if self.turn_phase == 'APPROACH':
-            cmd.linear.x = self.base_speed
-            cmd.angular.z = 0.0
-            self.pub_cmd_vel.publish(cmd)
+            
             # 1. Wände tracken und Geometrie berechnen
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
+            
+            # liefert [Rechte Bande, Frontwand, Linke Bande]
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
             self.visualize_hnf_line(front_wall_params, m_id=550, farbe_name="rot", label="Front HNF")
             
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, current_obstacle,self.lane_ratio)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, current_obstacle, self.lane_ratio)
             
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             
-            #curve_radius_m, entry_distance_m = self.calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             
-            # 2. Trigger prüfen
-            # check_turn_trigger muss True zurückgeben, wenn die Distanz erreicht ist
+            # =========================================================
+            # 2. AKTIVER SINGLE-WALL PID FÜR DIE ANNÄHERUNG
+            # =========================================================
+            right_wall_cluster = validated_clusters[0]
+            left_wall_cluster = validated_clusters[2]
+            
+            if self.fahrtrichtung == 'links':
+                aussenbande_hnf = self.cluster_to_hnf(right_wall_cluster)
+                innenbande_hnf = None 
+            else:
+                aussenbande_hnf = self.cluster_to_hnf(left_wall_cluster)
+                innenbande_hnf = None
+
+            target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
+
+            if target_x is not None:
+                error = -target_x
+                derivative = error - self.prev_error
+                self.prev_error = error
+                
+                steering_cmd = (self.kp * error) + (self.kd * derivative)
+                # Kappen auf max. 30% Einschlag, da es hier nur um feine Stabilisierung geht
+                steering_cmd = max(-0.3, min(0.3, steering_cmd))
+            else:
+                steering_cmd = 0.0
+
+            cmd.linear.x = float(self.base_speed)
+            cmd.angular.z = float(steering_cmd)
+            self.pub_cmd_vel.publish(cmd)
+            # =========================================================
+            
+            # 3. Trigger prüfen
             if self.test_check_turn_trigger(entry_distance_m):
                 self.get_logger().info("Trigger erreicht. Wechsle in EXECUTE-Phase.")
                 # Daten für die Abschlussprüfung einfrieren
@@ -2432,6 +2505,10 @@ class WallFollower(Node):
                 self.start_turn_yaw = self.current_yaw
                 self.base_obst_cmd = self.current_obstacle_cmd
                 self.base_entry_distance = entry_distance_m
+                
+                # PID-Speicher leeren, damit die Kurvenausfahrt sauber startet
+                self.prev_error = 0.0
+                
                 self.turn_phase = 'EXECUTE'
                 
         # ---------------------------------------------------------
@@ -2462,11 +2539,10 @@ class WallFollower(Node):
             else:
                 front_wall_params = None
 
-
             # 3. Abschluss prüfen
             if self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params):
                 self.get_logger().info("Kurve physikalisch beendet.")
-                cmd.linear.x = self.base_speed
+                cmd.linear.x = float(self.base_speed)
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
