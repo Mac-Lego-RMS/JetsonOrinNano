@@ -2505,9 +2505,7 @@ class WallFollower(Node):
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
             
             # WICHTIG: Die Kurvenberechnung nutzt jetzt isoliert die EXIT-Daten!
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(
-                validated_clusters, obst_exit, self.exit_ratio_memory
-            )
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, obst_exit, self.exit_ratio_memory)
             
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
