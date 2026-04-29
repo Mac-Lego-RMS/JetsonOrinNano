@@ -191,12 +191,14 @@ void runCalibrationRoutine(SCSCL* servo) {
 
     leftLimit = probeLimit(servo, 1023);
 
-    softwareCenterPos = (leftLimit + rightLimit) / 2;
-    Serial.printf("ESP: Neue Mitte berechnet: %d\n", softwareCenterPos);
+    // --- NEU: Werte im NVS speichern ---
+    prefs.putInt("lLimit", leftLimit);
+    prefs.putInt("rLimit", rightLimit);
     
-    // Fahre zur ermittelten Mitte
+    softwareCenterPos = (leftLimit + rightLimit) / 2;
+    Serial.printf("ESP: Kalibrierung beendet & gespeichert. Mitte: %d\n", softwareCenterPos);
+    
     servo->WritePos(SERVO_ID, softwareCenterPos, 0, 600);
-    Serial.println("ESP: Kalibrierung abgeschlossen.");
 }
 
 // ==========================================
@@ -417,14 +419,18 @@ void setup() {
         sc09Servo.WritePos(SERVO_ID, startPos, 0, 0); 
     }
     
-    // NVS initialisieren und "steering" Namespace öffnen
-    prefs.begin("steering", false); 
-    trimOffset = prefs.getInt("offset", 0); // Lade gespeicherten Offset (Default 0)
+    // NVS initialisieren
+    prefs.begin("steering", false);
     
-    // Berechne die korrigierte Mitte basierend auf der letzten Kalibrierung
+    // Lade Limits (Default-Werte falls nichts gespeichert ist: 0 und 1023)
+    leftLimit = prefs.getInt("lLimit", 0);
+    rightLimit = prefs.getInt("rLimit", 1023);
+    trimOffset = prefs.getInt("offset", 0);
+    
+    // Berechne die Mitte basierend auf den geladenen Werten
     softwareCenterPos = ((leftLimit + rightLimit) / 2) + trimOffset;
-
-    Serial.printf("System Ready. Geladener Trim-Offset: %d\n", trimOffset);
+    
+    Serial.printf("System Ready. Geladene Limits: L:%d, R:%d | Trim: %d\n", leftLimit, rightLimit, trimOffset);
     Serial.println("Trim-Modus: 'A' (Links), 'D' (Rechts), 'S' (Speichern)");
 } // Ende von setup()
 
@@ -447,8 +453,8 @@ void loop() {
         // 1. Kalibrierung & Torque (wie gehabt)
         if (cmd == 'C' || cmd == 'c') {
             runCalibrationRoutine(&sc09Servo);
-            // Nach Kalibrierung Offset anwenden
-            softwareCenterPos += trimOffset;
+            // Nach Kalibrierung den aktuellen Offset wieder draufrechnen
+            softwareCenterPos += trimOffset; 
             sc09Servo.WritePos(SERVO_ID, softwareCenterPos, 0, 500);
         } 
         else if (cmd == 'T' || cmd == 't') {
