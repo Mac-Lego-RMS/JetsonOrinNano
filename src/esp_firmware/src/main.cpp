@@ -31,6 +31,9 @@ int trimOffset = 0; // Der gespeicherte Korrekturwert
 #define CMD_TORQUE      0x50 
 #define CMD_TRIM 0x60
 
+#define PIN_BUTTON      9
+#define CMD_BUTTON      0x70
+
 #define JETSON_TIMEOUT  5000 
 
 // ==========================================
@@ -56,20 +59,30 @@ TaskHandle_t MotorControlTaskHandle;
 // 3. KLASSEN FÜR AKTUATOREN
 // ==========================================
 
+
+volatile bool buttonTriggered = false;
+
+// Interrupt Service Routine (ISR)
+void IRAM_ATTR buttonISR() {
+    buttonTriggered = true;
+}
+
+
+
+
+
 class MotorDriver {
 private:
     uint8_t pwmPin, dirPin;
-    uint8_t pwmChannel; // Benötigt für ESP32 Core < 3.0.0
+
 public:
-    MotorDriver(uint8_t pwm, uint8_t dir, uint8_t channel = 0) 
-        : pwmPin(pwm), dirPin(dir), pwmChannel(channel) {}
+    MotorDriver(uint8_t pwm, uint8_t dir) 
+        : pwmPin(pwm), dirPin(dir) {}
         
     void begin() {
         pinMode(dirPin, OUTPUT);
-        
-        // Legacy ESP32 PWM API
-        ledcSetup(pwmChannel, 20000, 10); 
-        ledcAttachPin(pwmPin, pwmChannel);
+        // Neue ESP32 Core 3.x API: ledcAttach(pin, frequenz, auflösung)
+        ledcAttach(pwmPin, 20000, 10); 
         
         stop();
     }
@@ -77,13 +90,17 @@ public:
     void drive(bool reverse, uint16_t speed) {
         if (speed > 1023) speed = 1023;
         digitalWrite(dirPin, reverse ? HIGH : LOW);
-        ledcWrite(pwmChannel, speed); // Schreibe auf Kanal, nicht Pin
+        // Neue API: ledcWrite direkt auf den Pin, nicht auf den Kanal
+        ledcWrite(pwmPin, speed); 
     }
     
     void stop() {
-        ledcWrite(pwmChannel, 0);
+        ledcWrite(pwmPin, 0);
     }
 };
+
+
+
 
 // ==========================================
 // 4. MULTITHREADING: DER MOTOR-CONTROL TASK (Core 0)
@@ -222,6 +239,12 @@ public:
         if (millis() - lastPacketTime > JETSON_TIMEOUT) {
             targetSpeed = 0; 
         }
+    }
+
+    void sendButtonEvent() {
+        uint8_t packet[] = {START_BYTE, CMD_BUTTON, 0x01}; // 0x01 = Pressed
+        serialPort->write(packet, sizeof(packet));
+        Serial.println("ESP: Button pressed, Event an Jetson gesendet.");
     }
 
     void process() {
@@ -369,6 +392,9 @@ void setup() {
 
     planetaryMotor.begin();
     jetson.begin(115200);     
+    // Button Setup
+    pinMode(PIN_BUTTON, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), buttonISR, RISING); // RISING, da NC-Taster öffnet
 
     Serial2.begin(1000000, SERIAL_8N1, PIN_SERVO_RX, PIN_SERVO_TX);
     sc09Servo.pSerial = &Serial2; 
@@ -404,6 +430,17 @@ void setup() {
 
 
 void loop() {
+    if (buttonTriggered) {
+        buttonTriggered = false; // Flag sofort zurücksetzen
+        static unsigned long lastPressTime = 0;
+        
+        // 200 ms Entprellzeit
+        if (millis() - lastPressTime > 200) { 
+            lastPressTime = millis();
+            jetson.sendButtonEvent();
+            Serial.println("Button Pressed!");
+        }
+    }
     if (Serial.available() > 0) {
         char cmd = Serial.read();
         
