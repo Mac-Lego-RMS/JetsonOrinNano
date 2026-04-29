@@ -2254,65 +2254,64 @@ class WallFollower(Node):
         
         return distance
                 
-    def check_undetected_turn(self, front_wall_hnf):
+    def check_race_completion(self, front_wall_hnf):
+        """
+        Prüft, ob die geforderte Anzahl an Kurven und die Gesamtdrehung erreicht wurden
+        und stoppt den Roboter vor der letzten Frontwand.
+        """
         total_gedreht = abs(self.current_yaw - self.yaw_offset)
         min_total_rotation = self.target_turns * 89.0
+        
         if self.turn_count >= self.target_turns and total_gedreht >= min_total_rotation:
             if front_wall_hnf is not None:
                 closest_f = front_wall_hnf[2]
                 if closest_f < 1.50:
                     self.state = 'STOPPED'
-                    self.get_logger
-                    return
+                    self.get_logger().info(">>> ZIEL ERREICHT! Stoppe den Roboter. <<<")
+                    return True
+        return False
+
+    def check_undetected_turn(self):
+        """
+        Gyro-Fallback: Falls der LiDAR-Trigger ausfällt, der Roboter aber physisch 
+        eine Kurve fährt (Spurführung zieht ihn rum), wird die Kurve hier gezählt.
+        """
+        gedreht = abs(self.start_straight_yaw - self.current_yaw)
+        
+        if gedreht > 75.0:
+            self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der Geraden gedreht ({gedreht:.1f}°) <<<")
+            # Setzt die Referenz für die neue Gerade
+            self.start_straight_yaw = self.current_yaw
+            self.turn_count += 1
                 
     def auto_calibrate_straight_yaw(self, left_wall, right_wall):
-        """
-        Korrigiert den start_straight_yaw dynamisch anhand langer, stabiler Seitenwände.
-        Verhindert das Driften des virtuellen Koordinatensystems durch schlechte Kurvenausgänge.
-        """
         best_wall = None
         max_len = 0.0
 
-        # 1. Längste sichtbare Seitenwand finden
         for w in [left_wall, right_wall]:
             if w is not None and len(w) >= 5:
-                # Euklidische Länge der Wand berechnen
                 w_len = math.hypot(w[0][1] - w[-1][1], w[0][2] - w[-1][2])
                 if w_len > max_len:
                     max_len = w_len
                     best_wall = w
 
-        # 2. Nur kalibrieren, wenn die Wand lang genug ist (z.B. > 60 cm), 
-        # um kurze Störfragmente oder ausweichende Hindernisse zu ignorieren.
         if best_wall is not None and max_len > 0.60:
             wall_angle_local = self.get_cluster_angle(best_wall)
             
             if wall_angle_local is not None:
-                # Normieren: Seitenwände liegen um 0° (parallel zur Y-Achse)
                 local_angle_norm = wall_angle_local % 180
                 if local_angle_norm > 90:
                     local_angle_norm -= 180
 
-                # 3. Echten Spur-Winkel berechnen
-                # (Falls dein Gyro invertiert ist, musst du das Vorzeichen hier evtl. umdrehen: - local_angle_norm)
+                # 1. Messwert unendlich mitwachsen lassen
                 measured_track_yaw = self.current_yaw + local_angle_norm
-                measured_track_yaw = (measured_track_yaw + 180) % 360 - 180
 
-                # 4. Abweichung zwischen Messung und aktuellem Referenzwert
+                # 2. Nur die Differenz für den sauberen Kurzweg normalisieren
                 diff = (measured_track_yaw - self.start_straight_yaw + 180) % 360 - 180
 
-                # 5. Sanity-Check: Wir korrigieren nur, wenn der Fehler < 30° ist. 
-                # Das verhindert wilde Sprünge, falls das LiDAR extremen Müll liefert.
+                # 3. KORREKTUR: Den unendlichen Referenzwert sanft ziehen, OHNE ihn zu beschneiden
                 if abs(diff) < 30.0:
-                    # LOW-PASS FILTER: Wir korrigieren pro Frame nur um 15% (0.15).
-                    # Zieht den Wert in wenigen Millisekunden glatt, ohne dass der Regler zuckt.
                     self.start_straight_yaw += diff * 0.15
-                    self.start_straight_yaw = (self.start_straight_yaw + 180) % 360 - 180
-                
-        if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
-            self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
-            self.start_straight_yaw = self.current_yaw
-            self.turn_count += 1
 
     def execute_start(self, point_data):
         
@@ -2379,7 +2378,12 @@ class WallFollower(Node):
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
-        self.check_undetected_turn(front_wall_hnf)
+        # 1. ZIEL-PRÜFUNG: Wenn das Rennen vorbei ist, sofort abbrechen!
+        if self.check_race_completion(front_wall_hnf):
+            return
+            
+        # 2. GYRO-FALLBACK: Haben wir versehentlich eine Kurve genommen?
+        self.check_undetected_turn()
 
         # FIX: Auf None prüfen, bevor der Index abgefragt wird
         if self.turn_count >= self.target_turns and front_wall_hnf is not None and front_wall_hnf[2] < 1.50:
