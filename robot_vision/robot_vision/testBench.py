@@ -144,6 +144,8 @@ class WallFollower(Node):
 
         self.standard_lane_ratio = 0.30
         self.lane_ratio = self.standard_lane_ratio       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
+        self.exit_ratio_memory = 0.20 # Merkt sich den Kurven-Ausgang für den fließenden Übergang
+
         self.base_obst_cmd = None
         self.base_entry_distance = None
         self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
@@ -2090,22 +2092,27 @@ class WallFollower(Node):
 
         return zone_id
 
-    def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_hnf):
-        is_left = (self.fahrtrichtung == "links")
+    def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_hnf, apply_state=True, default_clear_ratio=None):
+        
+        # Fallback auf Standard, falls nichts übergeben wird (für normale Geradenfahrt)
+        if default_clear_ratio is None:
+            default_clear_ratio = self.standard_lane_ratio
 
+        is_left = (self.fahrtrichtung == "links")
+        target_ratio = default_clear_ratio # Startet mit dem übergebenen Wunsch-Wert
+        is_evading = False  
+
+        # 1. Ziel-Ratio und Evading-Status evaluieren
         if obstacle_cmd is None and obstacle is None:
-            self.lane_ratio = self.standard_lane_ratio
+            target_ratio = default_clear_ratio
+            
         elif (obstacle_cmd is not None and obstacle is None) or (obstacle_cmd is not None and not obstacle.is_localized):
+            is_evading = True
             if obstacle_cmd == "green":
-                if is_left:
-                    self.lane_ratio = 0.2
-                else: 
-                    self.lane_ratio = 0.8
+                target_ratio = 0.2 if is_left else 0.8
             else:
-                if is_left:
-                    self.lane_ratio = 0.8
-                else: 
-                    self.lane_ratio = 0.2
+                target_ratio = 0.8 if is_left else 0.2
+                
         else:
             obst_zone_id = obstacle.zone_id
             if front_wall_hnf is None:
@@ -2118,21 +2125,39 @@ class WallFollower(Node):
                     obst_passed = dist_front_wall < 1.25
                 else:
                     obst_passed = dist_front_wall < 0.75
+                    
             if obst_passed:
-                self.lane_ratio = self.standard_lane_ratio
+                target_ratio = default_clear_ratio
             else:
+                is_evading = True
                 obst_is_green = obstacle_cmd == "green"
                 obst_is_outer = obst_zone_id % 10 == 1
                 if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                    if obst_is_outer:
-                        self.lane_ratio = 0.3
-                    else:
-                        self.lane_ratio = 0.2
+                    target_ratio = 0.3 if obst_is_outer else 0.2
                 else:
-                    if obst_is_outer:
-                        self.lane_ratio = 0.8
-                    else:
-                        self.lane_ratio = 0.7
+                    target_ratio = 0.8 if obst_is_outer else 0.7
+
+        # =========================================================
+        # 2. DYNAMISCHER ÜBERGANG (Snap vs. Smooth)
+        # =========================================================
+        if apply_state:
+            if is_evading:
+                # HINDERNIS: Sofortiges Überschreiben für maximale Reaktionszeit
+                self.lane_ratio = target_ratio
+            else:
+                # KEIN HINDERNIS: Weicher Übergang (z.B. nach der Kurve zurück in die Mitte)
+                max_delta = 0.02  # Entspricht max. 2 cm seitlichem Drift pro Frame
+                diff = target_ratio - self.lane_ratio
+                
+                if diff > max_delta:
+                    self.lane_ratio += max_delta
+                elif diff < -max_delta:
+                    self.lane_ratio -= max_delta
+                else:
+                    self.lane_ratio = target_ratio
+
+        # Wir geben den Wert immer zurück, damit andere Funktionen damit rechnen können
+        return target_ratio
 
     def set_obstacle_position(self, point_data, u_profile_hnf):
         """
@@ -2439,34 +2464,56 @@ class WallFollower(Node):
         Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
         """
         cmd = Twist()
-        self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
-        front_wall_dist = (0, 0, 2.0)
-        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_dist)
         
+        # =========================================================
+        # 1. EXIT-RATIO (Für die Zielgerade NACH der Kurve)
+        # =========================================================
+        cmd_exit, obst_exit = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
+        
+        # Geändert: default_clear_ratio = 0.30
+        exit_ratio = self.set_lane_ratio_for_obstacle_cmd(cmd_exit, obst_exit, None, apply_state=False, default_clear_ratio=0.30)
+        
+        # Geändert: if-Fallback auf 0.30
+        if cmd_exit is None:
+            exit_ratio = 0.30 
+            
+        self.exit_ratio_memory = exit_ratio 
+        
+        # =========================================================
+        # 2. APPROACH-RATIO (Für die Annäherung VOR der Kurve)
+        # =========================================================
+        if self.front_wall is not None:
+            front_hnf = self.cluster_to_hnf(self.front_wall)
+        else:
+            front_hnf = (0, 0, 2.0)
+            
+        cmd_approach, obst_approach = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 1.20)
+        
+        # Geändert: default_clear_ratio = 0.65
+        self.set_lane_ratio_for_obstacle_cmd(cmd_approach, obst_approach, front_hnf, apply_state=True, default_clear_ratio=0.65)
+
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen, Lenken & auf Trigger warten)
         # ---------------------------------------------------------
         if self.turn_phase == 'APPROACH':
             
-            # 1. Wände tracken und Geometrie berechnen
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
             
-            # liefert [Rechte Bande, Frontwand, Linke Bande]
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-            
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-            self.visualize_hnf_line(front_wall_params, m_id=550, farbe_name="rot", label="Front HNF")
             
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, current_obstacle, self.lane_ratio)
+            # WICHTIG: Die Kurvenberechnung nutzt jetzt isoliert die EXIT-Daten!
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(
+                validated_clusters, obst_exit, self.exit_ratio_memory
+            )
             
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
-            
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             
             # =========================================================
-            # 2. AKTIVER SINGLE-WALL PID FÜR DIE ANNÄHERUNG
+            # AKTIVER SINGLE-WALL PID FÜR DIE ANNÄHERUNG
             # =========================================================
             right_wall_cluster = validated_clusters[0]
             left_wall_cluster = validated_clusters[2]
@@ -2486,7 +2533,6 @@ class WallFollower(Node):
                 self.prev_error = error
                 
                 steering_cmd = (self.kp * error) + (self.kd * derivative)
-                # Kappen auf max. 30% Einschlag, da es hier nur um feine Stabilisierung geht
                 steering_cmd = max(-0.3, min(0.3, steering_cmd))
             else:
                 steering_cmd = 0.0
@@ -2494,32 +2540,34 @@ class WallFollower(Node):
             cmd.linear.x = float(self.base_speed)
             cmd.angular.z = float(steering_cmd)
             self.pub_cmd_vel.publish(cmd)
+            
             # =========================================================
             
             # 3. Trigger prüfen
             if self.test_check_turn_trigger(entry_distance_m):
                 self.get_logger().info("Trigger erreicht. Wechsle in EXECUTE-Phase.")
-                # Daten für die Abschlussprüfung einfrieren
                 self.saved_intersection_angle = intersection_angle
                 self.saved_curve_radius_m = curve_radius_m
                 self.start_turn_yaw = self.current_yaw
-                self.base_obst_cmd = self.current_obstacle_cmd
+                
+                # Wir speichern uns, was wir beim Kurven-EINTRITT für den AUSGANG erwartet haben
+                self.base_obst_cmd = cmd_exit 
                 self.base_entry_distance = entry_distance_m
                 
                 # PID-Speicher leeren, damit die Kurvenausfahrt sauber startet
                 self.prev_error = 0.0
-                
                 self.turn_phase = 'EXECUTE'
                 
         # ---------------------------------------------------------
         # PHASE 2: AUSFÜHRUNG (Servo lenkt, Gyro prüft)
         # ---------------------------------------------------------
         elif self.turn_phase == 'EXECUTE':          
-            # 3. Radius stur nach interpolierter Ratio berechnen
-            if self.current_obstacle_cmd != self.base_obst_cmd:
-                if self.current_obstacle_cmd is not None:
+            
+            # Mid-Turn Korrektur: Hat sich das Hindernis auf der ZIEL-Geraden plötzlich geändert?
+            if cmd_exit != self.base_obst_cmd:
+                if cmd_exit is not None:
                     is_left = (self.fahrtrichtung == "links")
-                    needs_inner = (self.current_obstacle_cmd == "green" and is_left) or (self.current_obstacle_cmd == "red" and not is_left)
+                    needs_inner = (cmd_exit == "green" and is_left) or (cmd_exit == "red" and not is_left)
                     min_r = self.MIN_TURN_RADIUS_M
                     max_r = self.base_entry_distance - 0.15
                     
@@ -2528,9 +2576,10 @@ class WallFollower(Node):
                     else:
                         self.saved_curve_radius_m = min(max_r, self.MAX_KINEMATIC_RADIUS_M)
                     
-                    self.get_logger().warn(f"MID-TURN AUSWEICHEN!. Radius: {self.saved_curve_radius_m:.2f}m")
+                    self.get_logger().warn(f"MID-TURN AUSWEICHEN! Neues Radius-Ziel: {self.saved_curve_radius_m:.2f}m")
+                    self.base_obst_cmd = cmd_exit # Update, um Endlos-Neuberechnung zu verhindern
 
-            # 4. Ausführen und Tracken
+            # Ausführen und Tracken
             self.execute_turn(self.saved_curve_radius_m)
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             
@@ -2539,16 +2588,24 @@ class WallFollower(Node):
             else:
                 front_wall_params = None
 
-            # 3. Abschluss prüfen
+            # Abschluss prüfen
             if self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params):
                 self.get_logger().info("Kurve physikalisch beendet.")
+                
+                # DER MAGISCHE HANDOFF: 
+                # Der Roboter verlässt die Kurve physikalisch auf der exit_ratio.
+                self.lane_ratio = self.exit_ratio_memory
+                
                 cmd.linear.x = float(self.base_speed)
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
+                
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
                 self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle an die main_logic
                 self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
+                self.prev_error = 0.0
+                self.integral_error = 0.0
     
     def execute_stop(self):
             cmd = Twist()
