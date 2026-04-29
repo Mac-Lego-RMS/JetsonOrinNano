@@ -7,7 +7,7 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 import threading
-from sensor_msgs.msg import LaserScan, Imu, Image
+from sensor_msgs.msg import LaserScan, Imu, Image, Bool
 from geometry_msgs.msg import Twist, Point
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import String
@@ -187,6 +187,18 @@ class WallFollower(Node):
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
+
+
+        # Subscriber für den Hardware-Button
+        self.button_sub = self.create_subscription(
+            Bool,
+            '/button_state',
+            self.button_callback,
+            10
+        )
+
+        self.button_state = False
+
         # --------------------------------
         # --- YOLO - Global Parameters ---
         # --------------------------------
@@ -259,6 +271,14 @@ class WallFollower(Node):
         self.test_is_turning = False
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
+
+
+    def button_callback(self, msg):
+        if msg.data:  # msg.data ist True, wenn der Button gedrückt wurde
+            self.get_logger().info("Hardware-Interrupt empfangen. Trigger ausgelöst.")
+            self.button_state = True
+        
+        
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
