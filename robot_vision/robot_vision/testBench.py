@@ -7,10 +7,10 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 import threading
-from sensor_msgs.msg import LaserScan, Imu, Image, Bool
+from sensor_msgs.msg import LaserScan, Imu, Image
 from geometry_msgs.msg import Twist, Point
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from rclpy.qos import qos_profile_sensor_data
 import math
 
@@ -142,7 +142,7 @@ class WallFollower(Node):
         self.lookahead_dist_straight = 0.50    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.15       
 
-        self.standard_lane_ratio = 0.30
+        self.standard_lane_ratio = 0.65
         self.lane_ratio = self.standard_lane_ratio       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
         self.exit_ratio_memory = 0.20 # Merkt sich den Kurven-Ausgang für den fließenden Übergang
 
@@ -184,8 +184,8 @@ class WallFollower(Node):
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 275.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 275.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 0.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 0.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -454,7 +454,8 @@ class WallFollower(Node):
         marker_array.markers.append(marker)
     
     def validate_clusters_straight(self, clusters): 
-        u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
+        # ---> FIX: Einheitlicher Standard (0=Links, 1=Front, 2=Rechts) <---
+        u_profile = [None, None, None] 
         if not clusters:
             return u_profile
 
@@ -464,7 +465,6 @@ class WallFollower(Node):
         # ==========================================
         # 1. GYRO-KOMPENSATION (Virtueller Spur-Frame)
         # ==========================================
-        # Differenz berechnen: Wie weit steht der Roboter schräg in der Bahn?
         delta_yaw = self.current_yaw - self.start_straight_yaw
         delta_rad = math.radians(delta_yaw)
         cos_d = math.cos(delta_rad)
@@ -476,7 +476,6 @@ class WallFollower(Node):
                 continue
 
             # A) WINKEL KOMPENSIEREN
-            # Wir rechnen den lokalen Wandwinkel in den globalen Spur-Winkel um
             lane_angle = (raw_angle + delta_yaw) % 180
             if lane_angle > 90:
                 lane_angle -= 180
@@ -489,23 +488,19 @@ class WallFollower(Node):
             mean_x_local = sum(p[1] for p in c) / len(c)
             mean_y_local = sum(p[2] for p in c) / len(c)
 
-            # Rotation der Koordinaten zurück in die ideale Fahrtrichtung
             ideal_x = mean_x_local * cos_d - mean_y_local * sin_d
             ideal_y = mean_x_local * sin_d + mean_y_local * cos_d
 
-            # C) KLASSIFIZIEREN (Basierend auf idealen Werten)
-            # Seitenwände liegen in der idealen Spur bei ~0°
+            # C) KLASSIFIZIEREN
             if angle_norm <= 45.0:
-                # Wir lassen einen großzügigen X-Bereich von 1.5m zu
                 if abs(ideal_x) <= 1.5:
                     side_candidates.append({'cluster': c, 'ideal_x': ideal_x})
             else:
-                # Frontwände liegen bei ~90°
                 if ideal_y >= 0.20:
                     front_candidates.append({'cluster': c, 'ideal_y': ideal_y})
 
         # ==========================================
-        # 2. SEITENWÄNDE ZUORDNEN
+        # 2. SEITENWÄNDE ZUORDNEN (0=Links, 2=Rechts)
         # ==========================================
         if len(side_candidates) >= 2:
             # Sortierung nach idealer X-Position (Rechts ist positiv, Links negativ)
@@ -517,26 +512,25 @@ class WallFollower(Node):
             track_width = abs(c_right['ideal_x'] - c_left['ideal_x'])
             
             if 0.70 <= track_width <= 1.30:
-                u_profile[0] = c_right['cluster']
-                u_profile[2] = c_left['cluster']
+                u_profile[0] = c_left['cluster']   # X-Negativ -> Links
+                u_profile[2] = c_right['cluster']  # X-Positiv -> Rechts
             else:
-                # Downgrade: Nimm den längsten Cluster
                 side_candidates.sort(key=lambda item: len(item['cluster']), reverse=True)
                 best_c = side_candidates[0]
                 if best_c['ideal_x'] > 0:
-                    u_profile[0] = best_c['cluster']
+                    u_profile[2] = best_c['cluster'] # X-Positiv -> Rechts
                 else:
-                    u_profile[2] = best_c['cluster']
+                    u_profile[0] = best_c['cluster'] # X-Negativ -> Links
                     
         elif len(side_candidates) == 1:
             best_c = side_candidates[0]
             if best_c['ideal_x'] > 0:
-                u_profile[0] = best_c['cluster']
+                u_profile[2] = best_c['cluster'] # X-Positiv -> Rechts
             else:
-                u_profile[2] = best_c['cluster']
+                u_profile[0] = best_c['cluster'] # X-Negativ -> Links
 
         # ==========================================
-        # 3. FRONTWAND ZUORDNEN
+        # 3. FRONTWAND ZUORDNEN (1=Front)
         # ==========================================
         if front_candidates:
             groups = []
@@ -555,7 +549,6 @@ class WallFollower(Node):
 
             valid_wall_groups = []
             for g in groups:
-                # Breite im idealen Frame berechnen
                 all_x_ideal = [p[1] * cos_d - p[2] * sin_d for cl in g['clusters'] for p in cl]
                 total_width = max(all_x_ideal) - min(all_x_ideal)
                 
@@ -612,7 +605,9 @@ class WallFollower(Node):
         if len(clusters) >= 2:
             minimal_cluster_size = 25
             ordered = self.sort_clusters_right_to_left(clusters)
-            u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
+            # ---> FIX: Standardisiert auf 0=Links, 1=Front, 2=Rechts <---
+            u_profile = [None, None, None] 
+            
             if any(c is front_wall_cluster for c in ordered):
                 u_profile[1] = front_wall_cluster
                 fw_index = next(i for i, c in enumerate(ordered) if c is front_wall_cluster)
@@ -620,24 +615,20 @@ class WallFollower(Node):
                 self.get_logger().warn("Frontwand nicht in den Clustern gefunden. Kann Kurvenprofil nicht validieren.")
                 return [None, None, None]
                 
-            # Der Cluster LINKS von der Frontwand hat einen KLEINEREN Index
+            # Der Cluster LINKS von der Frontwand hat einen GRÖSSEREN Index (da ordered von rechts nach links sortiert ist)
+            while u_profile[0] is None and fw_index < len(ordered) - 1:
+                if len(ordered[fw_index + 1]) > minimal_cluster_size:
+                    u_profile[0] = ordered[fw_index + 1] # Index 0 = Links
+                else: 
+                    ordered.pop(fw_index + 1)
+
+            # Der Cluster RECHTS von der Frontwand hat einen KLEINEREN Index
             while u_profile[2] is None and fw_index > 0:
                 if len(ordered[fw_index - 1]) > minimal_cluster_size:
-                    u_profile[2] = ordered[fw_index - 1]
-                    #self.get_logger().info(f"Cluster links von der Frontwand gefunden. Größe: {len(ordered[fw_index - 1])} Punkte.")
+                    u_profile[2] = ordered[fw_index - 1] # Index 2 = Rechts
                 else: 
                     ordered.pop(fw_index - 1)
                     fw_index -= 1
-
-            # Der Cluster RECHTS von der Frontwand hat einen GRÖSSEREN Index
-            while u_profile[0] is None and fw_index < len(ordered) - 1:
-                if len(ordered[fw_index + 1]) > minimal_cluster_size:
-                   
-                    u_profile[0] = ordered[fw_index + 1]
-                    #self.get_logger().info(f"Cluster rechts von der Frontwand gefunden. Größe: {len(ordered[fw_index + 1])} Punkte.")
-                    
-                else: 
-                    ordered.pop(fw_index + 1)
 
             angles = [self.get_cluster_angle(c) for c in u_profile]
             if angles[1] is None:
@@ -1022,7 +1013,7 @@ class WallFollower(Node):
         # HILFSFUNKTION: VIRTUELLE WAND PROJIZIEREN
         # ==========================================
         def project_opposite_wall(hnf_base):
-            if not hnf_base: return None
+            if hnf_base is None: return None
             nx, ny, d = hnf_base
             new_nx, new_ny = -nx, -ny
             new_d = 1.0 - d  # Nutzt dynamische Spurbreite statt Magic Number 1.0
@@ -1044,11 +1035,11 @@ class WallFollower(Node):
         # ==========================================
         # 2. FEHLENDE WÄNDE SYNTHETISIEREN (Dein Block!)
         # ==========================================
-        if hnf_innen and not hnf_aussen:
+        if hnf_innen is not None and hnf_aussen is None:
             # Wir haben nur Innen. Projiziere Außen virtuell!
             hnf_aussen = project_opposite_wall(hnf_innen)
             
-        elif hnf_aussen and not hnf_innen:
+        elif hnf_aussen is not None and hnf_innen is None:
             # Wir haben nur Außen. Projiziere Innen virtuell!
             hnf_innen = project_opposite_wall(hnf_aussen)
 
@@ -1292,10 +1283,15 @@ class WallFollower(Node):
     def visualize_clusters(self, kandidaten_RVIZ):
         if self.fahrtrichtung == 'links':
             innenbande = self.left_wall
+            innenbande_hnf = self.cluster_to_hnf(innenbande)
             aussenbande = self.right_wall
+            aussenbande_hnf = self.cluster_to_hnf(aussenbande)
         else:
             innenbande = self.right_wall
+            innenbande_hnf = self.cluster_to_hnf(innenbande)
+            innenbande_hnf = self.hnf_right_wall
             aussenbande = self.left_wall
+            aussenbande_hnf = self.cluster_to_hnf(aussenbande)
             
         #target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
         
@@ -1305,12 +1301,17 @@ class WallFollower(Node):
             # ALTE LOGIK FÜR DIE GERADE
             if self.fahrtrichtung == 'links':
                 innenbande = self.left_wall
+                innenbande_hnf = self.cluster_to_hnf(innenbande)
                 aussenbande = self.right_wall
+                aussenbande_hnf = self.cluster_to_hnf(aussenbande)
             else:
                 innenbande = self.right_wall
+                innenbande_hnf = self.cluster_to_hnf(innenbande)
+                innenbande_hnf = self.hnf_right_wall
                 aussenbande = self.left_wall
+                aussenbande_hnf = self.cluster_to_hnf(aussenbande)
                 
-            target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
+            target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
             
             if target_x is not None and target_y is not None:
                 # Cyan für Geradeaus-Fahrt
@@ -1353,14 +1354,14 @@ class WallFollower(Node):
             self.send_text(marker_array, m_id=10, text=richtung_text, x=0.0, y=0.0, color=(1.0, 1.0, 0.0)) # Gelb'''
 
             # 2. Beschrifte die Innenbande
-            if innenbande and len(innenbande) > 0:
+            if innenbande is not None and len(innenbande) > 0:
                 # Wir platzieren den Text in der Mitte der Wand
                 mitte_x = sum(p[1] for p in innenbande) / len(innenbande)
                 mitte_y = sum(p[2] for p in innenbande) / len(innenbande)
                 self.send_text(marker_array, m_id=11, text="INNEN", x=mitte_x, y=mitte_y, color=(1.0, 0.5, 0.0)) # Orange
 
             # 3. Beschrifte die Außenbande
-            if aussenbande and len(aussenbande) > 0:
+            if aussenbande is not None and len(aussenbande) > 0:
                 mitte_x = sum(p[1] for p in aussenbande) / len(aussenbande)
                 mitte_y = sum(p[2] for p in aussenbande) / len(aussenbande)
                 self.send_text(marker_array, m_id=12, text="AUSSEN", x=mitte_x, y=mitte_y, color=(1.0, 0.0, 1.0)) # Magenta
@@ -2336,15 +2337,22 @@ class WallFollower(Node):
     def execute_start(self, point_data):
         
         self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
+
+        if not self.imu_ready:
+            self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
+            return  # Brich hier ab, mach noch nichts!   
+        self.yaw_offset = self.current_yaw
+        self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen
+
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
         self.right_wall = merged_validated_clusters[2]
         self.front_wall = merged_validated_clusters[1]
         self.left_wall  = merged_validated_clusters[0]
-        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
-        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
-        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+        #right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+        #front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        #left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
         self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
 
@@ -2358,22 +2366,17 @@ class WallFollower(Node):
                     self.get_logger().info(f"Scanne Strecke... Länge Links: {left_len:.2f}m, Länge Rechts: {right_len:.2f}m")
                     
                     # Wir brauchen einen deutlichen Unterschied (z.B. 40 cm), um sicher zu sein!
-                    if left_len > right_len + 0.30:
+                    if left_len > right_len + 0.40:
                         self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
                         self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
-                    elif right_len > left_len + 0.30:
+                    elif right_len > left_len + 0.40:
                         self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
                         self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
-                    self.get_logger().info("Fehler! Keine Wand ist länger als die")
+                    else:
+                        self.get_logger().info("Fehler! Keine Wand ist länger als die andere!")
             else:
                 self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                 return
-
-        if not self.imu_ready:
-            self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
-            return  # Brich hier ab, mach noch nichts!   
-        self.yaw_offset = self.current_yaw
-        self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen
 
         self.state = 'FOLLOW_LANE'
 
@@ -2381,7 +2384,6 @@ class WallFollower(Node):
         cmd = Twist()
         marker_array = MarkerArray()
         all_clusters = self.get_all_clusters_sorted(point_data)
-
         #self.get_logger().info(f"Verfolge die Spur... Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
 
         validated_clusters = self.validate_clusters_straight(all_clusters)
@@ -2409,7 +2411,7 @@ class WallFollower(Node):
         if self.turn_count >= self.target_turns and front_wall_hnf is not None and front_wall_hnf[2] < 1.50:
             self.state = 'STOPPED'
             return
-
+        self.visualize_clusters([self.front_wall, self.left_wall, self.right_wall])
         self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
         self.visualize_hnf_line(left_wall_hnf, m_id=111, farbe_name="blau", label="Links HNF")
         self.visualize_hnf_line(right_wall_hnf, m_id=112, farbe_name="gruen", label="Rechts HNF")
