@@ -142,8 +142,12 @@ class WallFollower(Node):
         self.lookahead_dist_straight = 0.50    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.15       
 
-        self.standard_lane_ratio = 0.30
-        self.lane_ratio = self.standard_lane_ratio       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
+        self.standard_lane_ratio_approach = 0.65
+        self.standard_lane_ratio_exit = 0.30
+        self.lane_ratio = self.standard_lane_ratio_approach       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
+        self.lane_ratio_approach = self.standard_lane_ratio_approach
+        self.lane_ratio_exit = self.standard_lane_ratio_exit
+
         self.base_obst_cmd = None
         self.base_entry_distance = None
         self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
@@ -2091,49 +2095,77 @@ class WallFollower(Node):
 
         return zone_id
 
-    def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_hnf):
+    def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
-
-        if obstacle_cmd is None and obstacle is None:
-            self.lane_ratio = self.standard_lane_ratio
-        elif (obstacle_cmd is not None and obstacle is None) or (obstacle_cmd is not None and not obstacle.is_localized):
-            if obstacle_cmd == "green":
-                if is_left:
-                    self.lane_ratio = 0.2
-                else: 
-                    self.lane_ratio = 0.8
-            else:
-                if is_left:
-                    self.lane_ratio = 0.8
-                else: 
-                    self.lane_ratio = 0.2
+        max_shift = 0.03
+        
+        # 1. BASIS-ZIEL DEFINIEREN (Abhängig vom Streckenabschnitt)
+        if is_turn_exit:
+            target_ratio = self.standard_lane_ratio_exit
         else:
-            obst_zone_id = obstacle.zone_id
-            if front_wall_hnf is None:
+            target_ratio = self.standard_lane_ratio_approach
+            
+        is_evading = False  # Trackt, ob wir hart ausweichen müssen
+
+        # ==========================================
+        # 2. HINDERNIS-LOGIK (Überschreibt das Basis-Ziel)
+        # ==========================================
+        if obstacle_cmd is not None:
+            if obstacle is None or not obstacle.is_localized:
+                # Hindernis gesehen, aber noch nicht verortet -> Hartes Ausweichen
+                is_evading = True
+                if obstacle_cmd == "green":
+                    target_ratio = 0.25 if is_left else 0.75
+                else:
+                    target_ratio = 0.75 if is_left else 0.25
+            else:
+                # Hindernis ist verortet
+                obst_zone_id = obstacle.zone_id
                 obst_passed = False
-            else:
-                dist_front_wall = front_wall_hnf[2]
-                if obst_zone_id <= 1:
-                    obst_passed = dist_front_wall < 1.75
-                elif obst_zone_id <= 11:
-                    obst_passed = dist_front_wall < 1.25
-                else:
-                    obst_passed = dist_front_wall < 0.75
-            if obst_passed:
-                self.lane_ratio = self.standard_lane_ratio
-            else:
-                obst_is_green = obstacle_cmd == "green"
-                obst_is_outer = obst_zone_id % 10 == 1
-                if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                    if obst_is_outer:
-                        self.lane_ratio = 0.3
+                
+                if front_wall_dist is not None:
+                    if obst_zone_id <= 1:
+                        obst_passed = front_wall_dist < 1.75
+                    elif obst_zone_id <= 11:
+                        obst_passed = front_wall_dist < 1.25
                     else:
-                        self.lane_ratio = 0.2
-                else:
-                    if obst_is_outer:
-                        self.lane_ratio = 0.8
+                        obst_passed = front_wall_dist < 0.75
+                
+                # Wenn wir noch nicht dran vorbei sind -> Hartes Ausweichen
+                if not obst_passed:
+                    is_evading = True
+                    obst_is_green = obstacle_cmd == "green"
+                    obst_is_outer = obst_zone_id % 10 == 1
+                    
+                    if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
+                        target_ratio = 0.30 if obst_is_outer else 0.20
                     else:
-                        self.lane_ratio = 0.7
+                        target_ratio = 0.80 if obst_is_outer else 0.70
+
+        # ==========================================
+        # 3. STATE ANWENDEN ODER ZUKUNFT ZURÜCKGEBEN
+        # ==========================================
+        
+        # Wenn wir nur vorausplanen (für Kurvenausgang), gib den rohen Wert ohne Glättung zurück!
+        if not apply_state:
+            return target_ratio
+            
+        # Wenn wir den Roboter bewegen (auf der Geraden oder im Approach):
+        if is_evading:
+            # GEFAHR: Kein Glätten! Wir springen sofort auf die Ausweichspur.
+            dist_to_inner_wall = target_ratio
+        else:
+            # FREIE FAHRT: Wir glätten den Übergang (Slew Rate Limiter)
+            diff = target_ratio - self.lane_ratio
+            
+            if diff > max_shift:
+                dist_to_inner_wall = self.lane_ratio + max_shift
+            elif diff < -max_shift:
+                dist_to_inner_wall = self.lane_ratio - max_shift
+            else:
+                dist_to_inner_wall = target_ratio
+
+        return dist_to_inner_wall
 
     def set_obstacle_position(self, point_data, u_profile_hnf):
         """
@@ -2338,7 +2370,8 @@ class WallFollower(Node):
         else: 
             self.current_obstacle_cmd = current_obstacle.color
 
-        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_hnf)
+        front_dist = front_wall_hnf[2] if front_wall_hnf is not None else None
+        self.lane_ratio = self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_dist)
         self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
 
         if front_wall_hnf is not None and aussenbande_hnf is not None:
@@ -2394,11 +2427,10 @@ class WallFollower(Node):
         Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
         """
         cmd = Twist()
-        self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
-        front_wall_dist = (0, 0, 2.0)
-        self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_wall_dist)
+        exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
+        self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
         #self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, 2.0)
-        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
+        self.get_logger().info(f"Current_Obst_Cmd: {exit_obstacle_cmd}, Current_Obst: {exit_obstacle} , Lane_Ratio: {self.lane_ratio}")
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
         # ---------------------------------------------------------
@@ -2415,11 +2447,10 @@ class WallFollower(Node):
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
             self.visualize_hnf_line(front_wall_params, m_id=550, farbe_name="rot", label="Front HNF")
             
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, current_obstacle,self.lane_ratio)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, exit_obstacle, self.lane_ratio_exit)
             
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             
-            #curve_radius_m, entry_distance_m = self.calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             
             # 2. Trigger prüfen
@@ -2469,6 +2500,8 @@ class WallFollower(Node):
                 cmd.linear.x = self.base_speed
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
+
+                self.lane_ratio = self.lane_ratio_exit
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
                 self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle an die main_logic
                 self.turn_count += 1
