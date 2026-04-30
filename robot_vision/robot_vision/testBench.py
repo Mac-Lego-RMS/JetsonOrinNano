@@ -2278,6 +2278,28 @@ class WallFollower(Node):
             self.start_straight_yaw = self.current_yaw
             self.turn_count += 1
 
+    def evaluate_steering_straight(self, innenbande_hnf, aussenbande_hnf):
+        target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
+        # 2. PID-REGLER BERECHNEN
+        # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
+        error = -target_x
+        
+        # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
+        self.integral_error += error
+        self.integral_error = max(-1.0, min(1.0, self.integral_error))
+        
+        # Derivative berechnen (Veränderung zum letzten Frame)
+        derivative = error - self.prev_error
+        self.prev_error = error
+        
+        # Stellgröße (Lenkbefehl) berechnen
+        steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
+        
+        # Auf ROS-Grenzen (-1.0 bis 1.0) kappen
+        steering_cmd = max(-1.0, min(1.0, steering_cmd))
+
+        return steering_cmd
+
     def execute_start(self, point_data):
         
         self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
@@ -2385,34 +2407,12 @@ class WallFollower(Node):
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
                 self.get_logger().warn(f">>> {self.state} EINGELEITET<<<")
-                # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
-                self.prev_error = 0.0
-                self.integral_error = 0.0
                 return
             else:
                 if front_dist < 1.40:
                     self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
         
-        target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
-        self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
-
-        # 2. PID-REGLER BERECHNEN
-        # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
-        error = -target_x
-        
-        # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
-        self.integral_error += error
-        self.integral_error = max(-1.0, min(1.0, self.integral_error))
-        
-        # Derivative berechnen (Veränderung zum letzten Frame)
-        derivative = error - self.prev_error
-        self.prev_error = error
-        
-        # Stellgröße (Lenkbefehl) berechnen
-        steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
-        
-        # Auf ROS-Grenzen (-1.0 bis 1.0) kappen
-        steering_cmd = max(-1.0, min(1.0, steering_cmd))
+        steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
         
         # 3. BEFEHLE AN ESP SETZEN
         cmd.linear.x = self.base_speed
@@ -2435,22 +2435,31 @@ class WallFollower(Node):
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
         # ---------------------------------------------------------
         if self.turn_phase == 'APPROACH':
-            cmd.linear.x = self.base_speed
-            cmd.angular.z = 0.0
-            self.pub_cmd_vel.publish(cmd)
             # 1. Wände tracken und Geometrie berechnen
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-            
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
+
+            right_wall_hnf = self.cluster_to_hnf(validated_clusters[0])
+            left_wall_hnf = self.cluster_to_hnf(validated_clusters[2])
+            
+            if self.fahrtrichtung == 'links':
+                innenbande_hnf = left_wall_hnf
+                aussenbande_hnf = right_wall_hnf
+            else:
+                innenbande_hnf = right_wall_hnf
+                aussenbande_hnf = left_wall_hnf
+
+            front_dist = front_wall_hnf[2] if front_wall_hnf is not None else 2.0
+            self.lane_ratio = self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, self.obstacle_memory[self.turn_count % 4], front_dist, is_turn_exit=False, apply_state=True)
+
             self.visualize_hnf_line(front_wall_params, m_id=550, farbe_name="rot", label="Front HNF")
+            steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
             
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, exit_obstacle, self.lane_ratio_exit)
-            
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
-            
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             
             # 2. Trigger prüfen
@@ -2463,7 +2472,18 @@ class WallFollower(Node):
                 self.start_turn_yaw = self.current_yaw
                 self.base_obst_cmd = self.current_obstacle_cmd
                 self.base_entry_distance = entry_distance_m
+
+                cmd.linear.x = self.base_speed
+                cmd.angular.z = 0.0
+                self.pub_cmd_vel.publish(cmd)
+                
                 self.turn_phase = 'EXECUTE'
+                return
+            
+            cmd.linear.x = self.base_speed
+            cmd.angular.z = float(steering_cmd)
+            self.pub_cmd_vel.publish(cmd)
+
                 
         # ---------------------------------------------------------
         # PHASE 2: AUSFÜHRUNG (Servo lenkt, Gyro prüft)
@@ -2504,6 +2524,9 @@ class WallFollower(Node):
                 self.lane_ratio = self.lane_ratio_exit
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
                 self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle an die main_logic
+                # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
+                self.prev_error = 0.0
+                self.integral_error = 0.0
                 self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
     
