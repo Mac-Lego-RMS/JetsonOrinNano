@@ -177,15 +177,15 @@ class WallFollower(Node):
 
         self.TRACK_WIDTH_M = 1.0
         self.ROBOT_WIDTH_M = 0.12
-        self.LIDAR_OFFSET_M = 0.0
+        self.LIDAR_OFFSET_M = 0.12
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
         self.IDEAL_RADIUS_M = 0.25
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 0.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 0.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 350.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 350.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -512,22 +512,22 @@ class WallFollower(Node):
             track_width = abs(c_right['ideal_x'] - c_left['ideal_x'])
             
             if 0.70 <= track_width <= 1.30:
-                u_profile[0] = c_left['cluster']   # X-Negativ -> Links
-                u_profile[2] = c_right['cluster']  # X-Positiv -> Rechts
+                u_profile[2] = c_left['cluster']   # X-Negativ -> Links
+                u_profile[0] = c_right['cluster']  # X-Positiv -> Rechts
             else:
                 side_candidates.sort(key=lambda item: len(item['cluster']), reverse=True)
                 best_c = side_candidates[0]
                 if best_c['ideal_x'] > 0:
-                    u_profile[2] = best_c['cluster'] # X-Positiv -> Rechts
+                    u_profile[0] = best_c['cluster'] # X-Positiv -> Rechts
                 else:
-                    u_profile[0] = best_c['cluster'] # X-Negativ -> Links
+                    u_profile[2] = best_c['cluster'] # X-Negativ -> Links
                     
         elif len(side_candidates) == 1:
             best_c = side_candidates[0]
             if best_c['ideal_x'] > 0:
-                u_profile[2] = best_c['cluster'] # X-Positiv -> Rechts
+                u_profile[0] = best_c['cluster'] # X-Positiv -> Rechts
             else:
-                u_profile[0] = best_c['cluster'] # X-Negativ -> Links
+                u_profile[2] = best_c['cluster'] # X-Negativ -> Links
 
         # ==========================================
         # 3. FRONTWAND ZUORDNEN (1=Front)
@@ -1009,6 +1009,14 @@ class WallFollower(Node):
         target_y = self.lookahead_dist_straight
         target_x = 0.0
         
+        if hnf_innen is not None and hnf_innen[2] > 1.2:
+            # self.get_logger().warn(f"Ignoriere Innenbande (unplausibel weit weg: {hnf_innen[2]:.2f}m)")
+            hnf_innen = None
+            
+        if hnf_aussen is not None and hnf_aussen[2] > 1.2:
+            # self.get_logger().warn(f"Ignoriere Außenbande (unplausibel weit weg: {hnf_aussen[2]:.2f}m)")
+            hnf_aussen = None
+
         # ==========================================
         # HILFSFUNKTION: VIRTUELLE WAND PROJIZIEREN
         # ==========================================
@@ -1023,14 +1031,6 @@ class WallFollower(Node):
                 new_d = abs(new_d)
             return (new_nx, new_ny, new_d)
 
-        # ==========================================
-        # 1. STÖRENDE WÄNDE IGNORIEREN (Wand-Kuschler)
-        # ==========================================
-        if self.current_obstacle_cmd != "CLEAR":
-            if self.lane_ratio < 0.5:
-                hnf_aussen = None  # Wir weichen aus -> Außenbande verwerfen
-            else:
-                hnf_innen = None   # Wir weichen aus -> Innenbande verwerfen
 
         # ==========================================
         # 2. FEHLENDE WÄNDE SYNTHETISIEREN (Dein Block!)
@@ -1289,7 +1289,6 @@ class WallFollower(Node):
         else:
             innenbande = self.right_wall
             innenbande_hnf = self.cluster_to_hnf(innenbande)
-            innenbande_hnf = self.hnf_right_wall
             aussenbande = self.left_wall
             aussenbande_hnf = self.cluster_to_hnf(aussenbande)
             
@@ -1964,101 +1963,6 @@ class WallFollower(Node):
         self.left_wall  = merged_validated_clusters[0]
         self.visualize_clusters(merged_validated_clusters)
 
-        # Initialisiere die Test-Variable dynamisch, falls nicht vorhanden
-        '''        if not hasattr(self, 'test_is_turning'):
-            self.test_is_turning = False
-
-        # 1. Alle Cluster finden
-        all_clusters = self.get_all_clusters_sorted(point_data)
-        
-        # --- CLUSTER AUSWAHL (Einmalig zu Beginn) ---
-        if self.begin == True:
-            for c in all_clusters:
-                self.visualize_clusters([c])
-                
-                skip = input("Drücke Enter, um zum nächsten Cluster zu gehen (oder 'q' für Auswahl)...")
-                if skip.lower() in ['q', '#']:
-                    self.begin = False
-                    self.get_logger().info(">>> Starte autonome Test-Bench! Roboter fährt los. <<<")
-                    self.front_wall = c
-                    
-                    self.start_turn_dist = self.get_closest_point_in_cluster(c)[3]
-                    self.get_logger().warn(f"Start Distanz ist {self.start_turn_dist:.2f}m")
-                    
-                    # PID-Regler nullen
-                    self.integral_error = 0.0
-                    self.prev_error = 0.0
-                    break
-                else:
-                    continue
-        
-        # ==========================================
-        # KONTINUIERLICHE BERECHNUNG (läuft immer)
-        # ==========================================
-        self.front_wall = self.track_front_wall(point_data, self.front_wall)
-        validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-        
-        # Hinweis: außenbande fehlte in deinem Snippet, wird hier für den Methodenaufruf benötigt
-        front_wall_params, side_wall_params = self.test_extract_wall_lines(validated_clusters)
-    
-        # ==========================================
-        # AUTONOME STATE MACHINE (Fahren & Lenken)
-        # ==========================================
-        
-        if not self.test_is_turning:
-            # PHASE 1: ANNÄHERUNG (Geradeaus fahren und auf Trigger warten)
-            
-            target_line_params, max_allowed_radius_m = self.test_calculate_target_line(validated_clusters, desired_wall_distance_m=0.6)
-            self.visualize_hnf_line((1.0, 0, 0), m_id=550, farbe_name="rot", label="")
-
-            intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
-            self.curve_radius_m, entry_point_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius_m)
-        
-            # 1. Motor für die Annäherung aktivieren
-            cmd = Twist()
-            cmd.linear.x = 300.0  # Moderate Test-Geschwindigkeit (z.B. 0.3 m/s)
-            cmd.angular.z = 0.0 # Idealerweise hier deinen Geradeaus-Regler einsetzen
-            self.pub_cmd_vel.publish(cmd)
-            
-            # 2. Trigger kontinuierlich abfragen
-            # WICHTIG: test_check_turn_trigger muss True zurückgeben, wenn Distanz unterschritten ist!
-            trigger_erreicht = self.test_check_turn_trigger(entry_point_distance_m)
-
-            if trigger_erreicht:
-                self.test_is_turning = True
-                self.saved_intersection_angle = intersection_angle
-                self.start_turn_yaw = self.current_yaw
-                self.get_logger().warn(">>> TRIGGER ERREICHT - KURVE STARTET <<<")
-                
-        else:
-            # PHASE 2: AUSFÜHRUNG (Servo schlägt ein, Motor fährt weiter)
-            
-            if self.curve_radius_m is not None:
-                # WICHTIG: Du musst in test_execute_turn den Motor jetzt wieder EINSCHALTEN 
-                # (linear.x = 0.3), sonst lenkt er nur und bleibt stehen!
-                self.test_execute_turn(self.curve_radius_m)
-            
-            # Prüfung: Hat der Roboter sich weit genug gedreht?
-            self.get_logger().info(f"Alte Winkelberchnung: {self.get_cluster_angle(self.front_wall)}")
-            turn_completed = self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params)
-            
-            if turn_completed:
-                self.get_logger().info(">>> KURVE BEENDET! STOPPE ROBOTER <<<")
-                self.test_is_turning = False
-                
-                # Motor und Servo sofort stoppen
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0 
-                self.pub_cmd_vel.publish(cmd)
-                
-                # Pausiert die Schleife, bis du den Roboter für den nächsten Test aufgestellt hast
-                input("Test abgeschlossen. Roboter manuell umstellen und Enter drücken...")
-                self.begin = True  # Startet die Cluster-Auswahl neu
-        self.counter = 0
-        return'''
-        # ==========================================
-
     # -----------------------------------------
     # State Maschine Obstacle Parcour
     # -----------------------------------------
@@ -2130,9 +2034,9 @@ class WallFollower(Node):
         elif (obstacle_cmd is not None and obstacle is None) or (obstacle_cmd is not None and not obstacle.is_localized):
             is_evading = True
             if obstacle_cmd == "green":
-                target_ratio = 0.2 if is_left else 0.8
+                target_ratio = 0.25 if is_left else 0.75
             else:
-                target_ratio = 0.8 if is_left else 0.2
+                target_ratio = 0.75 if is_left else 0.25
                 
         else:
             obst_zone_id = obstacle.zone_id
@@ -2154,9 +2058,9 @@ class WallFollower(Node):
                 obst_is_green = obstacle_cmd == "green"
                 obst_is_outer = obst_zone_id % 10 == 1
                 if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                    target_ratio = 0.3 if obst_is_outer else 0.2
+                    target_ratio = 0.35 if obst_is_outer else 0.25
                 else:
-                    target_ratio = 0.8 if obst_is_outer else 0.7
+                    target_ratio = 0.75 if obst_is_outer else 0.65
 
         # =========================================================
         # 2. DYNAMISCHER ÜBERGANG (Snap vs. Smooth)
@@ -2449,8 +2353,6 @@ class WallFollower(Node):
             
             if front_dist < 1.20:
                 self.state = f"TURN_{self.fahrtrichtung.upper()}"
-                cmd.angular.z = 0.0
-                self.pub_cmd_vel.publish(cmd)
                 self.get_logger().warn(f">>> {self.state} EINGELEITET<<<")
                 # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
                 self.prev_error = 0.0
