@@ -139,11 +139,11 @@ class WallFollower(Node):
         self.right_wall = None
         
         # Karotten-Parameter Geradeausfahrt
-        self.lookahead_dist_straight = 0.50    # Wie weit schaut der Roboter voraus? (60 cm)
+        self.lookahead_dist_straight = 0.20    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.15       
 
-        self.standard_lane_ratio_approach = 0.65
-        self.standard_lane_ratio_exit = 0.30
+        self.standard_lane_ratio_approach = 0.60
+        self.standard_lane_ratio_exit = 0.40
         self.lane_ratio = self.standard_lane_ratio_approach       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
         self.lane_ratio_approach = self.standard_lane_ratio_approach
         self.lane_ratio_exit = self.standard_lane_ratio_exit
@@ -164,7 +164,7 @@ class WallFollower(Node):
         
 
         # --- PID-REGLER PARAMETER ---
-        self.kp = 1.1   # Lenkt hart zur Karotte
+        self.kp = 1.2   # Lenkt hart zur Karotte
         self.kd = 0   # Verhindert das Schlingern (Dämpfung)
         self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
         
@@ -178,16 +178,16 @@ class WallFollower(Node):
         self.target_point = (0, 0)
 
         self.TRACK_WIDTH_M = 1.0
-        self.ROBOT_WIDTH_M = 0.12
-        self.LIDAR_OFFSET_M = 0.0
+        self.ROBOT_WIDTH_M = 0.15
+        self.LIDAR_OFFSET_M = 0.10
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.25
+        self.IDEAL_RADIUS_M = 0.28
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 275.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 275.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 370.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 370.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -1001,6 +1001,14 @@ class WallFollower(Node):
         target_y = self.lookahead_dist_straight
         target_x = 0.0
         
+        if hnf_innen is not None and hnf_innen[2] > 1.2:
+            # self.get_logger().warn(f"Ignoriere Innenbande (unplausibel weit weg: {hnf_innen[2]:.2f}m)")
+            hnf_innen = None
+            
+        if hnf_aussen is not None and hnf_aussen[2] > 1.2:
+            # self.get_logger().warn(f"Ignoriere Außenbande (unplausibel weit weg: {hnf_aussen[2]:.2f}m)")
+            hnf_aussen = None
+
         # ==========================================
         # HILFSFUNKTION: VIRTUELLE WAND PROJIZIEREN
         # ==========================================
@@ -1014,15 +1022,6 @@ class WallFollower(Node):
                 new_nx, new_ny = -new_nx, -new_ny
                 new_d = abs(new_d)
             return (new_nx, new_ny, new_d)
-
-        # ==========================================
-        # 1. STÖRENDE WÄNDE IGNORIEREN (Wand-Kuschler)
-        # ==========================================
-        if self.current_obstacle_cmd != "CLEAR":
-            if self.lane_ratio < 0.5:
-                hnf_aussen = None  # Wir weichen aus -> Außenbande verwerfen
-            else:
-                hnf_innen = None   # Wir weichen aus -> Innenbande verwerfen
 
         # ==========================================
         # 2. FEHLENDE WÄNDE SYNTHETISIEREN (Dein Block!)
@@ -1187,6 +1186,31 @@ class WallFollower(Node):
             if obstacle_cluster is not None:
                 obj_x, obj_y = self.get_weight_point_for_cluster(obstacle_cluster) 
                 
+                # ========================================================
+                # SENSOR-FUSION SANITY CHECK (Der kalibrierte Anti-Geister-Filter)
+                # ========================================================
+                # Wir gleichen die optische Tiefe der Kamera (y_max) mit der 
+                # gemessenen LiDAR-Distanz ab. 
+                dist = math.hypot(obj_x, obj_y)
+                y_max = box_data['y_max']
+                
+                # KALIBRIERTE WERTE: 30cm = 133px | 80cm = 61px | 1.5m = 42px
+                
+                # 1. Visuell NAH (y_max > 80, entspricht ca. < 60cm physisch)
+                # Ein Objekt, das so nah aussieht, darf keinen Cluster beanspruchen, 
+                # der weiter als 1.0m entfernt ist.
+                if y_max > 80 and dist > 1.0:
+                    self.get_logger().warn(f"Cluster-Diebstahl blockiert! {box_data['class_name']} ist visuell nah (y={y_max:.0f}), LiDAR sagt aber {dist:.2f}m!")
+                    continue # Wir konsumieren den Cluster NICHT! Das nächste Hindernis darf ihn haben.
+                    
+                # 2. Visuell FERN (y_max < 55, entspricht ca. > 1m physisch)
+                # Ein Objekt, das so weit weg aussieht, darf keinen Cluster beanspruchen, 
+                # der direkt vor dem Roboter (< 0.6m) liegt.
+                if y_max < 55 and dist < 0.6:
+                    self.get_logger().warn(f"Cluster-Diebstahl blockiert! {box_data['class_name']} ist visuell fern (y={y_max:.0f}), LiDAR sagt aber {dist:.2f}m!")
+                    continue
+                # ========================================================
+
                 self.publish_marker(obj_x, obj_y, box_data['class_name'], box_data['class_id'])
                 detected_obstacles.append((obj_x, obj_y, box_data['class_name']))
                 
@@ -1223,7 +1247,7 @@ class WallFollower(Node):
         
         for cluster in clusters_without_walls:
             # FILTER 1: Punkte-Anzahl (Mindestens 2, max 25 für nahe Hindernisse)
-            if len(cluster) < 2 or len(cluster) > 25:
+            if len(cluster) < 2 or len(cluster) > 60:
                 continue
                 
             # FILTER 2: Breiten-Filter (WRO-Blöcke sind klein, max 35 cm)
@@ -1881,72 +1905,7 @@ class WallFollower(Node):
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
     def test_turn_main_logic(self, point_data):
-        marker_array = MarkerArray()
-
-        # 1. DELETEALL-Marker: Verhindert "Geister-Hindernisse" aus vorherigen Frames
-        clear_marker = Marker()
-        clear_marker.action = Marker.DELETEALL
-        marker_array.markers.append(clear_marker)
-
-        # 2. Hindernisse abrufen
-        detected_obstacles = self.get_obstacles_from_camera(point_data)
-
-        if not detected_obstacles:
-            self.pub_obstacle_markers.publish(marker_array)
-            return
-
-        # 3. Für jedes Objekt einen neuen Marker generieren
-        for i, (x, y, color) in enumerate(detected_obstacles):
-            marker = Marker()
-            marker.header.frame_id = "base_link" # WICHTIG: Muss deinem lokalen TF-Frame entsprechen (z.B. auch "laser")
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "yolo_obstacles"
-            marker.id = i
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
-
-            # Position (Z = 0.05m -> Halbe Blockhöhe)
-            marker.pose.position.x = float(x)
-            marker.pose.position.y = float(y)
-            marker.pose.position.z = 0.05
-            
-            # Ausrichtung neutral
-            marker.pose.orientation.w = 1.0
-
-            # Physikalische Größe auf der WRO-Matte (10x10 cm Grundfläche)
-            marker.scale.x = 0.10
-            marker.scale.y = 0.10
-            marker.scale.z = 0.10
-
-            # Farbe zuweisen (RGBA, Werte zwischen 0.0 und 1.0)
-            marker.color.a = 1.0 # 1.0 = voll sichtbar
-            if color == "red":
-                marker.color.r = 1.0
-                marker.color.g = 0.0
-                marker.color.b = 0.0
-            elif color == "green":
-                marker.color.r = 0.0
-                marker.color.g = 1.0
-                marker.color.b = 0.0
-            else:
-                # Fallback für undefinierte Farben (Grau)
-                marker.color.r = 0.5
-                marker.color.g = 0.5
-                marker.color.b = 0.5
-
-            marker_array.markers.append(marker)
-
-        # 4. An RViz senden
-        all_clusters = self.get_all_clusters_sorted(point_data)
-        self.pub_obstacle_markers.publish(marker_array)
-        validated_clusters = self.validate_clusters_straight(all_clusters)
-        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
-        self.front_wall = merged_validated_clusters[1]
-        self.left_wall  = merged_validated_clusters[0]
-        self.visualize_clusters(merged_validated_clusters)
-
-        # Initialisiere die Test-Variable dynamisch, falls nicht vorhanden
+        self.get_obstacles_from_camera(point_data)
         '''        if not hasattr(self, 'test_is_turning'):
             self.test_is_turning = False
 
@@ -2097,7 +2056,7 @@ class WallFollower(Node):
 
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
-        max_shift = 0.03
+        max_shift = 0.012
         
         # 1. BASIS-ZIEL DEFINIEREN (Abhängig vom Streckenabschnitt)
         if is_turn_exit:
@@ -2138,9 +2097,9 @@ class WallFollower(Node):
                     obst_is_outer = obst_zone_id % 10 == 1
                     
                     if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                        target_ratio = 0.30 if obst_is_outer else 0.20
+                        target_ratio = 0.35 if obst_is_outer else 0.25
                     else:
-                        target_ratio = 0.80 if obst_is_outer else 0.70
+                        target_ratio = 0.75 if obst_is_outer else 0.65
 
         # ==========================================
         # 3. STATE ANWENDEN ODER ZUKUNFT ZURÜCKGEBEN
@@ -2339,6 +2298,15 @@ class WallFollower(Node):
         if not self.imu_ready:
             self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
             return  # Brich hier ab, mach noch nichts!   
+
+        # ==========================================
+        # NEU: WARTE AUF KAMERA & YOLO
+        # ==========================================
+        with self.data_lock:
+            if len(self.latest_yolo_results) == 0:
+                self.get_logger().info("Warte auf ersten Kamera-Frame und YOLO-Inferenz...")
+                return # Blockiert den Start, bis YOLO wirklich arbeitet
+
         self.yaw_offset = self.current_yaw
         self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen
 
@@ -2404,8 +2372,6 @@ class WallFollower(Node):
             
             if front_dist < 1.20:
                 self.state = f"TURN_{self.fahrtrichtung.upper()}"
-                cmd.angular.z = 0.0
-                self.pub_cmd_vel.publish(cmd)
                 self.get_logger().warn(f">>> {self.state} EINGELEITET<<<")
                 return
             else:
@@ -2427,10 +2393,12 @@ class WallFollower(Node):
         Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
         """
         cmd = Twist()
+        
+        # Geplantes Exit-Ratio für nach der Kurve berechnen (apply_state=False!)
         exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
         self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
-        #self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, 2.0)
-        self.get_logger().info(f"Current_Obst_Cmd: {exit_obstacle_cmd}, Current_Obst: {exit_obstacle} , Lane_Ratio: {self.lane_ratio}")
+        self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
+        
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
         # ---------------------------------------------------------
@@ -2439,9 +2407,10 @@ class WallFollower(Node):
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
+            
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-            front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-
+            
+            # --- PID FÜR DIE ANNÄHERUNG ---
             right_wall_hnf = self.cluster_to_hnf(validated_clusters[0])
             left_wall_hnf = self.cluster_to_hnf(validated_clusters[2])
             
@@ -2452,21 +2421,28 @@ class WallFollower(Node):
                 innenbande_hnf = right_wall_hnf
                 aussenbande_hnf = left_wall_hnf
 
+            # Lane Ratio für die Annäherung updaten
             front_dist = front_wall_hnf[2] if front_wall_hnf is not None else 2.0
-            self.lane_ratio = self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, self.obstacle_memory[self.turn_count % 4], front_dist, is_turn_exit=False, apply_state=True)
+            self.set_lane_ratio_for_obstacle_cmd(
+                self.current_obstacle_cmd, 
+                self.obstacle_memory[self.turn_count % 4], 
+                front_dist, 
+                is_turn_exit=False, 
+                apply_state=True
+            )
 
-            self.visualize_hnf_line(front_wall_params, m_id=550, farbe_name="rot", label="Front HNF")
+            # Lenkung für Approach berechnen
             steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
             
+            # Kurvengeometrie berechnen
+            front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, exit_obstacle, self.lane_ratio_exit)
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             
             # 2. Trigger prüfen
-            # check_turn_trigger muss True zurückgeben, wenn die Distanz erreicht ist
             if self.test_check_turn_trigger(entry_distance_m):
                 self.get_logger().info("Trigger erreicht. Wechsle in EXECUTE-Phase.")
-                # Daten für die Abschlussprüfung einfrieren
                 self.saved_intersection_angle = intersection_angle
                 self.saved_curve_radius_m = curve_radius_m
                 self.start_turn_yaw = self.current_yaw
@@ -2480,10 +2456,10 @@ class WallFollower(Node):
                 self.turn_phase = 'EXECUTE'
                 return
             
+            # 3. Lenken in der Annäherung
             cmd.linear.x = self.base_speed
             cmd.angular.z = float(steering_cmd)
             self.pub_cmd_vel.publish(cmd)
-
                 
         # ---------------------------------------------------------
         # PHASE 2: AUSFÜHRUNG (Servo lenkt, Gyro prüft)
@@ -2513,20 +2489,56 @@ class WallFollower(Node):
             else:
                 front_wall_params = None
 
+            # =========================================================
+            # 5. ABSCHLUSS PRÜFEN (Mit Panic-Exit)
+            # =========================================================
+            
+            # A) Normaler Abschluss (Gyro oder Wand-Parallelität)
+            turn_completed = self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params)
+            
+            # B) Panic-Exit: Ist plötzlich ein kritisches Hindernis im Weg?
+            panic_exit = False
+            
+            # FIX 1: Max Distanz drastisch reduzieren (von 1.5m auf 0.8m)
+            # Nur Hindernisse, die unmittelbar auf der neuen Gerade stehen, dürfen Panik auslösen.
+            new_obst_cmd, new_obst = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 0.8)
+            required_ratio = self.lane_ratio_exit
+            
+            if new_obst_cmd is not None and new_obst_cmd != "CLEAR":
+                # FIX 2: is_turn_exit MUSS True sein! 
+                # Sonst berechnet er das Basis-Ratio für eine Gerade (0.70) statt für den Exit (0.40),
+                # was sofort eine künstliche Abweichung erzeugt, selbst bei bekannten Hindernissen!
+                front_dist = front_wall_params[2] if front_wall_params else 2.0
+                required_ratio = self.set_lane_ratio_for_obstacle_cmd(
+                    new_obst_cmd, new_obst, front_dist, is_turn_exit=True, apply_state=False
+                )
+                
+                # Wenn wir stark von unserer GEPLANTEN Kurve abweichen müssen (> 15% Unterschied):
+                if abs(required_ratio - self.lane_ratio_exit) > 0.15:
+                    self.get_logger().warn(f"!!! PANIC EXIT !!! Kritisches Hindernis ({new_obst_cmd}) erzwingt Abbruch der Kurve!")
+                    panic_exit = True
 
-            # 3. Abschluss prüfen
-            if self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params):
-                self.get_logger().info("Kurve physikalisch beendet.")
+            # C) Kurve beenden
+            if turn_completed or panic_exit:
+                self.get_logger().info("Kurve beendet. Übergebe an Lane-Follower.")
+                
                 cmd.linear.x = self.base_speed
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
 
-                self.lane_ratio = self.lane_ratio_exit
+                # Setze die Spur für den PID-Regler auf der neuen Gerade
+                if panic_exit:
+                    self.lane_ratio = required_ratio # Zwingt den PID sofort auszuweichen!
+                else:
+                    self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
+                    
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
-                self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle an die main_logic
-                # WICHTIG: PID-Gedächtnis für die nächste Gerade löschen!
+                self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
+                
+                # WICHTIG: PID-Gedächtnis für die neue Gerade löschen!
                 self.prev_error = 0.0
                 self.integral_error = 0.0
+                
                 self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
     
@@ -2543,7 +2555,7 @@ class WallFollower(Node):
 
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
-        self.get_logger().info(f"Aktueller Status: {self.state}, TurnCount: {self.turn_count}")
+        self.get_logger().info(f"Aktueller Status: {self.state}, TurnCount: {self.turn_count}, Lane_Ratio: {self.lane_ratio}, EXIT_Ratio: {self.lane_ratio_exit}")
 
         if self.state == 'STARTING':
             self.execute_start(point_data)
