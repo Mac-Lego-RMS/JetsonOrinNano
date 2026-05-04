@@ -113,7 +113,6 @@ class WallFollower(Node):
         self.yaw_offset = 0.0
         self.current_yaw = 0.0
         self.imu_ready = False  # <--- NEU: Ist der Gyro schon wach?
-        self.target_yaw = 0.0      # Zielwinkel für die Kurve
         self.last_raw_yaw = None
         self.start_turn_yaw = None
         self.start_straight_yaw = 0.0
@@ -158,9 +157,6 @@ class WallFollower(Node):
         self.current_obstacle_cmd = "CLEAR"
         self.obstacle_memory = [None, None, None, None]
 
-        # Standard-Werte für die Ideallinie auf der Geraden(z.B. Außenbahn)
-        self.default_lane_ratio = 0.85 
-        self.default_max_turn = 0.8
         
 
         # --- PID-REGLER PARAMETER ---
@@ -188,8 +184,6 @@ class WallFollower(Node):
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
         self.base_speed = 370.0  # Normale Geschwindigkeit auf der Geraden
         self.turn_speed = 370.0  # Leicht reduzierter Speed in der Kurve
-
-        self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
         # --------------------------------
         # --- YOLO - Global Parameters ---
@@ -874,19 +868,6 @@ class WallFollower(Node):
         #self.test_turn_main_logic(point_data)
         self.main_logic(point_data)
     
-    def get_closest_measure(self, point_data, target_angle):    # np array upgraded
-        if len(point_data) == 0:
-            return None
-
-        # Winkel-Differenzen für das gesamte Array auf einmal berechnen
-        diffs = (point_data[:, 0] - target_angle + 180.0) % 360.0 - 180.0
-        abs_diffs = np.abs(diffs)
-
-        # Index des kleinsten Abstands finden
-        closest_idx = np.argmin(abs_diffs)
-        
-        return point_data[closest_idx]
-    
     def get_closest_point_in_cluster(self, cluster):
         """
         Gibt den Punkt eines Clusters zurück, der den kürzesten Abstand zum LiDAR hat.
@@ -1296,108 +1277,6 @@ class WallFollower(Node):
         # Sorgt dafür, dass der Unterschied auch über die 0/360° Grenze korrekt bleibt
         return math.atan2(math.sin(a - b), math.cos(a - b))
 
-    def visualize_clusters(self, kandidaten_RVIZ):
-        if self.fahrtrichtung == 'links':
-            innenbande = self.left_wall
-            aussenbande = self.right_wall
-        else:
-            innenbande = self.right_wall
-            aussenbande = self.left_wall
-            
-        #target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
-        
-        marker_array = MarkerArray()
-
-        if self.state == 'FOLLOW_LANE':
-            # ALTE LOGIK FÜR DIE GERADE
-            if self.fahrtrichtung == 'links':
-                innenbande = self.left_wall
-                aussenbande = self.right_wall
-            else:
-                innenbande = self.right_wall
-                aussenbande = self.left_wall
-                
-            target_x, target_y = self.get_target_point_straight(innenbande, aussenbande)
-            
-            if target_x is not None and target_y is not None:
-                # Cyan für Geradeaus-Fahrt
-                self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(0.0, 1.0, 1.0))
-                
-        elif self.state in ['TURN_LINKS', 'TURN_RECHTS']:
-            # NEUE LOGIK FÜR DIE KURVE
-            # get_target_point_turn erwartet das u_profile Array!
-            u_profile = [self.right_wall, self.front_wall, self.left_wall]
-            
-            # Zielpunkt-Berechnung aufrufen (z.B. 40cm Soll-Abstand)
-            target_pt = self.target_point
-            
-            if target_pt is not None:
-                target_x, target_y = target_pt
-                # Magenta für Kurven-Fahrt (damit du sofort siehst, dass die neue Logik greift!)
-                self.send_sphere(marker_array, m_id=99, x=target_x, y=target_y, color=(1.0, 0.0, 1.0))
-        else:
-            self.delete_marker(marker_array, 99, ns="target")
-
-        # Feste Farben: Rechts=Rot, Front=Grün, Links=Blau
-        colors = [
-            (1.0, 0.0, 0.0),    # Rot (Original)
-            (0.0, 1.0, 0.0),    # Grün (Original)
-            (0.0, 0.5, 1.0),    # Azurblau (Original)
-            (1.0, 0.5, 0.0),    # Orange
-            (0.5, 0.0, 1.0),    # Violett
-            (0.0, 1.0, 1.0),    # Cyan
-            (1.0, 0.0, 1.0),    # Magenta
-            (1.0, 1.0, 0.0),    # Gelb
-            (0.5, 0.5, 0.5),    # Grau
-            (0.6, 0.3, 0.0)     # Braun
-        ]
-
-
-        # --- RVIZ TEXT-MARKER FÜR DIE FAHRTRICHTUNG UND BANDEN ---
-        if self.fahrtrichtung is not None:
-            # 1. Zeige die gelockte Fahrtrichtung direkt über dem Roboter an (X=0, Y=0)
-            '''richtung_text = f"LOCKED: {self.fahrtrichtung.upper()}"
-            self.send_text(marker_array, m_id=10, text=richtung_text, x=0.0, y=0.0, color=(1.0, 1.0, 0.0)) # Gelb'''
-
-            # 2. Beschrifte die Innenbande
-            if innenbande and len(innenbande) > 0:
-                # Wir platzieren den Text in der Mitte der Wand
-                mitte_x = sum(p[1] for p in innenbande) / len(innenbande)
-                mitte_y = sum(p[2] for p in innenbande) / len(innenbande)
-                self.send_text(marker_array, m_id=11, text="INNEN", x=mitte_x, y=mitte_y, color=(1.0, 0.5, 0.0)) # Orange
-
-            # 3. Beschrifte die Außenbande
-            if aussenbande and len(aussenbande) > 0:
-                mitte_x = sum(p[1] for p in aussenbande) / len(aussenbande)
-                mitte_y = sum(p[2] for p in aussenbande) / len(aussenbande)
-                self.send_text(marker_array, m_id=12, text="AUSSEN", x=mitte_x, y=mitte_y, color=(1.0, 0.0, 1.0)) # Magenta
-        else:
-            # Solange er noch scannt, zeige das an
-            self.send_text(marker_array, m_id=10, text="SCANNING DIRECTION...", x=0.0, y=0.0, color=(1.0, 1.0, 1.0)) # Weiß
-        for i, cluster in enumerate(kandidaten_RVIZ):
-            # Info in der Konsole ausgeben
-            angle = self.get_cluster_angle(cluster)
-
-            if angle is None:
-                #self.get_logger().warn(f"Wand {i+1}: Winkel konnte nicht berechnet werden.")
-                continue # Überspringt diesen Cluster und macht mit dem nächsten weiter
-            #self.get_logger().info(f"Wand {i+1} (ID {i}): {len(cluster)} Punkte, Winkel: {angle:.2f}°")
-            #self.get_logger().info(f"Erster Punkt: (X={cluster[0][1]:.2f}, Y={cluster[0][2]:.2f}), Letzter Punkt: (X={cluster[-1][1]:.2f}, Y={cluster[-1][2]:.2f})")
-            if cluster is None or len(cluster) < 2:
-                self.delete_marker(marker_array, m_id=i)
-                continue # Gehe sofort zum nächsten Element im Array über
-
-            # Ein Cluster braucht mindestens 2 Punkte für eine Linie
-            if len(cluster) >= 2:
-                # Start- und Endpunkt (Index 1 = X, Index 2 = Y)
-                start_p = (cluster[0][1], cluster[0][2])
-                ende_p = (cluster[-1][1], cluster[-1][2])
-                
-                # Linie zeichnen: ID entspricht dem Index (0, 1, oder 2)
-                self.send_line(marker_array, m_id=i, p1=start_p, p2=ende_p, color=colors[0])
-
-        # Alles veröffentlichen, damit es in RViz2 auftaucht!
-        self.pub_markers.publish(marker_array)
 
     # -----------------------------------------------
     # Neue Koordinatensystem Idee für Kurvenfahrten
@@ -2394,11 +2273,6 @@ class WallFollower(Node):
         """
         cmd = Twist()
         
-        # Geplantes Exit-Ratio für nach der Kurve berechnen (apply_state=False!)
-        exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
-        self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
-        self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
-        
         # ---------------------------------------------------------
         # PHASE 1: ANNÄHERUNG (Berechnen & auf Trigger warten)
         # ---------------------------------------------------------
@@ -2407,6 +2281,13 @@ class WallFollower(Node):
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
+            if front_wall_hnf is not None:
+                allowed_obst_dist = front_wall_hnf[2] - 1.2 if front_wall_hnf[2] > 1.0 else 0.0
+            else:
+                allowed_obst_dist = 0.0
+            exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), allowed_obst_dist, 2.0)
+            self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
+            self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
             
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
@@ -2466,6 +2347,9 @@ class WallFollower(Node):
         # ---------------------------------------------------------
         elif self.turn_phase == 'EXECUTE':          
             # 3. Radius stur nach interpolierter Ratio berechnen
+            exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
+            self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
+            self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
             if self.current_obstacle_cmd != self.base_obst_cmd:
                 if self.current_obstacle_cmd is not None:
                     is_left = (self.fahrtrichtung == "links")
