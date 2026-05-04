@@ -138,18 +138,18 @@ class WallFollower(Node):
         self.right_wall = None
         
         # Karotten-Parameter Geradeausfahrt
-        self.lookahead_dist_straight = 0.20    # Wie weit schaut der Roboter voraus? (60 cm)
+        self.lookahead_dist_straight = 0.35    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.15       
 
         self.standard_lane_ratio_approach = 0.60
-        self.standard_lane_ratio_exit = 0.40
+        self.standard_lane_ratio_exit = 0.45
         self.lane_ratio = self.standard_lane_ratio_approach       # Verhältnis des Bandenabstands innen zu außen Außen Bande: 0.85, Innen Bande: 0.20
         self.lane_ratio_approach = self.standard_lane_ratio_approach
         self.lane_ratio_exit = self.standard_lane_ratio_exit
 
         self.base_obst_cmd = None
         self.base_entry_distance = None
-        self.assumed_lane_width = 1.0 # Wenn eine Wand fehlt, gehen wir von 60cm Spurbreite aus
+        self.assumed_lane_width = 1.0
         self.turn_exit_angle = 25
         self.max_wall_lenght_for_turn = 0.25
 
@@ -157,10 +157,8 @@ class WallFollower(Node):
         self.current_obstacle_cmd = "CLEAR"
         self.obstacle_memory = [None, None, None, None]
 
-        
-
         # --- PID-REGLER PARAMETER ---
-        self.kp = 1.2   # Lenkt hart zur Karotte
+        self.kp = 1.4   # Lenkt hart zur Karotte
         self.kd = 0   # Verhindert das Schlingern (Dämpfung)
         self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
         
@@ -182,8 +180,8 @@ class WallFollower(Node):
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 370.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 370.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 270.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 270.0  # Leicht reduzierter Speed in der Kurve
 
         # --------------------------------
         # --- YOLO - Global Parameters ---
@@ -976,89 +974,79 @@ class WallFollower(Node):
     def get_target_point_straight(self, hnf_innen, hnf_aussen):
         """
         Berechnet den Zielpunkt (Karotte) mithilfe der HNF.
-        Fehlende oder durch Hindernisse gestörte Wände werden virtuell projiziert.
+        Ist nur eine Wand vorhanden, wird der Offset direkt von dieser berechnet, 
+        ohne eine fehleranfällige virtuelle Wand zu projizieren!
         """
-        #self.get_logger().info(f"Berechne Zielpunkt. HNF Innen: {hnf_innen}, HNF Außen: {hnf_aussen}, Lane Ratio: {self.lane_ratio:.2f}")
         target_y = self.lookahead_dist_straight
         target_x = 0.0
         
+        # Plausibilitäts-Check: Wände, die zu weit weg sind, ignorieren
         if hnf_innen is not None and hnf_innen[2] > 1.2:
-            # self.get_logger().warn(f"Ignoriere Innenbande (unplausibel weit weg: {hnf_innen[2]:.2f}m)")
             hnf_innen = None
-            
         if hnf_aussen is not None and hnf_aussen[2] > 1.2:
-            # self.get_logger().warn(f"Ignoriere Außenbande (unplausibel weit weg: {hnf_aussen[2]:.2f}m)")
             hnf_aussen = None
 
-        # ==========================================
-        # HILFSFUNKTION: VIRTUELLE WAND PROJIZIEREN
-        # ==========================================
-        def project_opposite_wall(hnf_base):
-            if not hnf_base: return None
-            nx, ny, d = hnf_base
-            new_nx, new_ny = -nx, -ny
-            new_d = 1.0 - d  # Nutzt dynamische Spurbreite statt Magic Number 1.0
-            
-            if new_d < 0:
-                new_nx, new_ny = -new_nx, -new_ny
-                new_d = abs(new_d)
-            return (new_nx, new_ny, new_d)
-
-        # ==========================================
-        # 2. FEHLENDE WÄNDE SYNTHETISIEREN (Dein Block!)
-        # ==========================================
-        if hnf_innen and not hnf_aussen:
-            # Wir haben nur Innen. Projiziere Außen virtuell!
-            hnf_aussen = project_opposite_wall(hnf_innen)
-            
-        elif hnf_aussen and not hnf_innen:
-            # Wir haben nur Außen. Projiziere Innen virtuell!
-            hnf_innen = project_opposite_wall(hnf_aussen)
-
-        # 3. Hilfsfunktion für den X-Schnittpunkt auf der Geraden
         def get_x_at_y(hnf_params, y_val):
             nx, ny, d = hnf_params
             if abs(nx) < 1e-6: return 0.0 
             return (d - ny * y_val) / nx
 
+        # 1. Wo schneiden die erkannten Wände unsere Y-Sichtachse?
+        x_innen = get_x_at_y(hnf_innen, target_y) if hnf_innen else None
+        x_aussen = get_x_at_y(hnf_aussen, target_y) if hnf_aussen else None
+
         # ==========================================
-        # 4. ZIELPUNKT BERECHNEN (Mit konstanter Spurbreite)
+        # 2. ZIELPUNKT BERECHNEN (Direktes Offsetting)
         # ==========================================
-        if hnf_innen and hnf_aussen:
-            # Wir berechnen nur noch, wo die Innenbande ist. 
-            # Die Außenbande brauchen wir für den X-Wert gar nicht mehr, 
-            # da die Breite fix 1.0 Meter ist!
-            x_innen = get_x_at_y(hnf_innen, target_y)
-            
-            # Annahme: self.lane_ratio ist ein Prozentwert (z.B. 0.5 für Mitte)
-            # Falls ihr eine Konstante wie self.TRACK_WIDTH_M habt, setze sie statt 1.0 ein
-            offset_von_wand = self.lane_ratio 
-            
-            if x_innen < 0: # Innenbande links
-                target_x = x_innen + offset_von_wand
-            else:           # Innenbande rechts
-                target_x = x_innen - offset_von_wand
+        # lane_ratio ist der Abstand zur INNENBANDE (z.B. 0.60).
+        # Der Offset zur AUSSENBANDE ist logischerweise (1.0 - lane_ratio) (z.B. 0.40).
+
+        if x_innen is not None and x_aussen is not None:
+            # Beide Wände da: Wir mitteln die Karotte aus BEIDEN Wänden! 
+            # Das halbiert das Sensor-Rauschen und der Roboter fährt wie auf Schienen.
+            if x_innen < 0: # Innenbande ist links
+                t_innen = x_innen + self.lane_ratio
+                t_aussen = x_aussen - (1.0 - self.lane_ratio)
+            else:           # Innenbande ist rechts
+                t_innen = x_innen - self.lane_ratio
+                t_aussen = x_aussen + (1.0 - self.lane_ratio)
                 
-        # Notfall (Beide Wände fehlen komplett)
+            target_x = (t_innen + t_aussen) / 2.0
+
+        elif x_innen is not None:
+            # NUR Innenbande da (z.B. bei Ausfahrt aus der Kurve)
+            if x_innen < 0: 
+                target_x = x_innen + self.lane_ratio
+            else:           
+                target_x = x_innen - self.lane_ratio
+
+        elif x_aussen is not None:
+            # NUR Außenbande da (DAS IST DEINE KURVEN-ANNÄHERUNG!)
+            if x_aussen > 0: # Außenbande ist rechts (Wir fahren Linkskurve)
+                target_x = x_aussen - (1.0 - self.lane_ratio)
+            else:            # Außenbande ist links (Wir fahren Rechtskurve)
+                target_x = x_aussen + (1.0 - self.lane_ratio)
+                
         else:
+            # Notfall (Beide Wände fehlen komplett)
             target_x = 0.0
 
         # ==========================================
-        # 5. KRAFTFELD (MINDESTABSTAND ERZWINGEN)
+        # 3. KRAFTFELD (MINDESTABSTAND ERZWINGEN)
         # ==========================================
-        if hnf_innen:
-            x_innen_check = get_x_at_y(hnf_innen, target_y)
-            
-            if x_innen_check < 0:  
-                # Innenbande ist LINKS
-                if target_x < x_innen_check + self.min_wall_dist:
-                    target_x = x_innen_check + self.min_wall_dist
-            else:                  
-                # Innenbande ist RECHTS
-                if target_x > x_innen_check - self.min_wall_dist:
-                    target_x = x_innen_check - self.min_wall_dist
+        # Verhindert, dass wir zu nah an EINE der sichtbaren Wände driften
+        if x_innen is not None:
+            if x_innen < 0 and target_x < x_innen + self.min_wall_dist:
+                target_x = x_innen + self.min_wall_dist
+            elif x_innen > 0 and target_x > x_innen - self.min_wall_dist:
+                target_x = x_innen - self.min_wall_dist
+                
+        if x_aussen is not None:
+            if x_aussen < 0 and target_x < x_aussen + self.min_wall_dist:
+                target_x = x_aussen + self.min_wall_dist
+            elif x_aussen > 0 and target_x > x_aussen - self.min_wall_dist:
+                target_x = x_aussen - self.min_wall_dist
 
-        #self.get_logger().info(f"Zielpunkt: {target_x}, {target_y}")
         return (target_x, target_y)
 
     def track_front_wall(self, point_data, last_front_wall):    # np array upgraded
@@ -1170,25 +1158,27 @@ class WallFollower(Node):
                 # ========================================================
                 # SENSOR-FUSION SANITY CHECK (Der kalibrierte Anti-Geister-Filter)
                 # ========================================================
-                # Wir gleichen die optische Tiefe der Kamera (y_max) mit der 
-                # gemessenen LiDAR-Distanz ab. 
                 dist = math.hypot(obj_x, obj_y)
                 y_max = box_data['y_max']
                 
-                # KALIBRIERTE WERTE: 30cm = 133px | 80cm = 61px | 1.5m = 42px
+                # EURE WERTE: 30cm = 133px | 80cm = 61px | 1.5m = 42px
                 
-                # 1. Visuell NAH (y_max > 80, entspricht ca. < 60cm physisch)
-                # Ein Objekt, das so nah aussieht, darf keinen Cluster beanspruchen, 
-                # der weiter als 1.0m entfernt ist.
-                if y_max > 80 and dist > 1.0:
-                    self.get_logger().warn(f"Cluster-Diebstahl blockiert! {box_data['class_name']} ist visuell nah (y={y_max:.0f}), LiDAR sagt aber {dist:.2f}m!")
-                    continue # Wir konsumieren den Cluster NICHT! Das nächste Hindernis darf ihn haben.
+                # 1. Visuell SEHR NAH (y_max > 90) -> entspricht ca. < 50cm physisch
+                # Wenn es so groß im Bild ist, darf das LiDAR NIEMALS weiter als 0.7m weg sein!
+                if y_max > 90 and dist > 0.7:
+                    self.get_logger().warn(f"Block: {box_data['class_name']} ist SEHR NAH (y={y_max:.0f}), LiDAR aber {dist:.2f}m!")
+                    continue
                     
-                # 2. Visuell FERN (y_max < 55, entspricht ca. > 1m physisch)
-                # Ein Objekt, das so weit weg aussieht, darf keinen Cluster beanspruchen, 
-                # der direkt vor dem Roboter (< 0.6m) liegt.
-                if y_max < 55 and dist < 0.6:
-                    self.get_logger().warn(f"Cluster-Diebstahl blockiert! {box_data['class_name']} ist visuell fern (y={y_max:.0f}), LiDAR sagt aber {dist:.2f}m!")
+                # 2. Visuell MITTEL-NAH (y_max > 65) -> entspricht ca. < 75cm physisch
+                # Darf keinen LiDAR-Cluster weiter als 1.0m beanspruchen.
+                if y_max > 65 and dist > 1.0:
+                    self.get_logger().warn(f"Block: {box_data['class_name']} ist NAH (y={y_max:.0f}), LiDAR aber {dist:.2f}m!")
+                    continue
+                    
+                # 3. Visuell FERN (y_max < 50) -> entspricht ca. > 1.2m physisch
+                # Wenn es so klein/weit oben im Bild ist, darf das LiDAR nicht näher als 0.8m sein!
+                if y_max < 50 and dist < 0.8:
+                    self.get_logger().warn(f"Block: {box_data['class_name']} ist FERN (y={y_max:.0f}), LiDAR aber {dist:.2f}m!")
                     continue
                 # ========================================================
 
@@ -1935,7 +1925,11 @@ class WallFollower(Node):
 
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
-        max_shift = 0.012
+        
+        # FIX 1: Max-Shift leicht erhöhen (von 0.012 auf 0.025).
+        # Dadurch dauert ein kompletter Spurwechsel ca. 1.5 Sekunden. 
+        # Schnell genug, um auszuweichen, aber sanft genug für den PID!
+        max_shift = 0.025 
         
         # 1. BASIS-ZIEL DEFINIEREN (Abhängig vom Streckenabschnitt)
         if is_turn_exit:
@@ -1943,57 +1937,78 @@ class WallFollower(Node):
         else:
             target_ratio = self.standard_lane_ratio_approach
             
-        is_evading = False  # Trackt, ob wir hart ausweichen müssen
+        is_evading = False  # Trackt, ob wir in Notfall-Panik ausweichen müssen
 
         # ==========================================
         # 2. HINDERNIS-LOGIK (Überschreibt das Basis-Ziel)
         # ==========================================
         if obstacle_cmd is not None:
             if obstacle is None or not obstacle.is_localized:
-                # Hindernis gesehen, aber noch nicht verortet -> Hartes Ausweichen
+                # Hindernis gesehen, aber noch nicht verortet -> PANIK! Hartes Ausweichen.
                 is_evading = True
                 if obstacle_cmd == "green":
                     target_ratio = 0.25 if is_left else 0.75
                 else:
                     target_ratio = 0.75 if is_left else 0.25
             else:
-                # Hindernis ist verortet
+                # Hindernis ist verortet (Der Roboter kennt es!)
                 obst_zone_id = obstacle.zone_id
                 obst_passed = False
+                dist_to_obst = 0.0
                 
                 if front_wall_dist is not None:
+                    # A) In welcher Tiefe (Y-Koordinate) steht das Hindernis ca.?
                     if obst_zone_id <= 1:
                         obst_passed = front_wall_dist < 1.75
+                        obst_y = 2.0  # WICHTIG: Das MUSS hier bleiben, sonst stürzt Python ab!
                     elif obst_zone_id <= 11:
                         obst_passed = front_wall_dist < 1.25
+                        obst_y = 1.5
                     else:
                         obst_passed = front_wall_dist < 0.75
+                        obst_y = 1.0
+                        
+                    # B) Wie weit ist der Roboter noch physisch davon entfernt?
+                    dist_to_obst = front_wall_dist - obst_y
                 
-                # Wenn wir noch nicht dran vorbei sind -> Hartes Ausweichen
+                # Wenn wir noch nicht dran vorbei sind...
                 if not obst_passed:
-                    is_evading = True
-                    obst_is_green = obstacle_cmd == "green"
-                    obst_is_outer = obst_zone_id % 10 == 1
                     
-                    if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                        target_ratio = 0.35 if obst_is_outer else 0.25
+                    # =======================================================
+                    # DEINE NEUE LOGIK:
+                    # Wenn wir die Kurve planen (is_turn_exit) UND das 
+                    # Hindernis weit weg ist (Zone 0 oder 1), ziele auf die Mitte!
+                    # =======================================================
+                    if is_turn_exit and obst_zone_id >= 20:
+                        target_ratio = 0.50
+                        
+                    # Ansonsten: Die normale Ausweich-Logik für nahe Objekte
+                    elif front_wall_dist is None or dist_to_obst < 1.20:
+                        
+                        obst_is_green = obstacle_cmd == "green"
+                        obst_is_outer = obst_zone_id % 10 == 1
+                        
+                        if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
+                            target_ratio = 0.35 if obst_is_outer else 0.25
+                        else:
+                            target_ratio = 0.75 if obst_is_outer else 0.65     
                     else:
-                        target_ratio = 0.75 if obst_is_outer else 0.65
+                        # Wir sind weiter als 1.2m entfernt. Ignoriere das Hindernis vorerst.
+                        pass
 
         # ==========================================
         # 3. STATE ANWENDEN ODER ZUKUNFT ZURÜCKGEBEN
         # ==========================================
         
-        # Wenn wir nur vorausplanen (für Kurvenausgang), gib den rohen Wert ohne Glättung zurück!
+        # Wenn wir nur vorausplanen (für Kurvenausgang), gib den rohen Wert zurück!
         if not apply_state:
             return target_ratio
             
-        # Wenn wir den Roboter bewegen (auf der Geraden oder im Approach):
         if is_evading:
-            # GEFAHR: Kein Glätten! Wir springen sofort auf die Ausweichspur.
+            # GEFAHR: Unbekanntes Hindernis! Kein Glätten, sofort umstellen!
             dist_to_inner_wall = target_ratio
         else:
-            # FREIE FAHRT: Wir glätten den Übergang (Slew Rate Limiter)
+            # FREIE FAHRT oder BEKANNTES HINDERNIS: Wir glätten den Übergang sanft
             diff = target_ratio - self.lane_ratio
             
             if diff > max_shift:
@@ -2282,9 +2297,9 @@ class WallFollower(Node):
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
             if front_wall_hnf is not None:
-                allowed_obst_dist = front_wall_hnf[2] - 1.2 if front_wall_hnf[2] > 1.0 else 0.0
+                allowed_obst_dist = max(0.25, front_wall_hnf[2] - 0.25)
             else:
-                allowed_obst_dist = 0.0
+                allowed_obst_dist = 0.25
             exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), allowed_obst_dist, 2.0)
             self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
             self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
@@ -2383,28 +2398,35 @@ class WallFollower(Node):
             # B) Panic-Exit: Ist plötzlich ein kritisches Hindernis im Weg?
             panic_exit = False
             
-            # FIX 1: Max Distanz drastisch reduzieren (von 1.5m auf 0.8m)
-            # Nur Hindernisse, die unmittelbar auf der neuen Gerade stehen, dürfen Panik auslösen.
-            new_obst_cmd, new_obst = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 0.8)
-            required_ratio = self.lane_ratio_exit
+            # --- NEUER FIX: WINKEL-DEADZONE FÜR PANIC-EXIT ---
+            # Wie weit haben wir uns seit Kurvenbeginn bereits gedreht?
+            yaw_diff = (self.current_yaw - self.start_turn_yaw + 180) % 360 - 180
+            progressed_angle = abs(yaw_diff)
             
-            if new_obst_cmd is not None and new_obst_cmd != "CLEAR":
-                # FIX 2: is_turn_exit MUSS True sein! 
-                # Sonst berechnet er das Basis-Ratio für eine Gerade (0.70) statt für den Exit (0.40),
-                # was sofort eine künstliche Abweichung erzeugt, selbst bei bekannten Hindernissen!
-                front_dist = front_wall_params[2] if front_wall_params else 2.0
-                required_ratio = self.set_lane_ratio_for_obstacle_cmd(
-                    new_obst_cmd, new_obst, front_dist, is_turn_exit=True, apply_state=False
-                )
+            # Der Roboter darf die Kurve NUR abbrechen, wenn er schon > 45° im neuen Gang steht!
+            if progressed_angle > 45.0:
                 
-                # Wenn wir stark von unserer GEPLANTEN Kurve abweichen müssen (> 15% Unterschied):
-                if abs(required_ratio - self.lane_ratio_exit) > 0.15:
-                    self.get_logger().warn(f"!!! PANIC EXIT !!! Kritisches Hindernis ({new_obst_cmd}) erzwingt Abbruch der Kurve!")
-                    panic_exit = True
+                # Nur Hindernisse, die unmittelbar auf der neuen Gerade stehen (0.0 bis 0.8m)
+                new_obst_cmd, new_obst = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 0.8)
+                required_ratio = self.lane_ratio_exit
+                
+                if new_obst_cmd is not None and new_obst_cmd != "CLEAR":
+                    # FIX: Verwende ZWINGEND 2.0 als Dummy-Distanz! 
+                    required_ratio = self.set_lane_ratio_for_obstacle_cmd(
+                        new_obst_cmd, new_obst, 2.0, is_turn_exit=True, apply_state=False
+                    )
+                    
+                    # Wenn wir stark von unserer GEPLANTEN Kurve abweichen müssen (> 15% Unterschied):
+                    if abs(required_ratio - self.lane_ratio_exit) > 0.15:
+                        self.get_logger().warn(f"!!! PANIC EXIT !!! Kritisches Hindernis ({new_obst_cmd}) erzwingt Abbruch bei {progressed_angle:.1f}°!")
+                        panic_exit = True
 
             # C) Kurve beenden
             if turn_completed or panic_exit:
-                self.get_logger().info("Kurve beendet. Übergebe an Lane-Follower.")
+                if panic_exit:
+                    self.get_logger().info("Notabbruch! Übergebe an Lane-Follower zur Kollisionsvermeidung.")
+                else:
+                    self.get_logger().info("Kurve regulär beendet. Übergebe an Lane-Follower.")
                 
                 cmd.linear.x = self.base_speed
                 cmd.angular.z = 0.0
