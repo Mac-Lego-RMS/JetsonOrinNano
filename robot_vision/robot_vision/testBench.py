@@ -1234,7 +1234,7 @@ class WallFollower(Node):
             
             # FILTER 3: Ist das Cluster im 15-Grad-Sichtfeld der Kamera?
             diff = abs(self.angle_diff(angle_rad, camera_angle_rad))
-            if diff < math.radians(15.0):
+            if diff < math.radians(8.0):
                 
                 closest_point = self.get_closest_point_in_cluster(cluster)
                 if closest_point is not None:
@@ -1873,20 +1873,44 @@ class WallFollower(Node):
     # State Maschine Obstacle Parcour
     # -----------------------------------------
 
-    def check_for_obstacle_color(self, point_data, turn_count, min_distance_to_obstacle=0.0, max_distance_to_obstacle=2.0):
-        current_straight = turn_count % 4
+    def check_for_obstacle_color(self, point_data, requested_turn_count, min_distance_to_obstacle=0.0, max_distance_to_obstacle=2.0):
+        current_straight = requested_turn_count % 4
         current_obstacle = self.obstacle_memory[current_straight]
+        
         if current_obstacle is None:
             detected_obstacles = self.get_obstacles_from_camera(point_data)
+            
             if detected_obstacles:
+                # 1. Y-FILTER: Nur Hindernisse ab der Mindestdistanz
                 detected_obstacles = list(filter(lambda x: x[1] > min_distance_to_obstacle, detected_obstacles))
+                
+                # ========================================================
+                # 2. DYNAMISCHER X-FILTER (Dein Lebensretter-Fix!)
+                # ========================================================
+                if requested_turn_count == self.turn_count:
+                    # Fall A: Wir scannen die AKTUELLE Gerade.
+                    # -> Strenger Tunnelblick (max. +/- 45cm). Keine Nachbarbahnen!
+                    detected_obstacles = list(filter(lambda x: abs(x[0]) <= 0.45, detected_obstacles))
+                else:
+                    # Fall B: Wir scannen die NÄCHSTE Gerade (Zukunfts-Planung).
+                    # -> Der Roboter blickt in die Kurve. Das Hindernis hat extreme X-Werte!
+                    if self.fahrtrichtung == 'links':
+                        # Kurve geht nach links (negatives X).
+                        # Erlaube alles links, blockiere nur extremen Müll auf der rechten Seite.
+                        detected_obstacles = list(filter(lambda x: x[0] <= 0.15, detected_obstacles))
+                    elif self.fahrtrichtung == 'rechts':
+                        # Kurve geht nach rechts (positives X).
+                        # Erlaube alles rechts, blockiere nur extremen Müll auf der linken Seite.
+                        detected_obstacles = list(filter(lambda x: x[0] >= -0.15, detected_obstacles))
+
+                # 3. Nach echter Distanz (Hypotenuse) sortieren
                 detected_obstacles.sort(key=lambda x: math.hypot(x[0], x[1]))
                 
                 if detected_obstacles:
                     closest_x, closest_y, closest_color = detected_obstacles[0]
-                    closest_x, closest_y, closest_color = detected_obstacles[0]
                     closest_dist = math.hypot(closest_x, closest_y)
-                    if closest_dist < max_distance_to_obstacle and closest_dist > min_distance_to_obstacle:
+                    
+                    if min_distance_to_obstacle < closest_dist < max_distance_to_obstacle:
                         new_obstacle = Obstacle(closest_color, None)
                         self.obstacle_memory[current_straight] = new_obstacle
                         self.get_logger().warn(f"+++ HINDERNIS GELOCKT: {closest_color.upper()}, {closest_dist:.2f} m auf Gerade: {current_straight}+++")
