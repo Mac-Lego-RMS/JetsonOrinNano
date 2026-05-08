@@ -737,8 +737,8 @@ class WallFollower(Node):
         dy = np.diff(y)
         dist_manhattan = np.abs(dx) + np.abs(dy)
         
-        # Ein Split passiert primär, wenn die Distanz > 0.15m ist
-        split_mask[1:] = dist_manhattan >= 0.15
+        # Harter Schnitt bei 8cm (0.08m) für WRO-Hindernisse
+        split_mask[1:] = dist_manhattan >= 0.08
 
         # ==========================================
         # 3. AUSREISSER-LOGIK (Vektorisiert)
@@ -746,63 +746,84 @@ class WallFollower(Node):
         # Look-ahead 1 (Abstand zu i-2)
         if len(points) > 2:
             dist_2 = np.abs(x[2:] - x[:-2]) + np.abs(y[2:] - y[:-2])
-            fix_2 = (split_mask[2:]) & (dist_2 < 0.15)
-            split_mask[2:][fix_2] = False # Split aufheben, Lücke überbrückt
+            fix_2 = (split_mask[2:]) & (dist_2 < 0.08)
+            split_mask[2:][fix_2] = False 
 
         # Look-ahead 2 (Abstand zu i-3)
         if len(points) > 3:
             dist_3 = np.abs(x[3:] - x[:-3]) + np.abs(y[3:] - y[:-3])
-            fix_3 = (split_mask[3:]) & (dist_3 < 0.15)
-            split_mask[3:][fix_3] = False # Split aufheben, Lücke überbrückt
+            fix_3 = (split_mask[3:]) & (dist_3 < 0.08)
+            split_mask[3:][fix_3] = False 
 
         # ==========================================
-        # 4. ECKEN-ERKENNUNG (Skalarprodukt)
+        # 4. ECKEN-ERKENNUNG (Skalarprodukt & Rasieren)
         # ==========================================
-        if len(points) > 5:
-            # Vektor A (i-5 zu i-1)
-            vec_a_x = x[4:-1] - x[:-5]
-            vec_a_y = y[4:-1] - y[:-5]
+        if len(points) > 6:
+            vec_a_x = x[3:-3] - x[:-6]
+            vec_a_y = y[3:-3] - y[:-6]
             
-            # Vektor B (i-1 zu i)
-            vec_b_x = x[5:] - x[4:-1]
-            vec_b_y = y[5:] - y[4:-1]
+            vec_b_x = x[6:] - x[3:-3]
+            vec_b_y = y[6:] - y[3:-3]
 
             len_a = np.hypot(vec_a_x, vec_a_y)
             len_b = np.hypot(vec_b_x, vec_b_y)
 
-            # Division durch Null abfangen
-            valid = (len_a > 0.01) & (len_b > 0.01)
+            valid = (len_a > 0.01) & (len_b > 0.01) & (len_a < 0.30) & (len_b < 0.30)
 
-            dot_product = np.ones(len(points) - 5)
+            dot_product = np.ones(len(points) - 6)
             dot_product[valid] = (
                 (vec_a_x[valid] / len_a[valid]) * (vec_b_x[valid] / len_b[valid]) +
                 (vec_a_y[valid] / len_a[valid]) * (vec_b_y[valid] / len_b[valid])
             )
 
-            # Split einfügen, wenn Winkel > 45° (< 0.70)
-            corner_splits = dot_product < 0.70
-            split_mask[5:][corner_splits] = True
+            sharp_angles = dot_product < 0.70
+            padded_dot = np.pad(dot_product, (1, 1), mode='edge')
+            is_local_min = (dot_product <= padded_dot[:-2]) & (dot_product <= padded_dot[2:])
+
+            corner_splits = sharp_angles & is_local_min
+            
+            # DIE LÖSUNG: Wir rufen die Indizes der gefundenen Ecken ab
+            corner_indices = np.where(corner_splits)[0] + 3 # +3 wegen dem [3:-3] Slicing
+            
+            # Wir setzen nicht nur einen Cut, sondern rasieren die Ecke großzügig ab.
+            # Indem wir 3 Splits nebeneinander setzen, entstehen isolierte 1-Punkt-Cluster...
+            for idx in corner_indices:
+                start_idx = max(0, idx - 1)
+                end_idx = min(len(split_mask), idx + 2)
+                split_mask[start_idx:end_idx] = True
 
         # ==========================================
         # 5. ARRAY ZERSCHNEIDEN & WRAP-AROUND
         # ==========================================
-        # Indizes finden, an denen split_mask True ist
         split_indices = np.where(split_mask)[0]
         clusters_raw = np.split(points, split_indices)
         
-        # Leere Cluster filtern (passiert, falls Index 0 True wäre)
-        clusters = [c for c in clusters_raw if len(c) >= 1]
+        # ...die wir hier einfach auslöschen! Nur saubere Linien (> 2 Punkte) überleben.
+        clusters = [c for c in clusters_raw if len(c) > 2]
 
-        # Wrap-around-Fix
+        # Wrap-around-Fix (Jetzt mit Winkel-Schutz!)
         if len(clusters) > 1:
-            first_p = clusters[0][0]
-            last_p = clusters[-1][-1]
-            dist_wrap = abs(first_p[1] - last_p[1]) + abs(first_p[2] - last_p[2])
+            c_last = clusters[-1]
+            c_first = clusters[0]
             
-            if dist_wrap < 0.15:
-                # Kombiniere das letzte und erste Cluster mit vstack
-                clusters[0] = np.vstack((clusters[-1], clusters[0]))
-                clusters.pop()
+            dist_wrap = abs(c_first[0][1] - c_last[-1][1]) + abs(c_first[0][2] - c_last[-1][2])
+            
+            if dist_wrap < 0.08 and len(c_last) > 3 and len(c_first) > 3:
+                # Prüfen, ob der Wrap-Around zufällig genau auf einer Ecke liegt
+                v1_x = c_last[-1][1] - c_last[-4][1]
+                v1_y = c_last[-1][2] - c_last[-4][2]
+                v2_x = c_first[3][1] - c_first[0][1]
+                v2_y = c_first[3][2] - c_first[0][2]
+                
+                l1 = math.hypot(v1_x, v1_y)
+                l2 = math.hypot(v2_x, v2_y)
+                
+                if l1 > 0 and l2 > 0:
+                    dot_wrap = (v1_x * v2_x + v1_y * v2_y) / (l1 * l2)
+                    # Nur mergen, wenn es eine fast gerade Linie ist!
+                    if dot_wrap >= 0.85: 
+                        clusters[0] = np.vstack((c_last, c_first))
+                        clusters.pop()
 
         clusters.sort(key=len, reverse=True)
         return clusters
@@ -863,8 +884,8 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        #self.test_turn_main_logic(point_data)
-        self.main_logic(point_data)
+        self.test_turn_main_logic(point_data)
+        #self.main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
         """
@@ -1111,7 +1132,7 @@ class WallFollower(Node):
 
         for r in results:
             for box in r.boxes:
-                if float(box.conf[0]) > 0.85:
+                if float(box.conf[0]) > 0.80:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     
                     center_x = (x1 + x2) / 2.0
@@ -1563,6 +1584,66 @@ class WallFollower(Node):
     # Testfunktionen
     # -----------------------------------------------
 
+    def clear_all_lines(self):
+        """
+        Löscht alle Linien-Marker im Namespace 'walls'.
+        """
+        marker_array = MarkerArray()
+        # Wir löschen sicherheitshalber die Marker-IDs 0 bis 50.
+        # Falls du mal mehr Wände erwartest, kannst du die Zahl hier erhöhen.
+        for i in range(25):
+            self.delete_marker(marker_array, m_id=i, ns="walls")
+        self.pub_markers.publish(marker_array)
+
+    def visualize_cluster_line(self, cluster, m_id, farbe_name="rot", label="CLUSTER_LINE"):
+        """
+        Erstellt einen Marker für eine Gerade direkt aus dem ersten und letzten Punkt eines Clusters.
+        Das spart enorm CPU-Leistung im Vergleich zur HNF-Visualisierung.
+        
+        Args:
+            cluster: Liste oder Numpy-Array von Punkten (min. 2 Punkte nötig)
+            m_id: Eindeutige ID für den Marker
+            farbe_name: "rot", "gruen", "blau", "cyan", "magenta", "gelb"
+            label: Textbeschriftung an der Linie
+        """
+        # Sicherheitsabbruch: Brauchen mindestens 2 Punkte für eine Linie
+        if cluster is None or len(cluster) < 2:
+            return
+
+        # Farb-Mapping (RGB-Werte normiert auf 0.0 - 1.0)
+        farben = {
+            "rot": (1.0, 0.0, 0.0),
+            "gruen": (0.0, 1.0, 0.0),
+            "blau": (0.0, 0.5, 1.0),
+            "cyan": (0.0, 1.0, 1.0),
+            "magenta": (1.0, 0.0, 1.0),
+            "gelb": (1.0, 1.0, 0.0)
+        }
+        
+        # Fallback auf Weiß (1.0, 1.0, 1.0), falls Farbe nicht existiert
+        rgb = farben.get(farbe_name.lower(), (1.0, 1.0, 1.0))
+        
+        # 1. Start- und Endpunkt aus dem Cluster extrahieren 
+        # (Index 1 = X, Index 2 = Y in deinem Format)
+        start_p = (cluster[0][1], cluster[0][2])
+        ende_p = (cluster[-1][1], cluster[-1][2])
+        
+        # 2. Mittelpunkt für das Text-Label berechnen
+        mitte_x = (start_p[0] + ende_p[0]) / 2.0
+        mitte_y = (start_p[1] + ende_p[1]) / 2.0
+        
+        # 3. Marker-Array vorbereiten
+        marker_array = MarkerArray()
+        
+        # 4. Linie zeichnen (Nutzt deine interne send_line Methode)
+        self.send_line(marker_array, m_id=m_id, p1=start_p, p2=ende_p, color=rgb)
+        
+        # 5. Text-Label exakt in der Mitte der Linie platzieren
+        self.send_text(marker_array, m_id=m_id + 1000, text=label, x=mitte_x, y=mitte_y, color=rgb)
+        
+        # 6. Veröffentlichen
+        self.pub_markers.publish(marker_array)
+
     def visualize_hnf_line(self, hnf_params, m_id, farbe_name="rot", label="HNF_LINE"):
         """
         Erstellt einen Marker für eine Gerade aus der Hesseschen Normalform (n_x, n_y, d).
@@ -1774,100 +1855,40 @@ class WallFollower(Node):
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
     def test_turn_main_logic(self, point_data):
-        self.get_obstacles_from_camera(point_data)
-        '''        if not hasattr(self, 'test_is_turning'):
-            self.test_is_turning = False
-
-        # 1. Alle Cluster finden
+        self.clear_all_lines()
         all_clusters = self.get_all_clusters_sorted(point_data)
-        
-        # --- CLUSTER AUSWAHL (Einmalig zu Beginn) ---
-        if self.begin == True:
-            for c in all_clusters:
-                self.visualize_clusters([c])
+        validated_clusters = self.validate_clusters_straight(all_clusters)
+        '''        for i, c in enumerate(all_clusters):
+            self.visualize_cluster_line(c, m_id=i, farbe_name="rot")'''
+        # WICHTIG: Wir müssen uns die IDs der Basis-Wände merken, BEVOR sie 
+        # von der merge_clusters Funktion durch vstack überschrieben werden!
+        used_ids = set()
+        for c in validated_clusters:
+            if c is not None:
+                used_ids.add(id(c))
                 
-                skip = input("Drücke Enter, um zum nächsten Cluster zu gehen (oder 'q' für Auswahl)...")
-                if skip.lower() in ['q', '#']:
-                    self.begin = False
-                    self.get_logger().info(">>> Starte autonome Test-Bench! Roboter fährt los. <<<")
-                    self.front_wall = c
-                    
-                    self.start_turn_dist = self.get_closest_point_in_cluster(c)[3]
-                    self.get_logger().warn(f"Start Distanz ist {self.start_turn_dist:.2f}m")
-                    
-                    # PID-Regler nullen
-                    self.integral_error = 0.0
-                    self.prev_error = 0.0
-                    break
-                else:
-                    continue
+        # Merge durchführen
+        merged_clusters, left_c = self.merge_clusters(all_clusters, validated_clusters)
+        self.get_obstacles_from_camera(point_data)
         
-        # ==========================================
-        # KONTINUIERLICHE BERECHNUNG (läuft immer)
-        # ==========================================
-        self.front_wall = self.track_front_wall(point_data, self.front_wall)
-        validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-        
-        # Hinweis: außenbande fehlte in deinem Snippet, wird hier für den Methodenaufruf benötigt
-        front_wall_params, side_wall_params = self.test_extract_wall_lines(validated_clusters)
-    
-        # ==========================================
-        # AUTONOME STATE MACHINE (Fahren & Lenken)
-        # ==========================================
-        
-        if not self.test_is_turning:
-            # PHASE 1: ANNÄHERUNG (Geradeaus fahren und auf Trigger warten)
-            
-            target_line_params, max_allowed_radius_m = self.test_calculate_target_line(validated_clusters, desired_wall_distance_m=0.6)
-            self.visualize_hnf_line((1.0, 0, 0), m_id=550, farbe_name="rot", label="")
-
-            intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
-            self.curve_radius_m, entry_point_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius_m)
-        
-            # 1. Motor für die Annäherung aktivieren
-            cmd = Twist()
-            cmd.linear.x = 300.0  # Moderate Test-Geschwindigkeit (z.B. 0.3 m/s)
-            cmd.angular.z = 0.0 # Idealerweise hier deinen Geradeaus-Regler einsetzen
-            self.pub_cmd_vel.publish(cmd)
-            
-            # 2. Trigger kontinuierlich abfragen
-            # WICHTIG: test_check_turn_trigger muss True zurückgeben, wenn Distanz unterschritten ist!
-            trigger_erreicht = self.test_check_turn_trigger(entry_point_distance_m)
-
-            if trigger_erreicht:
-                self.test_is_turning = True
-                self.saved_intersection_angle = intersection_angle
-                self.start_turn_yaw = self.current_yaw
-                self.get_logger().warn(">>> TRIGGER ERREICHT - KURVE STARTET <<<")
+        # 1. Füge auch alle kleinen "Schnipsel", die gemergt wurden, zu den genutzten IDs hinzu
+        for fach in left_c:
+            for c in fach:
+                used_ids.add(id(c))
                 
-        else:
-            # PHASE 2: AUSFÜHRUNG (Servo schlägt ein, Motor fährt weiter)
+        # 2. Filtere den "Rest" heraus: Alles, was nicht in used_ids steht!
+        rest_clusters = [c for c in all_clusters if id(c) not in used_ids]
+        
+        # 3. VISUALISIERUNG
+        
+        # A) Den ungenutzten Rest (Müll/Rauschen) in ROT zeichnen
+        for i, c in enumerate(rest_clusters):
+            self.visualize_cluster_line(c, m_id=i, farbe_name="rot")
             
-            if self.curve_radius_m is not None:
-                # WICHTIG: Du musst in test_execute_turn den Motor jetzt wieder EINSCHALTEN 
-                # (linear.x = 0.3), sonst lenkt er nur und bleibt stehen!
-                self.test_execute_turn(self.curve_radius_m)
-            
-            # Prüfung: Hat der Roboter sich weit genug gedreht?
-            self.get_logger().info(f"Alte Winkelberchnung: {self.get_cluster_angle(self.front_wall)}")
-            turn_completed = self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params)
-            
-            if turn_completed:
-                self.get_logger().info(">>> KURVE BEENDET! STOPPE ROBOTER <<<")
-                self.test_is_turning = False
-                
-                # Motor und Servo sofort stoppen
-                cmd = Twist()
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0 
-                self.pub_cmd_vel.publish(cmd)
-                
-                # Pausiert die Schleife, bis du den Roboter für den nächsten Test aufgestellt hast
-                input("Test abgeschlossen. Roboter manuell umstellen und Enter drücken...")
-                self.begin = True  # Startet die Cluster-Auswahl neu
-        self.counter = 0
-        return'''
-        # ==========================================
+        # B) Die fertigen, sauberen Hauptwände in GRÜN zeichnen 
+        # (ID ab 100, damit sie die roten Linien nicht überschreiben)
+        for i in range(3):
+            self.visualize_cluster_line(merged_clusters[i], m_id=i+100, farbe_name="gruen")
 
     # -----------------------------------------
     # State Maschine Obstacle Parcour
