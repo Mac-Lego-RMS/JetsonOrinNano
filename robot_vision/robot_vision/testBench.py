@@ -138,7 +138,7 @@ class WallFollower(Node):
         self.right_wall = None
         
         # Karotten-Parameter Geradeausfahrt
-        self.lookahead_dist_straight = 0.35    # Wie weit schaut der Roboter voraus? (60 cm)
+        self.lookahead_dist_straight = 0.20    # Wie weit schaut der Roboter voraus? (60 cm)
         self.min_wall_dist = 0.15       
 
         self.standard_lane_ratio_approach = 0.60
@@ -158,7 +158,7 @@ class WallFollower(Node):
         self.obstacle_memory = [None, None, None, None]
 
         # --- PID-REGLER PARAMETER ---
-        self.kp = 1.4   # Lenkt hart zur Karotte
+        self.kp = 1.7   # Lenkt hart zur Karotte
         self.kd = 0   # Verhindert das Schlingern (Dämpfung)
         self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
         
@@ -176,12 +176,12 @@ class WallFollower(Node):
         self.LIDAR_OFFSET_M = 0.10
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.28
+        self.IDEAL_RADIUS_M = 0.25
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 270.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 270.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 300.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 300.0  # Leicht reduzierter Speed in der Kurve
 
         # --------------------------------
         # --- YOLO - Global Parameters ---
@@ -727,7 +727,6 @@ class WallFollower(Node):
         x = points[:, 1]
         y = points[:, 2]
 
-        # Split-Maske initialisieren (True = Hier beginnt ein neues Cluster)
         split_mask = np.zeros(len(points), dtype=bool)
 
         # ==========================================
@@ -737,22 +736,22 @@ class WallFollower(Node):
         dy = np.diff(y)
         dist_manhattan = np.abs(dx) + np.abs(dy)
         
-        # Harter Schnitt bei 8cm (0.08m) für WRO-Hindernisse
-        split_mask[1:] = dist_manhattan >= 0.08
+        # PERFORMANCE-FIX 1: Zurück auf 0.15m (15cm). 
+        # Verhindert das Zersplittern von Seitenwänden bei flachen Laser-Winkeln!
+        # (Hindernisse sind ohnehin 40cm entfernt und werden weiterhin perfekt abgetrennt).
+        split_mask[1:] = dist_manhattan >= 0.15
 
         # ==========================================
         # 3. AUSREISSER-LOGIK (Vektorisiert)
         # ==========================================
-        # Look-ahead 1 (Abstand zu i-2)
         if len(points) > 2:
             dist_2 = np.abs(x[2:] - x[:-2]) + np.abs(y[2:] - y[:-2])
-            fix_2 = (split_mask[2:]) & (dist_2 < 0.08)
+            fix_2 = (split_mask[2:]) & (dist_2 < 0.15)
             split_mask[2:][fix_2] = False 
 
-        # Look-ahead 2 (Abstand zu i-3)
         if len(points) > 3:
             dist_3 = np.abs(x[3:] - x[:-3]) + np.abs(y[3:] - y[:-3])
-            fix_3 = (split_mask[3:]) & (dist_3 < 0.08)
+            fix_3 = (split_mask[3:]) & (dist_3 < 0.15)
             split_mask[3:][fix_3] = False 
 
         # ==========================================
@@ -782,15 +781,16 @@ class WallFollower(Node):
 
             corner_splits = sharp_angles & is_local_min
             
-            # DIE LÖSUNG: Wir rufen die Indizes der gefundenen Ecken ab
-            corner_indices = np.where(corner_splits)[0] + 3 # +3 wegen dem [3:-3] Slicing
-            
-            # Wir setzen nicht nur einen Cut, sondern rasieren die Ecke großzügig ab.
-            # Indem wir 3 Splits nebeneinander setzen, entstehen isolierte 1-Punkt-Cluster...
-            for idx in corner_indices:
-                start_idx = max(0, idx - 1)
-                end_idx = min(len(split_mask), idx + 2)
-                split_mask[start_idx:end_idx] = True
+            # PERFORMANCE-FIX 2: Vektorisiertes Rasieren ohne for-Schleife!
+            corner_indices = np.where(corner_splits)[0] + 3 
+            if len(corner_indices) > 0:
+                idx_prev = np.clip(corner_indices - 1, 0, len(split_mask) - 1)
+                idx_next = np.clip(corner_indices + 1, 0, len(split_mask) - 1)
+                
+                # Alle 3 Punkte auf einen Schlag True setzen (C-Speed)
+                split_mask[corner_indices] = True
+                split_mask[idx_prev] = True
+                split_mask[idx_next] = True
 
         # ==========================================
         # 5. ARRAY ZERSCHNEIDEN & WRAP-AROUND
@@ -798,18 +798,16 @@ class WallFollower(Node):
         split_indices = np.where(split_mask)[0]
         clusters_raw = np.split(points, split_indices)
         
-        # ...die wir hier einfach auslöschen! Nur saubere Linien (> 2 Punkte) überleben.
         clusters = [c for c in clusters_raw if len(c) > 2]
 
-        # Wrap-around-Fix (Jetzt mit Winkel-Schutz!)
         if len(clusters) > 1:
             c_last = clusters[-1]
             c_first = clusters[0]
             
             dist_wrap = abs(c_first[0][1] - c_last[-1][1]) + abs(c_first[0][2] - c_last[-1][2])
             
-            if dist_wrap < 0.08 and len(c_last) > 3 and len(c_first) > 3:
-                # Prüfen, ob der Wrap-Around zufällig genau auf einer Ecke liegt
+            # Auch hier wieder zurück auf 15cm
+            if dist_wrap < 0.15 and len(c_last) > 3 and len(c_first) > 3:
                 v1_x = c_last[-1][1] - c_last[-4][1]
                 v1_y = c_last[-1][2] - c_last[-4][2]
                 v2_x = c_first[3][1] - c_first[0][1]
@@ -820,12 +818,19 @@ class WallFollower(Node):
                 
                 if l1 > 0 and l2 > 0:
                     dot_wrap = (v1_x * v2_x + v1_y * v2_y) / (l1 * l2)
-                    # Nur mergen, wenn es eine fast gerade Linie ist!
                     if dot_wrap >= 0.85: 
                         clusters[0] = np.vstack((c_last, c_first))
                         clusters.pop()
 
-        clusters.sort(key=len, reverse=True)
+        # ==========================================
+        # 6. NACH PHYSISCHER LÄNGE SORTIEREN (METER)
+        # ==========================================
+        def get_physical_length(c):
+            if len(c) < 2: return 0.0
+            # Satz des Pythagoras zwischen dem ersten und dem letzten Punkt
+            return math.hypot(c[-1][1] - c[0][1], c[-1][2] - c[0][2])
+
+        clusters.sort(key=get_physical_length, reverse=True)
         return clusters
     
     def get_cluster_angle(self, cluster):
@@ -884,8 +889,8 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        self.test_turn_main_logic(point_data)
-        #self.main_logic(point_data)
+        #self.test_turn_main_logic(point_data)
+        self.main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
         """
@@ -1699,8 +1704,8 @@ class WallFollower(Node):
         front_straight, side_straight = self.extract_wall_lines(u_profile)
         self.get_logger().info(f"Front HNF: {front_straight}")
         self.get_logger().info(f"Side HNF: {side_straight}")
-        self.visualize_hnf_line(front_straight, m_id=200, farbe_name="blau", label="")
-        self.visualize_hnf_line(side_straight, m_id=300, farbe_name="blau", label="")
+        self.visualize_hnf_line(front_straight, m_id=1, farbe_name="blau", label="")
+        self.visualize_hnf_line(side_straight, m_id=0, farbe_name="blau", label="")
         return front_straight, side_straight
 
     def test_calculate_target_line(self, u_profile, obstacle, desired_lane_ratio):
@@ -1709,7 +1714,7 @@ class WallFollower(Node):
         target_line_params, max_radius = self.calculate_target_line(side_line_params, front_line_params, obstacle, desired_lane_ratio)
         radius = f"{max_radius:.2f}" if max_radius is not None else "None"
         #self.get_logger().info(f"Target Line HNF: {target_line_params}, Max Radius: {radius} m")
-        self.visualize_hnf_line(target_line_params, m_id=400, farbe_name="gruen", label="")
+        self.visualize_hnf_line(target_line_params, m_id=3, farbe_name="gruen", label="")
         return target_line_params, max_radius
 
     def test_get_intersection_point(self, target_line_params):
@@ -1745,7 +1750,7 @@ class WallFollower(Node):
             is_left = (self.fahrtrichtung == 'links')
             
             # GeoGebra Winkel-Sektor zeichnen (Radius 0.4 m)
-            self.visualize_geogebra_angle(marker_array, intersection_y_m, turn_angle_deg, is_left_turn=is_left, m_id=960, radius=0.4)
+            self.visualize_geogebra_angle(marker_array, intersection_y_m, turn_angle_deg, is_left_turn=is_left, m_id=20, radius=0.4)
             
             # Text-Label für den Winkel am Rand des Bogens platzieren
             text_x = -0.45 if is_left else 0.45
@@ -1780,7 +1785,7 @@ class WallFollower(Node):
 
     def test_check_turn_completion_fused(self, target_angle, front_line_params):
         """Testet die Funktion check_turn_completion_fused() und loggt, ob die Kurve als abgeschlossen gilt."""
-        self.visualize_hnf_line(front_line_params, m_id=550, farbe_name="rot", label="front_wall")
+        self.visualize_hnf_line(front_line_params, m_id=1, farbe_name="rot", label="front_wall")
         completed = self.check_turn_completion_fused(target_angle, front_line_params)
         status = "COMPLETED" if completed else "IN PROGRESS"
         self.get_logger().info(f"Turn Completion Check: {status} (Current Gyro: {self.current_yaw:.2f}°, Target Angle: {target_angle:.2f}°)")
@@ -1888,7 +1893,7 @@ class WallFollower(Node):
         # B) Die fertigen, sauberen Hauptwände in GRÜN zeichnen 
         # (ID ab 100, damit sie die roten Linien nicht überschreiben)
         for i in range(3):
-            self.visualize_cluster_line(merged_clusters[i], m_id=i+100, farbe_name="gruen")
+            self.visualize_cluster_line(merged_clusters[i], m_id=i+15, farbe_name="gruen")
 
     # -----------------------------------------
     # State Maschine Obstacle Parcour
@@ -2034,9 +2039,9 @@ class WallFollower(Node):
                         obst_is_outer = obst_zone_id % 10 == 1
                         
                         if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                            target_ratio = 0.35 if obst_is_outer else 0.25
+                            target_ratio = 0.30 if obst_is_outer else 0.20
                         else:
-                            target_ratio = 0.75 if obst_is_outer else 0.65     
+                            target_ratio = 0.80 if obst_is_outer else 0.70     
                     else:
                         # Wir sind weiter als 1.2m entfernt. Ignoriere das Hindernis vorerst.
                         pass
@@ -2273,9 +2278,9 @@ class WallFollower(Node):
             self.state = 'STOPPED'
             return
 
-        self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
-        self.visualize_hnf_line(left_wall_hnf, m_id=111, farbe_name="blau", label="Links HNF")
-        self.visualize_hnf_line(right_wall_hnf, m_id=112, farbe_name="gruen", label="Rechts HNF")
+        self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
+        self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
+        self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
 
         if self.fahrtrichtung == 'links':
             innenbande = self.left_wall
@@ -2340,7 +2345,7 @@ class WallFollower(Node):
             # 1. Wände tracken und Geometrie berechnen
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
-            self.visualize_hnf_line(front_wall_hnf, m_id=550, farbe_name="rot", label="Front HNF")
+            self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
             if front_wall_hnf is not None:
                 allowed_obst_dist = max(0.25, front_wall_hnf[2] - 0.25)
             else:
@@ -2506,6 +2511,9 @@ class WallFollower(Node):
 
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
+        if self.counter == 15:
+            self.counter = 0
+            self.clear_all_lines()
         self.get_logger().info(f"Aktueller Status: {self.state}, TurnCount: {self.turn_count}, Lane_Ratio: {self.lane_ratio}, EXIT_Ratio: {self.lane_ratio_exit}")
 
         if self.state == 'STARTING':
@@ -2519,7 +2527,8 @@ class WallFollower(Node):
             
         elif self.state == 'STOPPED':
             self.execute_stop()
-
+        self.counter += 1
+        
 def main(args=None):
     rclpy.init(args=args)
     node = WallFollower()

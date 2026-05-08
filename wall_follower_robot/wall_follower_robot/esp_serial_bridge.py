@@ -69,7 +69,7 @@ class EspSerialBridge(Node):
         # Symmetrische Formel: 
         # Wenn steering_target = -1.0 (Rechts), wird 500 - (-1.0 * 220) = 720
         # Wenn steering_target = 1.0 (Links), wird 500 - (1.0 * 220) = 280
-        servo_pos = int((steering_target * 100))
+        servo_pos = - int((steering_target * 100))
             
         # Absolute physikalische Grenzen erzwingen (280 bis 720)
         servo_pos = max(-100, min(100, servo_pos))
