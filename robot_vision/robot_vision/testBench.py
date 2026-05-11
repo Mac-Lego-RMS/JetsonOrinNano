@@ -180,8 +180,8 @@ class WallFollower(Node):
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 300.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 300.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 0.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 0.0  # Leicht reduzierter Speed in der Kurve
 
         # --------------------------------
         # --- YOLO - Global Parameters ---
@@ -457,9 +457,9 @@ class WallFollower(Node):
                 if abs(mean_x_local) <= 1.0:
                     # GEOGRAFISCHER SPLIT: Behalte deine funktionierende Logik!
                     if mean_x_local > 0:
-                        right_candidates.append(c)
-                    else:
                         left_candidates.append(c)
+                    else:
+                        right_candidates.append(c)
                         
             # ==========================================
             # FRONTWÄNDE (> 45°)
@@ -684,7 +684,7 @@ class WallFollower(Node):
                         u_profile[0] = None
 
                 if wall_dist_left is not None:
-                    if wall_dist_left < 1.5:
+                    if 0.90 < wall_dist_left < 1.80:
                         self.get_logger().warn(f"Abstand der linken Wand {wall_dist_left:.2f}")
                         u_profile[2] = None
 
@@ -695,11 +695,14 @@ class WallFollower(Node):
                         u_profile[2] = None
 
                 if wall_dist_right is not None:
-                    if wall_dist_right < 1.5:
+                    if 0.90 < wall_dist_right < 1.8:
                         self.get_logger().warn(f"Abstand der rechten Wand {wall_dist_right:.2f}")
                         u_profile[0] = None
             
             u_profile, _ = self.merge_clusters(clusters, u_profile)
+            self.visualize_cluster_line(u_profile[0], 0, "cyan")
+            self.visualize_cluster_line(u_profile[1], 1, "cyan")
+            self.visualize_cluster_line(u_profile[2], 2, "cyan")
             return u_profile
 
         self.get_logger().warn(f"Kein Cluster außer der Frontwand gefunden.")
@@ -899,8 +902,8 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        self.test_turn_main_logic(point_data)
-        #self.main_logic(point_data)
+        #self.test_turn_main_logic(point_data)
+        self.main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
         """
