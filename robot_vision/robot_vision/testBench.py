@@ -160,7 +160,7 @@ class WallFollower(Node):
         # --- PID-REGLER PARAMETER ---
         self.kp = 1.7   # Lenkt hart zur Karotte
         self.kd = 0   # Verhindert das Schlingern (Dämpfung)
-        self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
+        self.ki = 0.05   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
         
         self.prev_error = 0.0
         self.integral_error = 0.0
@@ -180,8 +180,8 @@ class WallFollower(Node):
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 0.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 0.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 280.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 280.0  # Leicht reduzierter Speed in der Kurve
 
         # --------------------------------
         # --- YOLO - Global Parameters ---
@@ -902,7 +902,7 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        #self.test_turn_main_logic(point_data)
+        self.test_turn_main_logic(point_data)
         self.main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
@@ -1736,7 +1736,7 @@ class WallFollower(Node):
         if intersection_x is not None and intersection_y is not None:
             self.get_logger().info(f"Schnittpunkt: (X={intersection_x:.2f}, Y={intersection_y:.2f}), Schnittwinkel: {angle:.2f}°")
             marker_array = MarkerArray()
-            self.send_sphere(marker_array, m_id=500, x=intersection_x, y=intersection_y, color=(1.0, 1.0, 0.0)) # Gelb
+            self.send_sphere(marker_array, m_id=20, x=intersection_x, y=intersection_y, color=(1.0, 1.0, 0.0)) # Gelb
             self.pub_markers.publish(marker_array)
             return intersection_x, intersection_y, angle
         
@@ -1757,7 +1757,7 @@ class WallFollower(Node):
     
         if entry_point_distance_m is not None and intersection_y_m is not None:
             # Einlenkpunkt (Start)
-            self.send_sphere(marker_array, m_id=900, x=0.0, y=entry_point_distance_m, color=(0.0, 1.0, 0.0))
+            self.send_sphere(marker_array, m_id=21, x=0.0, y=entry_point_distance_m, color=(0.0, 1.0, 0.0))
             
             # Logische Richtung ermitteln
             is_left = (self.fahrtrichtung == 'links')
@@ -1873,7 +1873,8 @@ class WallFollower(Node):
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
     def test_turn_main_logic(self, point_data):
-        self.clear_all_lines()
+        self.get_obstacles_from_camera(point_data)
+        """        self.clear_all_lines()
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_straight(all_clusters)
         '''        for i, c in enumerate(all_clusters):
@@ -1908,7 +1909,7 @@ class WallFollower(Node):
         for i in range(3):
             self.visualize_cluster_line(merged_clusters[i], m_id=i+15, farbe_name="gruen")
         
-        self.get_logger().info(f"Rest Cluster: {len(rest_clusters)}, Front_wand: {(merged_clusters[1] is not None)}, Linke_wand: {(merged_clusters[2] is not None)}, Rechte_wand: {(merged_clusters[0] is not None)}")
+        self.get_logger().info(f"Rest Cluster: {len(rest_clusters)}, Front_wand: {(merged_clusters[1] is not None)}, Linke_wand: {(merged_clusters[2] is not None)}, Rechte_wand: {(merged_clusters[0] is not None)}")"""
 
     # -----------------------------------------
     # State Maschine Obstacle Parcour
@@ -1994,7 +1995,7 @@ class WallFollower(Node):
         # FIX 1: Max-Shift leicht erhöhen (von 0.012 auf 0.025).
         # Dadurch dauert ein kompletter Spurwechsel ca. 1.5 Sekunden. 
         # Schnell genug, um auszuweichen, aber sanft genug für den PID!
-        max_shift = 0.025 
+        max_shift = 0.035 
         
         # 1. BASIS-ZIEL DEFINIEREN (Abhängig vom Streckenabschnitt)
         if is_turn_exit:
@@ -2383,14 +2384,8 @@ class WallFollower(Node):
                 aussenbande_hnf = left_wall_hnf
 
             # Lane Ratio für die Annäherung updaten
-            front_dist = front_wall_hnf[2] if front_wall_hnf is not None else 2.0
-            self.set_lane_ratio_for_obstacle_cmd(
-                self.current_obstacle_cmd, 
-                self.obstacle_memory[self.turn_count % 4], 
-                front_dist, 
-                is_turn_exit=False, 
-                apply_state=True
-            )
+            """            front_dist = front_wall_hnf[2] if front_wall_hnf is not None else 2.0
+            self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, self.obstacle_memory[self.turn_count % 4], front_dist, is_turn_exit=False, apply_state=True)"""
 
             # Lenkung für Approach berechnen
             steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
