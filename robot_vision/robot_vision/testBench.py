@@ -433,88 +433,98 @@ class WallFollower(Node):
             self.get_logger().warn("Keine Cluster gefunden. Kann Kurvenprofil nicht validieren.")
             return u_profile
 
-        side_candidates = []
+        # 1. Geografische Töpfe initialisieren
+        right_candidates = []
+        left_candidates = []
         front_candidates = []
 
-        # ==========================================
-        # 1. LOKALE WINKEL- UND ABSTANDSKLASSIFIZIERUNG (OHNE GYRO)
-        # ==========================================
         for c in clusters:
             raw_angle = self.get_cluster_angle(c)
             if raw_angle is None:
                 continue
 
-            # Winkel auf 0-90° normalisieren
             angle_norm = abs(raw_angle) % 180
             if angle_norm > 90:
                 angle_norm = 180 - angle_norm
 
-            # Seitenwände liegen lokal nahe 0° (Wir trennen hart bei 45°)
+            # ==========================================
+            # SEITENWÄNDE (Lokal <= 45°)
+            # ==========================================
             if angle_norm <= 45.0:
+                # Da p[1] bei dir Links/Rechts ist:
                 mean_x_local = sum(p[1] for p in c) / len(c)
                 
-                # ABSTANDS-FILTER: Nur Wände zulassen, die lokal max 1.0m seitlich entfernt sind
                 if abs(mean_x_local) <= 1.0:
-                    side_candidates.append(c)
-                    
-            # Frontwände liegen quer vor dem Roboter (> 45°)
+                    # GEOGRAFISCHER SPLIT: Behalte deine funktionierende Logik!
+                    if mean_x_local > 0:
+                        right_candidates.append(c)
+                    else:
+                        left_candidates.append(c)
+                        
+            # ==========================================
+            # FRONTWÄNDE (> 45°)
+            # ==========================================
             else:
+                # Da p[2] bei dir Vorne/Hinten ist:
                 mean_y = sum(p[2] for p in c) / len(c)
-                if mean_y >= 0.85:
+                if mean_y >= 0.15: # Nur Wände VOR dem Roboter
                     front_candidates.append(c)
 
         # ==========================================
-        # 2. SEITENWÄNDE ZUORDNEN & PLAUSIBILITÄT PRÜFEN
+        # 2. SEITENWÄNDE ZUORDNEN & PLAUSIBILITÄT (MIT HNF)
         # ==========================================
-        if len(side_candidates) >= 2:
-            c1 = side_candidates[0] # Größte Wand
-            c2 = side_candidates[1] # Zweitgrößte Wand
+        best_right = right_candidates[0] if right_candidates else None
+        best_left = left_candidates[0] if left_candidates else None
+        
+        best_left_hnf = self.cluster_to_hnf(best_left) if (best_left is not None) else None
+        best_right_hnf = self.cluster_to_hnf(best_right) if (best_right is not None) else None
+
+        if (best_right is not None) and (best_left is not None):
+            self.visualize_cluster_line(best_right, 10, "cyan")
+            self.visualize_cluster_line(best_left, 11, "magenta")
             
-            mean_x1 = sum(p[1] for p in c1) / len(c1)
-            mean_x2 = sum(p[1] for p in c2) / len(c2)
-            
-            # Die physikalische Spurbreite berechnen
-            track_width = abs(mean_x1 - mean_x2)
-            
-            # Toleranz: Die Bahn ist 1.0m breit. Erlaube 25cm Toleranz für Rauschen/Wand-Knicke.
-            # self.get_logger().info(f"Spurbreite: {track_width:.2f}m")
-            if 0.75 <= track_width <= 1.25:
-                # Plausibel! Räumlich sortieren und zuweisen.
-                ordered_sides = self.sort_clusters_right_to_left([c1, c2])
-                u_profile[0] = ordered_sides[0] # Rechts (+X)
-                u_profile[2] = ordered_sides[1] # Links (-X)
-            else:
-                self.get_logger().warn(f"Spurbreite unplausibel ({track_width:.2f}m). Verwerfe schwächere Wand.")
-                # Downgrade auf 1-Wand-Logik mit dem stärksten Cluster (c1)
-                if mean_x1 > 0:
-                    u_profile[0] = c1
+            if best_left_hnf is not None and best_right_hnf is not None:
+                _, _, left_dist = best_left_hnf
+                _, _, right_dist = best_right_hnf
+                
+                # DER WICHTIGSTE FIX FÜR SCHRÄGE ROBOTER:
+                # Absolute HNF-Distanzen addieren, um die 40-Grad-Diagonale zu eliminieren!
+                track_width = abs(left_dist) + abs(right_dist)
+                self.get_logger().info(f"Echte Spurbreite: {track_width:.2f}m, L: {abs(left_dist):.2f}m, R: {abs(right_dist):.2f}m")
+                
+                if 0.75 <= track_width <= 1.25:
+                    u_profile[0] = best_right
+                    u_profile[2] = best_left
                 else:
-                    u_profile[2] = c1
+                    self.get_logger().warn(f"Spurbreite unplausibel ({track_width:.2f}m). Verwerfe kürzere Wand.")
+                    len_r = math.hypot(best_right[-1][1] - best_right[0][1], best_right[-1][2] - best_right[0][2])
+                    len_l = math.hypot(best_left[-1][1] - best_left[0][1], best_left[-1][2] - best_left[0][2])
                     
-        elif len(side_candidates) == 1:
-            c = side_candidates[0]
-            mean_x = sum(p[1] for p in c) / len(c)
-            
-            if mean_x > 0: 
-                u_profile[0] = c # Positiver X-Bereich -> Rechte Wand
+                    if len_r > len_l:
+                        u_profile[0] = best_right
+                    else:
+                        u_profile[2] = best_left
             else:
-                u_profile[2] = c # Negativer X-Bereich -> Linke Wand
+                self.get_logger().warn("HNF Berechnung für eine der Wände fehlgeschlagen.")
+                return [None, None, None]
+                    
+        elif best_right is not None:
+            u_profile[0] = best_right
+        elif best_left is not None:
+            u_profile[2] = best_left
 
         # ==========================================
         # 3. FRONTWAND ZUORDNEN (HARDWARE-FIX)
         # ==========================================
         if front_candidates:
-            # A) Y-Gruppierung (15 cm Toleranz)
+            # A) Y-Gruppierung (Tiefe / Abstand nach vorne)
             groups = []
             for c in front_candidates:
                 mean_y = sum(p[2] for p in c) / len(c)
                 
-                # ==========================================
-                # HINTEN-FILTER: Alles hinter dem Roboter (-Y) 
-                # oder näher als 20cm ignorieren
-                # ==========================================
+                # Alles was zu nah ist, verwerfen
                 if mean_y < 0.20:
-                    continue  # Überspringt diesen Cluster sofort
+                    continue 
                 
                 placed = False
                 for g in groups:
@@ -525,7 +535,7 @@ class WallFollower(Node):
                 if not placed:
                     groups.append({'base_y': mean_y, 'clusters': [c]})
 
-            # B) Breiten-Filter (> 35 cm)
+            # B) Breiten-Filter (Breite der Frontwand liegt auf p[1])
             valid_wall_groups = []
             for g in groups:
                 all_x = [p[1] for c in g['clusters'] for p in c]
@@ -534,7 +544,7 @@ class WallFollower(Node):
                 if total_width > 0.35:
                     valid_wall_groups.append(g)
 
-            # C) Zuweisung (Nächste gültige Wand nehmen)
+            # C) Zuweisung
             if valid_wall_groups:
                 valid_wall_groups.sort(key=lambda g: g['base_y'])
                 winner_group = valid_wall_groups[0]['clusters']
@@ -889,8 +899,8 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        #self.test_turn_main_logic(point_data)
-        self.main_logic(point_data)
+        self.test_turn_main_logic(point_data)
+        #self.main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
         """
@@ -913,7 +923,7 @@ class WallFollower(Node):
         # --- KONFIGURATION DER TOLERANZEN ---
         max_angle_gap = 10.0      # 10 Grad maximale Winkelabweichung
         max_perp_gap = 0.08       # Max 8 cm Abstand WEG von der Wand (verhindert Hindernis-Merge)
-        max_parallel_gap = 0.30   # Max 25 cm Lücke ENTLANG der Wand (schließt Löcher)
+        max_parallel_gap = 0.60   # Max 25 cm Lücke ENTLANG der Wand (schließt Löcher)
 
         valid_ids = [id(v) for v in validated_clusters]
         remaining_clusters = [c for c in all_clusters if id(c) not in valid_ids]
@@ -1894,6 +1904,8 @@ class WallFollower(Node):
         # (ID ab 100, damit sie die roten Linien nicht überschreiben)
         for i in range(3):
             self.visualize_cluster_line(merged_clusters[i], m_id=i+15, farbe_name="gruen")
+        
+        self.get_logger().info(f"Rest Cluster: {len(rest_clusters)}, Front_wand: {(merged_clusters[1] is not None)}, Linke_wand: {(merged_clusters[2] is not None)}, Rechte_wand: {(merged_clusters[0] is not None)}")
 
     # -----------------------------------------
     # State Maschine Obstacle Parcour
@@ -1997,9 +2009,9 @@ class WallFollower(Node):
                 # Hindernis gesehen, aber noch nicht verortet -> PANIK! Hartes Ausweichen.
                 is_evading = True
                 if obstacle_cmd == "green":
-                    target_ratio = 0.25 if is_left else 0.75
+                    target_ratio = 0.20 if is_left else 0.75
                 else:
-                    target_ratio = 0.75 if is_left else 0.25
+                    target_ratio = 0.75 if is_left else 0.20
             else:
                 # Hindernis ist verortet (Der Roboter kennt es!)
                 obst_zone_id = obstacle.zone_id
