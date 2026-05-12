@@ -159,9 +159,9 @@ class WallFollower(Node):
         self.obstacle_memory = [None, None, None, None]
 
         # --- PID-REGLER PARAMETER ---
-        self.kp = 1.7   # Lenkt hart zur Karotte
-        self.kd = 0   # Verhindert das Schlingern (Dämpfung)
+        self.kp = 2.0   # Lenkt hart zur Karotte
         self.ki = 0.05   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
+        self.kd = 0.05   # Verhindert das Schlingern (Dämpfung)
         
         self.prev_error = 0.0
         self.integral_error = 0.0
@@ -193,6 +193,11 @@ class WallFollower(Node):
         # --- YOLO FPS THROTTLING ---
         self.target_yolo_fps = 8.0  # Ziel: 8 Bilder pro Sekunde (anpassbar 7-10)
         self.last_yolo_time = self.get_clock().now().nanoseconds / 1e9
+
+        self.analyzer = TrackAnalyzer(
+            logger=self.get_logger(),
+            visualizer_cb=self.visualize_cluster_line
+        )
 
         self.K = np.array([
             [820.7558,   0.0000, 639.0000],
@@ -256,7 +261,7 @@ class WallFollower(Node):
         self.test_is_turning = False
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
-        self.camera_calibration = True
+        self.camera_calibration = False
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -380,7 +385,7 @@ class WallFollower(Node):
         Test-Hilfsfunktion für die Zollstock-Kalibrierung der Kamera.
         Gibt die Y-Pixelwerte der erkannten Bounding Boxes im Terminal aus.
         """
-        if not bounding_boxes:
+        if bounding_boxes is None:
             # Damit das Terminal nicht geflutet wird, wenn nichts zu sehen ist,
             # kannst du diese Warnung auch auskommentieren.
             # self.get_logger().warn("Kalibrierung: Keine Boxen erkannt.")
@@ -494,7 +499,7 @@ class WallFollower(Node):
                 mean_x_local = sum(p[1] for p in c) / len(c)
                 
                 if abs(mean_x_local) <= 1.0:
-                    # GEOGRAFISCHER SPLIT: Behalte deine funktionierende Logik!
+                    # GEOGRAFISCHER SPLIT
                     if mean_x_local > 0:
                         left_candidates.append(c)
                     else:
@@ -526,7 +531,6 @@ class WallFollower(Node):
                 _, _, left_dist = best_left_hnf
                 _, _, right_dist = best_right_hnf
                 
-                # DER WICHTIGSTE FIX FÜR SCHRÄGE ROBOTER:
                 # Absolute HNF-Distanzen addieren, um die 40-Grad-Diagonale zu eliminieren!
                 track_width = abs(left_dist) + abs(right_dist)
                 self.get_logger().info(f"Echte Spurbreite: {track_width:.2f}m, L: {abs(left_dist):.2f}m, R: {abs(right_dist):.2f}m")
@@ -553,7 +557,7 @@ class WallFollower(Node):
             u_profile[2] = best_left
 
         # ==========================================
-        # 3. FRONTWAND ZUORDNEN (HARDWARE-FIX)
+        # 3. FRONTWAND ZUORDNEN (HARDWARE-FIX & ZONEN-LOGIK)
         # ==========================================
         if front_candidates:
             # A) Y-Gruppierung (Tiefe / Abstand nach vorne)
@@ -561,7 +565,7 @@ class WallFollower(Node):
             for c in front_candidates:
                 mean_y = sum(p[2] for p in c) / len(c)
                 
-                # Alles was zu nah ist, verwerfen
+                # Alles was extrem nah ist, verwerfen
                 if mean_y < 0.20:
                     continue 
                 
@@ -574,13 +578,32 @@ class WallFollower(Node):
                 if not placed:
                     groups.append({'base_y': mean_y, 'clusters': [c]})
 
-            # B) Breiten-Filter (Breite der Frontwand liegt auf p[1])
+            # B) Breiten-Filter & Hybrider Zonen-Check (Der Phantom-Wand Fix)
             valid_wall_groups = []
             for g in groups:
                 all_x = [p[1] for c in g['clusters'] for p in c]
                 total_width = max(all_x) - min(all_x)
                 
-                if total_width > 0.35:
+                min_x = min(all_x)
+                max_x = max(all_x)
+                mean_y = g['base_y']  # Das ist die Distanz der Wand!
+                
+                # ----------------------------------------------------
+                # DIE ZONEN-LOGIK
+                # ----------------------------------------------------
+                # 1. Ist die Wand im Fernbereich? (Keine Phantomwände möglich)
+                is_far_wall = mean_y > 0.70 
+                
+                # 2. Ist die Wand nah, aber blockiert physisch unseren Weg?
+                # (Wir definieren einen Fahrkorridor von X = -0.15m bis X = +0.15m)
+                is_blocking_path = (min_x < 0.15) and (max_x > -0.15)
+                
+                # Eine Wand ist gültig, wenn sie:
+                # - breit genug ist (kein Rauschen, min 35cm) UND
+                # - (entweder weit weg ist ODER unseren direkten Weg blockiert)
+                if total_width > 0.35 and (is_far_wall or is_blocking_path):
+                    if not is_far_wall and is_blocking_path:
+                        self.get_logger().warn(f"Nahe aber blockierende Wand gefunden! Abstand: {mean_y:.2f}m")
                     valid_wall_groups.append(g)
 
             # C) Zuweisung
@@ -941,8 +964,8 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        self.test_turn_main_logic(point_data)
-        #self.main_logic(point_data)
+        #self.test_turn_main_logic(point_data)
+        self.main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
         """
@@ -1049,6 +1072,33 @@ class WallFollower(Node):
 
         return validated_clusters, combined_clusters
 
+    def publish_target_marker(self, x, y):
+        marker = Marker()
+        marker.header.frame_id = "base_link"  # Oder dein Roboter-Koordinatensystem
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "steering"
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        
+        # Position (X und Y wie berechnet, Z leicht über dem Boden)
+        marker.pose.position.x = float(x)
+        marker.pose.position.y = float(y)
+        marker.pose.position.z = 0.1  # 10cm über dem Boden
+        
+        # Größe des Punktes (z.B. 10cm Durchmesser)
+        marker.scale.x = 0.1
+        marker.scale.y = 0.1
+        marker.scale.z = 0.1
+        
+        # Farbe (z.B. leuchtend Orange für die Karotte)
+        marker.color.a = 1.0 # Transparenz (1.0 = voll sichtbar)
+        marker.color.r = 1.0
+        marker.color.g = 0.5
+        marker.color.b = 0.0
+        
+        self.marker_pub.publish(marker)
+
     def get_target_point_straight(self, hnf_innen, hnf_aussen):
         """
         Berechnet den Zielpunkt (Karotte) mithilfe der HNF.
@@ -1059,9 +1109,9 @@ class WallFollower(Node):
         target_x = 0.0
         
         # Plausibilitäts-Check: Wände, die zu weit weg sind, ignorieren
-        if hnf_innen is not None and hnf_innen[2] > 1.2:
+        if hnf_innen is not None and hnf_innen[2] > 1.0:
             hnf_innen = None
-        if hnf_aussen is not None and hnf_aussen[2] > 1.2:
+        if hnf_aussen is not None and hnf_aussen[2] > 1.0:
             hnf_aussen = None
 
         def get_x_at_y(hnf_params, y_val):
@@ -1234,7 +1284,7 @@ class WallFollower(Node):
                 obj_x, obj_y = self.get_weight_point_for_cluster(obstacle_cluster) 
                 
                 # 1. Distanz laut LiDAR
-                lidar_dist = math.hypot(obj_x, obj_y)
+                lidar_dist = abs(obj_y)
                 
                 # 2. Distanz laut Kamera (über unsere neue JSON-Bibliothek!)
                 y_max = box_data['y_max']
@@ -1302,7 +1352,7 @@ class WallFollower(Node):
             
             # FILTER 3: Ist das Cluster im 15-Grad-Sichtfeld der Kamera?
             diff = abs(self.angle_diff(angle_rad, camera_angle_rad))
-            if diff < math.radians(8.0):
+            if diff < math.radians(12.0):
                 
                 closest_point = self.get_closest_point_in_cluster(cluster)
                 if closest_point is not None:
@@ -1318,7 +1368,7 @@ class WallFollower(Node):
                         
         # Reparierter Log-Output
         if best_cluster is not None:
-            self.get_logger().info(f"MATCH: Kamera {math.degrees(camera_angle_rad):.1f}° -> Lidar {best_angle_deg:.1f}° (Distanz: {min_dist:.2f}m)")
+            self.get_logger().info(f"MATCH: Kamera {math.degrees(camera_angle_rad):.1f}° -> Lidar {best_angle_deg:.1f}° (Distanz: {min_dist:.2f}m), yAchsenAbstand: {closest_point[2]:.2f}m")
             return best_cluster
             
         return None
@@ -1550,7 +1600,7 @@ class WallFollower(Node):
             return False
 
         # Toleranzwert (z.B. 7 cm), um Verzögerungen in der Hauptschleife abzufangen
-        trigger_tolerance_m = 0.07 
+        trigger_tolerance_m = 0.10
 
         if entry_point_distance_m <= trigger_tolerance_m:
             return True
@@ -2026,7 +2076,7 @@ class WallFollower(Node):
         # FIX 1: Max-Shift leicht erhöhen (von 0.012 auf 0.025).
         # Dadurch dauert ein kompletter Spurwechsel ca. 1.5 Sekunden. 
         # Schnell genug, um auszuweichen, aber sanft genug für den PID!
-        max_shift = 0.035 
+        max_shift = 0.01
         
         # 1. BASIS-ZIEL DEFINIEREN (Abhängig vom Streckenabschnitt)
         if is_turn_exit:
@@ -2086,9 +2136,9 @@ class WallFollower(Node):
                         obst_is_outer = obst_zone_id % 10 == 1
                         
                         if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                            target_ratio = 0.30 if obst_is_outer else 0.20
+                            target_ratio = 0.35 if obst_is_outer else 0.25
                         else:
-                            target_ratio = 0.80 if obst_is_outer else 0.70     
+                            target_ratio = 0.75 if obst_is_outer else 0.65     
                     else:
                         # Wir sind weiter als 1.2m entfernt. Ignoriere das Hindernis vorerst.
                         pass
@@ -2230,9 +2280,11 @@ class WallFollower(Node):
 
     def evaluate_steering_straight(self, innenbande_hnf, aussenbande_hnf):
         target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
+        self.publish_target_marker(target_x, target_y)
         # 2. PID-REGLER BERECHNEN
         # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
         error = -target_x
+        self.get_logger().info(f"SteeringError: {error:.2f}")
         
         # Integral berechnen (mit Anti-Windup, damit der Wert nicht explodiert)
         self.integral_error += error
@@ -2364,6 +2416,7 @@ class WallFollower(Node):
             if front_dist < 1.20:
                 self.state = f"TURN_{self.fahrtrichtung.upper()}"
                 self.get_logger().warn(f">>> {self.state} EINGELEITET<<<")
+                self.get_logger().info(f"Abstand zur Frontwall: {front_dist:.2f}m")
                 return
             else:
                 if front_dist < 1.40:
@@ -2419,6 +2472,7 @@ class WallFollower(Node):
             self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, self.obstacle_memory[self.turn_count % 4], front_dist, is_turn_exit=False, apply_state=True)"""
 
             # Lenkung für Approach berechnen
+            self.get_logger().info(f"InnenbandeHNF: {innenbande_hnf}, AussenbandeHNF: {aussenbande_hnf}")
             steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
             
             # Kurvengeometrie berechnen
