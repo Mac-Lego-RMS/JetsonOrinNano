@@ -23,6 +23,7 @@ import numpy as np
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from robot_vision.steering_lib import SteeringController
+from robot_vision.camera_lib import TrackAnalyzer
 
 from robot_vision.obstacle import Obstacle
 
@@ -255,6 +256,7 @@ class WallFollower(Node):
         self.test_is_turning = False
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
+        self.camera_calibration = True
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -360,6 +362,9 @@ class WallFollower(Node):
             verbose=False,
             conf=0.80      # Minimum auf 70%
         )
+        if self.camera_calibration:
+            raw_boxes = results[0].boxes.xyxy.cpu().numpy()
+            self.test_log_bbox_y_values(raw_boxes)
 
         # DEBUG-BILD (Publiziert das YOLO-Bild mit Boxen)
         annotated_frame = results[0].plot()
@@ -369,6 +374,34 @@ class WallFollower(Node):
         # Ergebnisse thread-sicher in die globale Variable schreiben
         with self.data_lock:
             self.latest_yolo_results = results
+
+    def test_log_bbox_y_values(self, bounding_boxes):
+        """
+        Test-Hilfsfunktion für die Zollstock-Kalibrierung der Kamera.
+        Gibt die Y-Pixelwerte der erkannten Bounding Boxes im Terminal aus.
+        """
+        if not bounding_boxes:
+            # Damit das Terminal nicht geflutet wird, wenn nichts zu sehen ist,
+            # kannst du diese Warnung auch auskommentieren.
+            # self.get_logger().warn("Kalibrierung: Keine Boxen erkannt.")
+            return
+
+        self.get_logger().info(f"--- Starte Y-Wert Messung ({len(bounding_boxes)} Objekt(e)) ---")
+        
+        for i, bbox in enumerate(bounding_boxes):
+            # Format-Annahme: [x_min, y_min, x_max, y_max]
+            # Passe den Index '3' an, falls deine Bounding Box anders aufgebaut ist!
+            
+            try:
+                y_min = int(bbox[1]) # Oberkante des Objekts
+                y_max = int(bbox[3]) # Unterkante des Objekts (Bodenkontakt!)
+                
+                # Wir geben beide aus, aber markieren die Unterkante als WICHTIG
+                self.get_logger().info(
+                    f"Objekt {i+1} -> Oberkante: {y_min} px | WICHTIG (Unterkante/Boden): y_max = {y_max} px"
+                )
+            except IndexError:
+                self.get_logger().error(f"Fehler: Bounding Box hat unerwartetes Format: {bbox}")
 
     def send_text(self, marker_array, m_id, text, x, y, color=(1.0, 1.0, 1.0), scale=0.15):
         """
@@ -909,7 +942,7 @@ class WallFollower(Node):
         
         self.last_point_data = point_data
         self.test_turn_main_logic(point_data)
-        self.main_logic(point_data)
+        #self.main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
         """
@@ -1200,39 +1233,29 @@ class WallFollower(Node):
             if obstacle_cluster is not None:
                 obj_x, obj_y = self.get_weight_point_for_cluster(obstacle_cluster) 
                 
-                # ========================================================
-                # SENSOR-FUSION SANITY CHECK (Der kalibrierte Anti-Geister-Filter)
-                # ========================================================
-                dist = math.hypot(obj_x, obj_y)
+                # 1. Distanz laut LiDAR
+                lidar_dist = math.hypot(obj_x, obj_y)
+                
+                # 2. Distanz laut Kamera (über unsere neue JSON-Bibliothek!)
                 y_max = box_data['y_max']
+                camera_dist = self.analyzer.get_distance_from_bbox(y_max)
                 
-                # EURE WERTE: 30cm = 133px | 80cm = 61px | 1.5m = 42px
+                TOLERANZ = 0.35 
                 
-                # 1. Visuell SEHR NAH (y_max > 90) -> entspricht ca. < 50cm physisch
-                # Wenn es so groß im Bild ist, darf das LiDAR NIEMALS weiter als 0.7m weg sein!
-                if y_max > 90 and dist > 0.7:
-                    self.get_logger().warn(f"Block: {box_data['class_name']} ist SEHR NAH (y={y_max:.0f}), LiDAR aber {dist:.2f}m!")
-                    continue
-                    
-                # 2. Visuell MITTEL-NAH (y_max > 65) -> entspricht ca. < 75cm physisch
-                # Darf keinen LiDAR-Cluster weiter als 1.0m beanspruchen.
-                if y_max > 65 and dist > 1.0:
-                    self.get_logger().warn(f"Block: {box_data['class_name']} ist NAH (y={y_max:.0f}), LiDAR aber {dist:.2f}m!")
-                    continue
-                    
-                # 3. Visuell FERN (y_max < 50) -> entspricht ca. > 1.2m physisch
-                # Wenn es so klein/weit oben im Bild ist, darf das LiDAR nicht näher als 0.8m sein!
-                if y_max < 50 and dist < 0.8:
-                    self.get_logger().warn(f"Block: {box_data['class_name']} ist FERN (y={y_max:.0f}), LiDAR aber {dist:.2f}m!")
-                    continue
+                # Wenn die Differenz zwischen Kamera und LiDAR zu groß ist -> Geister-Wand!
+                if abs(camera_dist - lidar_dist) > TOLERANZ:
+                    self.get_logger().warn(
+                        f"Geister-Filter: {box_data['class_name']} abgelehnt! "
+                        f"Kamera sagt {camera_dist:.2f}m, LiDAR sagt {lidar_dist:.2f}m."
+                    )
+                    continue # Überspringen, da Sensor-Mismatch
                 # ========================================================
 
+                # Wenn wir hier ankommen, sind sich Kamera und LiDAR einig!
                 self.publish_marker(obj_x, obj_y, box_data['class_name'], box_data['class_id'])
                 detected_obstacles.append((obj_x, obj_y, box_data['class_name']))
                 
                 # DER KERN-FIX: Cluster konsumieren!
-                # Entferne den gerade zugewiesenen Cluster aus der Liste, damit verdeckte 
-                # Hindernisse im gleichen Winkel diesen nicht fälschlicherweise beanspruchen.
                 available_clusters = [c for c in available_clusters if not np.array_equal(c, obstacle_cluster)]
                         
         return detected_obstacles
@@ -1879,6 +1902,8 @@ class WallFollower(Node):
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
     def test_turn_main_logic(self, point_data):
+        if self.camera_calibration:
+            return
         self.get_obstacles_from_camera(point_data)
         """        self.clear_all_lines()
         all_clusters = self.get_all_clusters_sorted(point_data)
