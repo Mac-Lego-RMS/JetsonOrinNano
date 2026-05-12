@@ -439,6 +439,12 @@ class WallFollower(Node):
         front_candidates = []
 
         for c in clusters:
+            if len(c) < 20: 
+                continue
+            c_length = math.hypot(c[-1][1] - c[0][1], c[-1][2] - c[0][2])
+            if c_length < 0.25:
+                continue
+
             raw_angle = self.get_cluster_angle(c)
             if raw_angle is None:
                 continue
