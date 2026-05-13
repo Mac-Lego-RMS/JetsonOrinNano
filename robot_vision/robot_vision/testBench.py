@@ -117,6 +117,7 @@ class WallFollower(Node):
         self.last_raw_yaw = None
         self.start_turn_yaw = None
         self.start_straight_yaw = 0.0
+        self.last_turn_aborted = False
         
         
         # Konfiguration
@@ -465,37 +466,51 @@ class WallFollower(Node):
         marker.color.a = 1.0
         marker_array.markers.append(marker)
     
-    def validate_clusters_straight(self, clusters): 
-        u_profile = [None, None, None] # 0=Rechts, 1=Front, 2=Links
+    def validate_clusters_straight(self, clusters):
+        u_profile = [None, None, None]
         if not clusters:
-            self.get_logger().warn("Keine Cluster gefunden. Kann Kurvenprofil nicht validieren.")
             return u_profile
 
-        # 1. Geografische Töpfe initialisieren
+        # 1. Delta berechnen, wenn wir im Gyro-Modus sind
+        # (Wir gehen davon aus, dass self.last_turn_aborted gesetzt wird)
+        delta_yaw = 0.0
+        if not self.last_turn_aborted:
+            # Wie viel stehen wir schräg zum Kurvenausgang?
+            # Achte darauf, dass die Winkel im gleichen Bereich liegen (z.B. -180 bis 180)
+            delta_yaw = self.current_yaw - self.start_straight_yaw
+            
+            # Normierung auf -180 bis 180, falls der Sprung über die 180° Marke geht
+            while delta_yaw > 180: delta_yaw -= 360
+            while delta_yaw < -180: delta_yaw += 360
+
         right_candidates = []
         left_candidates = []
         front_candidates = []
 
         for c in clusters:
-            if len(c) < 20: 
-                continue
-            c_length = math.hypot(c[-1][1] - c[0][1], c[-1][2] - c[0][2])
-            if c_length < 0.25:
-                continue
+            if len(c) < 20: continue
+            
+            # Hier holen wir den lokalen Winkel (relativ zum Roboter)
+            local_angle = self.get_cluster_angle(c)
+            if local_angle is None: continue
 
-            raw_angle = self.get_cluster_angle(c)
-            if raw_angle is None:
-                continue
-
-            angle_norm = abs(raw_angle) % 180
+            # ==========================================
+            # DER GYRO-SHIFT
+            # ==========================================
+            # Wir addieren den Delta-Yaw zum lokalen Winkel.
+            # Wenn der Roboter 30° nach rechts gedreht ist (Delta = -30),
+            # wird eine Wand, die lokal bei +30° liegt, auf 0° korrigiert.
+            shifted_angle = local_angle + delta_yaw
+            
+            # Jetzt nutzen wir den shifted_angle für die Normierung!
+            angle_norm = abs(shifted_angle) % 180
             if angle_norm > 90:
                 angle_norm = 180 - angle_norm
 
-            # ==========================================
-            # SEITENWÄNDE (Lokal <= 45°)
-            # ==========================================
+            # AB HIER BLEIBT ALLES GLEICH
+            # Die Logik prüft nun, ob der korrigierte Winkel <= 45° ist.
             if angle_norm <= 45.0:
-                # Da p[1] bei dir Links/Rechts ist:
+                # Seitenwand-Logik...
                 mean_x_local = sum(p[1] for p in c) / len(c)
                 
                 if abs(mean_x_local) <= 1.0:
@@ -1080,32 +1095,62 @@ class WallFollower(Node):
 
         return validated_clusters, combined_clusters
 
-    def publish_target_marker(self, x, y):
-        marker = Marker()
-        marker.header.frame_id = "base_link"  # Oder dein Roboter-Koordinatensystem
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "steering"
-        marker.id = 0
-        marker.type = Marker.SPHERE
-        marker.action = Marker.ADD
+    def visualize_target_point(self, x, y, m_id=24, farbe_name="gelb", label="TARGET"):
+        """
+        Visualisiert die 'Karotte' (Zielpunkt) als Kugel und Text-Label im Foxglove.
+        Nutzt das bestehende MarkerArray-System.
+        """
+        # 1. Farben definieren (analog zu deiner Cluster-Funktion)
+        farben = {
+            "rot": (1.0, 0.0, 0.0),
+            "gruen": (0.0, 1.0, 0.0),
+            "blau": (0.0, 0.5, 1.0),
+            "cyan": (0.0, 1.0, 1.0),
+            "magenta": (1.0, 0.0, 1.0),
+            "gelb": (1.0, 1.0, 0.0),
+            "orange": (1.0, 0.5, 0.0)
+        }
+        rgb = farben.get(farbe_name.lower(), (1.0, 1.0, 0.0))
+
+        # 2. MarkerArray initialisieren
+        marker_array = MarkerArray()
+
+        # 3. Die Kugel (Sphere) für den Punkt erstellen
+        sphere_marker = Marker()
+        sphere_marker.header.frame_id = "base_link"
+        sphere_marker.header.stamp = self.get_clock().now().to_msg()
+        sphere_marker.ns = "target_point"
+        sphere_marker.id = m_id
+        sphere_marker.type = Marker.SPHERE
+        sphere_marker.action = Marker.ADD
         
-        # Position (X und Y wie berechnet, Z leicht über dem Boden)
-        marker.pose.position.x = float(x)
-        marker.pose.position.y = float(y)
-        marker.pose.position.z = 0.1  # 10cm über dem Boden
+        # Position setzen
+        sphere_marker.pose.position.x = float(x)
+        sphere_marker.pose.position.y = float(y)
+        sphere_marker.pose.position.z = 0.1  # 10cm über dem Boden
         
-        # Größe des Punktes (z.B. 10cm Durchmesser)
-        marker.scale.x = 0.1
-        marker.scale.y = 0.1
-        marker.scale.z = 0.1
+        # Größe (Scale)
+        sphere_marker.scale.x = 0.15
+        sphere_marker.scale.y = 0.15
+        sphere_marker.scale.z = 0.15
         
-        # Farbe (z.B. leuchtend Orange für die Karotte)
-        marker.color.a = 1.0 # Transparenz (1.0 = voll sichtbar)
-        marker.color.r = 1.0
-        marker.color.g = 0.5
-        marker.color.b = 0.0
+        # Farbe setzen
+        sphere_marker.color.r = rgb[0]
+        sphere_marker.color.g = rgb[1]
+        sphere_marker.color.b = rgb[2]
+        sphere_marker.color.a = 1.0
         
-        self.marker_pub.publish(marker)
+        marker_array.markers.append(sphere_marker)
+
+        # 4. Text-Label hinzufügen (Nutzt deine vorhandene send_text Methode!)
+        # Wir setzen den Text ein Stück über die Kugel (z+0.2), damit man ihn besser sieht
+        self.send_text(marker_array, m_id=m_id + 1, text=label, x=x, y=y, color=rgb)
+        
+        # Optional: Den Text etwas anheben, falls send_text das nicht kann, 
+        # musst du in deiner send_text Methode ggf. das Z-Attribut anpassen.
+
+        # 5. Veröffentlichen auf dem zentralen Marker-Topic
+        self.pub_markers.publish(marker_array)
 
     def get_target_point_straight(self, hnf_innen, hnf_aussen):
         """
@@ -2288,7 +2333,7 @@ class WallFollower(Node):
 
     def evaluate_steering_straight(self, innenbande_hnf, aussenbande_hnf):
         target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
-        self.publish_target_marker(target_x, target_y)
+        self.visualize_target_point(target_x, target_y, farbe_name="orange", label="Target_Point")
         # 2. PID-REGLER BERECHNEN
         # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
         error = -target_x
@@ -2311,7 +2356,6 @@ class WallFollower(Node):
         return steering_cmd
 
     def execute_start(self, point_data):
-        
         self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_straight(all_clusters)
@@ -2425,6 +2469,7 @@ class WallFollower(Node):
                 self.state = f"TURN_{self.fahrtrichtung.upper()}"
                 self.get_logger().warn(f">>> {self.state} EINGELEITET<<<")
                 self.get_logger().info(f"Abstand zur Frontwall: {front_dist:.2f}m")
+                self.last_turn_aborted = False
                 return
             else:
                 if front_dist < 1.40:
@@ -2573,6 +2618,7 @@ class WallFollower(Node):
                     if abs(required_ratio - self.lane_ratio_exit) > 0.15:
                         self.get_logger().warn(f"!!! PANIC EXIT !!! Kritisches Hindernis ({new_obst_cmd}) erzwingt Abbruch bei {progressed_angle:.1f}°!")
                         panic_exit = True
+                        self.last_turn_aborted = True
 
             # C) Kurve beenden
             if turn_completed or panic_exit:
