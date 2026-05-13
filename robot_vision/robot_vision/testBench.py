@@ -606,16 +606,24 @@ class WallFollower(Node):
                         self.get_logger().warn(f"Nahe aber blockierende Wand gefunden! Abstand: {mean_y:.2f}m")
                     valid_wall_groups.append(g)
 
-            # C) Zuweisung
+            # ==========================================
+            # 3. C) Zuweisung (SICHERE VERSION)
+            # ==========================================
             if valid_wall_groups:
+                # Nur wenn Gruppen den Zonen-Check bestanden haben, 
+                # wählen wir die nächste/beste aus.
                 valid_wall_groups.sort(key=lambda g: g['base_y'])
                 winner_group = valid_wall_groups[0]['clusters']
                 winner_group.sort(key=len, reverse=True)
                 u_profile[1] = winner_group[0]
             else:
-                front_candidates.sort(key=len, reverse=True)
+                # Wenn kein Cluster den Check bestanden hat, gibt es 
+                # für diesen Durchlauf einfach keine Frontwand.
+                u_profile[1] = None
+                
+                # Optionales Logging für die Fehlersuche:
                 if front_candidates:
-                    u_profile[1] = front_candidates[0]
+                    self.get_logger().debug("Front-Kandidaten vorhanden, aber als Phantomwände abgelehnt.")
 
         return u_profile
 
