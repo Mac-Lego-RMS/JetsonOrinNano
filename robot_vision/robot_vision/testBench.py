@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_CORETYPE"] = "ARMV8" # Optimierung für Jetson CPUs
+
 from platform import node
 
 import rclpy
@@ -10,7 +14,7 @@ import threading
 from sensor_msgs.msg import LaserScan, Imu, Image
 from geometry_msgs.msg import Twist, Point
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import String
+from std_msgs.msg import String, Float64
 from rclpy.qos import qos_profile_sensor_data
 import math
 
@@ -26,6 +30,7 @@ from robot_vision.steering_lib import SteeringController
 from robot_vision.camera_lib import TrackAnalyzer
 
 from robot_vision.obstacle import Obstacle
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 '''
 =============================================================
@@ -75,6 +80,8 @@ class WallFollower(Node):
     def __init__(self):
         super().__init__('wall_follower')
 
+        
+
         # --- MULTITHREADING SETUP ---
         # MutuallyExclusive: Callbacks in dieser Gruppe blockieren sich nur gegenseitig.
         # Wir trennen YOLO und LiDAR physisch voneinander.
@@ -95,11 +102,19 @@ class WallFollower(Node):
             callback_group=self.sensor_cbg  # Läuft in eigenem Thread
         )
         
+        # 1. Wir definieren exakt, wie ROS mit den Daten umgehen soll
+        imu_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,  # Sensordaten werden meist als "Best Effort" gesendet
+            history=HistoryPolicy.KEEP_LAST,            # Wir wollen nur die neuesten
+            depth=1                                     # Und zwar exakt EINEN (Warteschlange abschaffen)
+        )
+
+        # 2. Wir übergeben das neue Profil anstelle der '10'
         self.sub_imu = self.create_subscription(
             Imu, 
             '/bno055/imu', 
             self.imu_callback, 
-            10,
+            imu_qos,
             callback_group=self.sensor_cbg
         )
         
@@ -178,12 +193,12 @@ class WallFollower(Node):
         self.LIDAR_OFFSET_M = 0.10
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.25
+        self.IDEAL_RADIUS_M = 0.35
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 280.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 280.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 350.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 350.0  # Leicht reduzierter Speed in der Kurve
 
         # --------------------------------
         # --- YOLO - Global Parameters ---
@@ -215,7 +230,7 @@ class WallFollower(Node):
         
         # 1. Das YOLO-Modell laden (TensorRT .engine)
         self.get_logger().info('Lade YOLO TensorRT Engine...')
-        self.model = YOLO('/workspace/wro_model.engine', task='detect')
+        self.model = YOLO('/workspace/best.engine', task='detect')
         self.get_logger().info('Modell erfolgreich geladen!')
 
         self.get_logger().info('Starte TensorRT Warm-up...')
@@ -249,12 +264,16 @@ class WallFollower(Node):
 
         self.img_sub = self.create_subscription(
             Image, 
-            '/camera/image_raw', 
+            '/video_source/raw', 
             self.camera_sub_callback, 
             qos_profile_sensor_data,
             callback_group=self.yolo_cbg  # Läuft in eigenem Thread
         )
 
+        self.pub_timer = self.create_publisher(Float64, '/robot_timer', 10)
+        self.start_time_stamp = None
+        self.elapsed_time = 0.0
+        self.timer_active = False
 
         ############ debug ##############
         self.begin = True
@@ -313,6 +332,21 @@ class WallFollower(Node):
         marker.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
         self.marker_pub.publish(marker)
 
+    def update_strategy_params(self):
+        """Passt physikalische Parameter basierend auf dem Fortschritt an."""
+        
+        is_obst_known = self.obstacle_memory[(self.turn_count % 4)] is not None
+        
+        if self.turn_count > 4:
+            self.base_speed = 350.0
+            self.IDEAL_RADIUS_M = 0.40
+            self.standard_lane_ratio_approach = 0.60
+
+        else:
+            self.base_speed = 300.0
+            self.IDEAL_RADIUS_M = 0.25
+            self.standard_lane_ratio_approach = 0.70
+
     def imu_callback(self, msg):
         """
         Wandelt Quaternionen in einen UNENDLICHEN, sprungfreien Winkel um.
@@ -350,34 +384,32 @@ class WallFollower(Node):
         self.last_raw_yaw = raw_yaw
     
     def camera_sub_callback(self, msg):
-        """Wird asynchron vom MultiThreadedExecutor aufgerufen. Blockiert den Lidar nicht!"""
-        
         cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-
-        cv_image = cv2.rotate(cv_image, cv2.ROTATE_180)
         
-        # Sicherheits-Check: Passt die Auflösung zur Kalibrierung?
-        if cv_image.shape[1] != 1280:
-            self.get_logger().warn(f'ACHTUNG: Kamera sendet {cv_image.shape[1]}px, aber Kalibrierung ist für 1280px!', once=True)
-            
+        # YOLO rechnet intern mit 640, liefert aber Boxen passend zu cv_image (1280p) zurück!
         results = self.model.predict(
             cv_image, 
             half=True,    
             imgsz=640,    
             device=0,     
             verbose=False,
-            conf=0.80      # Minimum auf 70%
+            conf=0.75 
         )
-        if self.camera_calibration:
-            raw_boxes = results[0].boxes.xyxy.cpu().numpy()
-            self.test_log_bbox_y_values(raw_boxes)
 
-        # DEBUG-BILD (Publiziert das YOLO-Bild mit Boxen)
-        annotated_frame = results[0].plot()
-        debug_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
-        self.pub_debug_img.publish(debug_msg)
-        
-        # Ergebnisse thread-sicher in die globale Variable schreiben
+        if len(results[0].boxes) > 0:
+            # Diese Boxen sind jetzt automatisch wieder im 1280x720 Format!
+            raw_boxes = results[0].boxes.xyxy.cpu().numpy().astype(float)
+            
+            if self.camera_calibration:
+                # Deine Kalibrierung passt jetzt wieder perfekt ohne scaled_boxes
+                self.test_log_bbox_y_values(raw_boxes)
+
+        if self.pub_debug_img.get_subscription_count() > 0:
+            annotated_frame = results[0].plot()
+            debug_msg = self.bridge.cv2_to_imgmsg(annotated_frame, encoding="bgr8")
+            self.pub_debug_img.publish(debug_msg)
+
+        # ... Debug-Bild Logik bleibt gleich ...
         with self.data_lock:
             self.latest_yolo_results = results
 
@@ -500,7 +532,7 @@ class WallFollower(Node):
             # Wir addieren den Delta-Yaw zum lokalen Winkel.
             # Wenn der Roboter 30° nach rechts gedreht ist (Delta = -30),
             # wird eine Wand, die lokal bei +30° liegt, auf 0° korrigiert.
-            shifted_angle = local_angle + delta_yaw
+            shifted_angle = local_angle - delta_yaw
             
             # Jetzt nutzen wir den shifted_angle für die Normierung!
             angle_norm = abs(shifted_angle) % 180
@@ -987,8 +1019,13 @@ class WallFollower(Node):
         point_data = np.column_stack((user_angles_deg, x_ros, y_ros, valid_ranges))
         
         self.last_point_data = point_data
-        #self.test_turn_main_logic(point_data)
-        self.main_logic(point_data)
+
+        self.update_strategy_params()
+
+        if self.camera_calibration:
+            self.test_turn_main_logic(point_data)
+        else:
+            self.main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
         """
@@ -1273,17 +1310,13 @@ class WallFollower(Node):
         if not results:
             return None
 
-        # KONFIGURATION FÜR LINEARE ABBILDUNG
+        # --- KONFIGURATION FÜR 1280p ---
         H_FOV = 120.0  
-        IMAGE_WIDTH = 640.0
+        IMAGE_WIDTH = 1280.0  # Zurück auf Originalbreite
         CENTER_X = IMAGE_WIDTH / 2.0
         DEG_PER_PIXEL = H_FOV / IMAGE_WIDTH 
 
-        class_mapping = {
-            0: 'green',
-            2: 'red',
-            1: 'pink'
-        }
+        class_mapping = {0: 'green', 1: 'red', 2: 'pink'}
 
         # ==========================================
         # PHASE 1: Yolo-Daten sammeln & sortieren
@@ -1292,22 +1325,28 @@ class WallFollower(Node):
 
         for r in results:
             for box in r.boxes:
-                if float(box.conf[0]) > 0.80:
+                # Schwelle auf 0.75 gesenkt für stabilere Erkennung
+                if float(box.conf[0]) > 0.75:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     
+                    # Winkelberechnung (Nutzt jetzt 1280px als Basis)
                     center_x = (x1 + x2) / 2.0
                     pixel_offset = center_x - CENTER_X
                     angle_offset_deg = pixel_offset * DEG_PER_PIXEL
                     
+                    # Berechnung des Winkels relativ zum Roboter (Lidar-Raum)
                     cam_angle_deg = 180.0 - angle_offset_deg + self.angle_calibration
                     cam_angle_rad = math.radians(cam_angle_deg)
                     
                     class_id = int(box.cls[0])
                     class_name = class_mapping.get(class_id, f"unknown_{class_id}")
 
-                    # Speichere y2 (y_max) als Referenz für die Tiefe
+                    # === DER FIX: KEINE MANUELLE SKALIERUNG MEHR ===
+                    # Da das Input-Bild 1280x720 ist, ist y2 bereits im 720p-Format.
+                    y_max = float(y2)
+
                     yolo_boxes.append({
-                        'y_max': float(y2),
+                        'y_max': y_max, 
                         'angle_rad': cam_angle_rad,
                         'class_name': class_name,
                         'class_id': class_id
@@ -1316,49 +1355,42 @@ class WallFollower(Node):
         if not yolo_boxes:
             return []
 
-        # Sortiere absteigend nach y_max (Höchster Y-Pixelwert = tiefste Kante im Bild = am nächsten)
+        # Sortieren: Nah nach Fern
         yolo_boxes.sort(key=lambda b: b['y_max'], reverse=True)
 
         # ==========================================
-        # PHASE 2: Konfliktfreie Cluster-Zuweisung
+        # PHASE 2: LiDAR-Fusion & Filter
         # ==========================================
         detected_obstacles = []
-        
-        # Hole einmalig alle Cluster
         available_clusters = self.get_all_clusters_sorted(point_data)
 
-        # Gehe die Hindernisse von nah nach fern durch
         for box_data in yolo_boxes:
-            
-            # Suche im LiDAR anhand des Winkels (nur in den noch verfügbaren Clustern!)
+            # Cluster finden
             obstacle_cluster = self.get_lidar_distance(box_data['angle_rad'], available_clusters)
 
             if obstacle_cluster is not None:
                 obj_x, obj_y = self.get_weight_point_for_cluster(obstacle_cluster) 
                 
-                # 1. Distanz laut LiDAR
                 lidar_dist = abs(obj_y)
                 
-                # 2. Distanz laut Kamera (über unsere neue JSON-Bibliothek!)
-                y_max = box_data['y_max']
-                camera_dist = self.analyzer.get_distance_from_bbox(y_max)
+                # Kamera-Distanz (Nutzt die 720p y_max direkt)
+                camera_dist = self.analyzer.get_distance_from_bbox(box_data['y_max'])
                 
-                TOLERANZ = 0.35 
+                # Toleranz ggf. auf 0.40 erhöhen, falls Lidar/Kamera leicht versetzt sind
+                TOLERANZ = 0.40 
                 
-                # Wenn die Differenz zwischen Kamera und LiDAR zu groß ist -> Geister-Wand!
                 if abs(camera_dist - lidar_dist) > TOLERANZ:
                     self.get_logger().warn(
                         f"Geister-Filter: {box_data['class_name']} abgelehnt! "
-                        f"Kamera sagt {camera_dist:.2f}m, LiDAR sagt {lidar_dist:.2f}m."
+                        f"Kamera: {camera_dist:.2f}m, LiDAR: {lidar_dist:.2f}m."
                     )
-                    continue # Überspringen, da Sensor-Mismatch
-                # ========================================================
+                    continue 
 
-                # Wenn wir hier ankommen, sind sich Kamera und LiDAR einig!
+                # Marker senden & Objekt speichern
                 self.publish_marker(obj_x, obj_y, box_data['class_name'], box_data['class_id'])
                 detected_obstacles.append((obj_x, obj_y, box_data['class_name']))
                 
-                # DER KERN-FIX: Cluster konsumieren!
+                # Cluster konsumieren, damit es nicht doppelt belegt wird
                 available_clusters = [c for c in available_clusters if not np.array_equal(c, obstacle_cluster)]
                         
         return detected_obstacles
@@ -2008,6 +2040,8 @@ class WallFollower(Node):
         if self.camera_calibration:
             return
         self.get_obstacles_from_camera(point_data)
+
+        self.get_logger().info(f"Gyro: {self.current_yaw:.2f}°")
         """        self.clear_all_lines()
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_straight(all_clusters)
@@ -2147,9 +2181,9 @@ class WallFollower(Node):
                 # Hindernis gesehen, aber noch nicht verortet -> PANIK! Hartes Ausweichen.
                 is_evading = True
                 if obstacle_cmd == "green":
-                    target_ratio = 0.20 if is_left else 0.75
+                    target_ratio = 0.25 if is_left else 0.75
                 else:
-                    target_ratio = 0.75 if is_left else 0.20
+                    target_ratio = 0.75 if is_left else 0.25
             else:
                 # Hindernis ist verortet (Der Roboter kennt es!)
                 obst_zone_id = obstacle.zone_id
@@ -2160,7 +2194,7 @@ class WallFollower(Node):
                     # A) In welcher Tiefe (Y-Koordinate) steht das Hindernis ca.?
                     if obst_zone_id <= 1:
                         obst_passed = front_wall_dist < 1.75
-                        obst_y = 2.0  # WICHTIG: Das MUSS hier bleiben, sonst stürzt Python ab!
+                        obst_y = 2.0
                     elif obst_zone_id <= 11:
                         obst_passed = front_wall_dist < 1.25
                         obst_y = 1.5
@@ -2174,11 +2208,9 @@ class WallFollower(Node):
                 # Wenn wir noch nicht dran vorbei sind...
                 if not obst_passed:
                     
-                    # =======================================================
-                    # DEINE NEUE LOGIK:
-                    # Wenn wir die Kurve planen (is_turn_exit) UND das 
-                    # Hindernis weit weg ist (Zone 0 oder 1), ziele auf die Mitte!
-                    # =======================================================
+                    if dist_to_obst < 0.80: # Schwellenwert: 80cm (anpassen nach Test!)
+                        is_evading = True
+
                     if is_turn_exit and obst_zone_id >= 20:
                         target_ratio = 0.50
                         
@@ -2191,14 +2223,9 @@ class WallFollower(Node):
                         if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
                             target_ratio = 0.35 if obst_is_outer else 0.25
                         else:
-                            target_ratio = 0.75 if obst_is_outer else 0.65     
+                            target_ratio = 0.85 if obst_is_outer else 0.65     
                     else:
-                        # Wir sind weiter als 1.2m entfernt. Ignoriere das Hindernis vorerst.
                         pass
-
-        # ==========================================
-        # 3. STATE ANWENDEN ODER ZUKUNFT ZURÜCKGEBEN
-        # ==========================================
         
         # Wenn wir nur vorausplanen (für Kurvenausgang), gib den rohen Wert zurück!
         if not apply_state:
@@ -2356,6 +2383,13 @@ class WallFollower(Node):
         return steering_cmd
 
     def execute_start(self, point_data):
+        if not self.imu_ready:
+            self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
+            return  # Brich hier ab, mach noch nichts!
+
+        self.yaw_offset = self.current_yaw
+        self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen  
+
         self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_straight(all_clusters)
@@ -2390,20 +2424,11 @@ class WallFollower(Node):
                 self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                 return
 
-        if not self.imu_ready:
-            self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
-            return  # Brich hier ab, mach noch nichts!   
 
-        # ==========================================
-        # NEU: WARTE AUF KAMERA & YOLO
-        # ==========================================
         with self.data_lock:
             if len(self.latest_yolo_results) == 0:
                 self.get_logger().info("Warte auf ersten Kamera-Frame und YOLO-Inferenz...")
                 return # Blockiert den Start, bis YOLO wirklich arbeitet
-
-        self.yaw_offset = self.current_yaw
-        self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen
 
         self.state = 'FOLLOW_LANE'
 
@@ -2425,7 +2450,7 @@ class WallFollower(Node):
 
         self.check_undetected_turn(front_wall_hnf)
 
-        if self.turn_count >= self.target_turns and front_wall_hnf[2] < 1.50:
+        if self.turn_count >= self.target_turns and front_wall_hnf is not None and front_wall_hnf[2] < 1.50:
             self.state = 'STOPPED'
             return
 
@@ -2559,10 +2584,6 @@ class WallFollower(Node):
         # PHASE 2: AUSFÜHRUNG (Servo lenkt, Gyro prüft)
         # ---------------------------------------------------------
         elif self.turn_phase == 'EXECUTE':          
-            # 3. Radius stur nach interpolierter Ratio berechnen
-            exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 2.0)
-            self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
-            self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
             if self.current_obstacle_cmd != self.base_obst_cmd:
                 if self.current_obstacle_cmd is not None:
                     is_left = (self.fahrtrichtung == "links")
@@ -2602,21 +2623,16 @@ class WallFollower(Node):
             progressed_angle = abs(yaw_diff)
             
             # Der Roboter darf die Kurve NUR abbrechen, wenn er schon > 45° im neuen Gang steht!
-            if progressed_angle > 45.0:
+            if progressed_angle > 55.0:
                 
                 # Nur Hindernisse, die unmittelbar auf der neuen Gerade stehen (0.0 bis 0.8m)
-                new_obst_cmd, new_obst = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 0.8)
-                required_ratio = self.lane_ratio_exit
+                last_exit_ratio = self.lane_ratio_exit
+                exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 0.7)
+                self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
                 
-                if new_obst_cmd is not None and new_obst_cmd != "CLEAR":
-                    # FIX: Verwende ZWINGEND 2.0 als Dummy-Distanz! 
-                    required_ratio = self.set_lane_ratio_for_obstacle_cmd(
-                        new_obst_cmd, new_obst, 2.0, is_turn_exit=True, apply_state=False
-                    )
-                    
-                    # Wenn wir stark von unserer GEPLANTEN Kurve abweichen müssen (> 15% Unterschied):
-                    if abs(required_ratio - self.lane_ratio_exit) > 0.15:
-                        self.get_logger().warn(f"!!! PANIC EXIT !!! Kritisches Hindernis ({new_obst_cmd}) erzwingt Abbruch bei {progressed_angle:.1f}°!")
+                if exit_obstacle is not None and exit_obstacle_cmd != "CLEAR":
+                    if abs(last_exit_ratio - self.lane_ratio_exit) > 0.15:
+                        self.get_logger().warn(f"!!! PANIC EXIT !!! Kritisches Hindernis ({exit_obstacle_cmd}) erzwingt Abbruch bei {progressed_angle:.1f}°!")
                         panic_exit = True
                         self.last_turn_aborted = True
 
@@ -2631,11 +2647,7 @@ class WallFollower(Node):
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
 
-                # Setze die Spur für den PID-Regler auf der neuen Gerade
-                if panic_exit:
-                    self.lane_ratio = required_ratio # Zwingt den PID sofort auszuweichen!
-                else:
-                    self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
+                self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
                     
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
                 self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
@@ -2646,6 +2658,31 @@ class WallFollower(Node):
                 
                 self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
+
+    def update_timer(self):
+        now = self.get_clock().now()
+
+        # START-BEDINGUNG: Wenn der Roboter den Status STARTING verlässt oder Speed > 0 ist
+        if self.state != 'STARTING' and not self.timer_active:
+            self.start_time_stamp = now
+            self.timer_active = True
+            self.get_logger().info("Timer gestartet!")
+
+        # STOP-BEDINGUNG: Wenn der Roboter fertig ist oder gestoppt wurde
+        # (Passe 'FINISHED' an deinen Ziel-Zustand an)
+        elif self.state == 'FINISHED' and self.timer_active:
+            self.timer_active = False
+            self.get_logger().info(f"Timer gestoppt! Endzeit: {self.elapsed_time:.2f}s")
+
+        # BERECHNUNG & PUBLISH
+        if self.timer_active and self.start_time_stamp is not None:
+            diff = now - self.start_time_stamp
+            self.elapsed_time = diff.nanoseconds / 1e9
+            
+            # Nachricht senden
+            timer_msg = Float64()
+            timer_msg.data = self.elapsed_time
+            self.pub_timer.publish(timer_msg)
     
     def execute_stop(self):
             cmd = Twist()
@@ -2677,6 +2714,7 @@ class WallFollower(Node):
         elif self.state == 'STOPPED':
             self.execute_stop()
         self.counter += 1
+        self.update_timer()
         
 def main(args=None):
     rclpy.init(args=args)

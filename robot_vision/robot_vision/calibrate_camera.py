@@ -3,8 +3,8 @@ import json
 import os
 
 # 1. Trage hier deine frischen Messwerte ein
-y_pixel = np.array([248, 181, 151, 135, 86, 58, 43, 40, 35])
-dist_m = np.array([0.15, 0.2, 0.25, 0.3, 0.5, 0.8, 1.2, 1.6, 2.0])
+y_pixel = np.array([382, 309, 263, 171, 119, 88, 76, 65])
+dist_m = np.array([0.2, 0.25, 0.3, 0.5, 0.8, 1.2, 1.6, 2.0])
 
 u = 1.0 / y_pixel
 
