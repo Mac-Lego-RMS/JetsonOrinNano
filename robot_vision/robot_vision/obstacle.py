@@ -1,5 +1,5 @@
 class Obstacle:
-    def __init__(self, color, zone_id=None):
+    def __init__(self, color, zone_id=None, prediction=False):
         """
         Repräsentiert ein erkanntes Hindernis.
         
@@ -9,6 +9,7 @@ class Obstacle:
         """
         self.color = color.lower()
         self.zone_id = zone_id
+        self.prediction = prediction
         self.pass_direction = self._determine_pass_direction()
 
     def _determine_pass_direction(self):
@@ -32,4 +33,4 @@ class Obstacle:
     def __repr__(self):
         loc_str = f"Zone:{self.zone_id}" if self.is_localized else "Sichtung (Unverortet)"
         dir_str = "RECHTS" if self.pass_direction == 1 else "LINKS"
-        return f"<Obstacle {loc_str} Farbe:{self.color.upper()} Ausweichen:{dir_str}>"
+        return f"<Obstacle {loc_str} Farbe:{self.color.upper()} Ausweichen:{dir_str}, Prediction:{self.prediction}>"
