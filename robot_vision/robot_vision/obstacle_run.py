@@ -76,9 +76,9 @@ Zone Ids:
    🤖
 ============================================================='''
 
-class WallFollower(Node):
+class Obstacle_Run(Node):
     def __init__(self):
-        super().__init__('wall_follower')
+        super().__init__('obstacle_run')
 
         
 
@@ -2727,7 +2727,7 @@ class WallFollower(Node):
         
 def main(args=None):
     rclpy.init(args=args)
-    node = WallFollower()
+    node = Obstacle_Run()
     
     # Der MultiThreadedExecutor verwaltet die parallelen Callback-Gruppen
     executor = MultiThreadedExecutor(num_threads=2)
