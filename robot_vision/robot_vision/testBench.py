@@ -2081,18 +2081,11 @@ class Obstacle_Run(Node):
         # Nutzt m_id + 1, um nicht mit dem Bogen-Marker zu kollidieren
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
-    def ausparken(self, auspark_richtung):
-
-        # ==========================================
-        # RICHTUNGS-LOGIK
-        # ==========================================
-        # Setze hier "rechts" oder "links"
-        auspark_richtung = "rechts"  # <-- Hier anpassen (oder = self.fahrtrichtung setzen)
-
+    def ausparken(self):
         # Multiplikator: 1.0 ändert nichts, -1.0 invertiert die Lenkung
-        steer_mult = -1.0 if auspark_richtung == "links" else 1.0
+        steer_mult = -1.0 if self.fahrtrichtung == "links" else 1.0
 
-        self.get_logger().info(f"START TEST: Hardcodierte Sequenz (Richtung: {auspark_richtung})")
+        self.get_logger().info(f"START TEST: Hardcodierte Sequenz (Richtung: {self.fahrtrichtung})")
 
         # ==========================================
         # HILFSFUNKTION FÜR DEN WATCHDOG
@@ -2540,12 +2533,12 @@ class Obstacle_Run(Node):
 
         if self.fahrtrichtung is None:
             # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
-            dist_left_point = self.get_closest_measure(point_data, 0.0)
-            dist_right_point = self.get_closest_measure(point_data, 0.0)
+            dist_left_point = self.get_closest_measure(point_data, 270.0)
+            dist_right_point = self.get_closest_measure(point_data, 90.0)
 
-            if dist_right_point is None or dist_left_point is None:
-                dist_right = dist_right_point[2]
-                dist_left = dist_left_point[2]
+            if dist_right_point is not None and dist_left_point is not None:
+                dist_right = dist_right_point[3]
+                dist_left = dist_left_point[3]
             else: 
                 self.get_logger().info("Fehler: Mindestens eine Seite gibt keine Werte zurück")
                 return
@@ -2562,14 +2555,16 @@ class Obstacle_Run(Node):
                 self.get_logger().info("Fehler! Keine Wand ist länger als die")
                 self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                 return
-
+        
+        
 
         with self.data_lock:
             if len(self.latest_yolo_results) == 0:
                 self.get_logger().info("Warte auf ersten Kamera-Frame und YOLO-Inferenz...")
                 return # Blockiert den Start, bis YOLO wirklich arbeitet
-
-        #self.state = 'FOLLOW_LANE'
+            
+        self.ausparken()
+        self.state = 'FOLLOW_LANE'
 
     def handle_lane_following(self, point_data):
         cmd = Twist()
