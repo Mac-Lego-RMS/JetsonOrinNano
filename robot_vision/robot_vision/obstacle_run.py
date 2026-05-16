@@ -11,7 +11,7 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 import threading
-from sensor_msgs.msg import LaserScan, Imu, Image
+from sensor_msgs.msg import LaserScan, Imu, Image, Bool
 from geometry_msgs.msg import Twist, Point
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import String, Float64
@@ -117,6 +117,15 @@ class Obstacle_Run(Node):
             imu_qos,
             callback_group=self.sensor_cbg
         )
+
+        self.button_sub = self.create_subscription(
+            Bool,
+            '/button_state',
+            self.button_callback,
+            10
+        )
+
+        self.button_state = False
         
         # Publisher für Bewegung und RViz [cite: 1, 19]
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -420,6 +429,11 @@ class Obstacle_Run(Node):
         # ... Debug-Bild Logik bleibt gleich ...
         with self.data_lock:
             self.latest_yolo_results = results
+
+    def button_callback(self, msg):
+        if msg.data:  # msg.data ist True, wenn der Button gedrückt wurde
+            self.get_logger().info("Hardware-Interrupt empfangen. Trigger ausgelöst.")
+            self.button_state = True
 
     def test_log_bbox_y_values(self, bounding_boxes):
         """
