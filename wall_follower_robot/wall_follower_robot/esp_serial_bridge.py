@@ -68,6 +68,7 @@ class EspSerialBridge(Node):
         servo_packet = bytearray([0xA5, 0x20, 1, (servo_pos >> 8) & 0xFF, servo_pos & 0xFF])
 
         if self.ser.is_open:
+            self.get_logger().info(f'-> Motor: {"Vorwärts" if direction == 0x00 else "Rückwärts"}, PWM={pwm_val} | Servo: {steering_target:.2f} -> Pos={servo_pos}')
             self.ser.write(motor_packet)
             self.ser.write(servo_packet)
             self.ser.flush()
