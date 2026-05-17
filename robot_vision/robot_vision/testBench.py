@@ -160,6 +160,7 @@ class Obstacle_Run(Node):
         self.target_turns = 12
         self.turn_count = 0
         self.is_start_finish_straight = False
+        self.last_turn_for_parking = False
 
         self.front_wall = None
         self.left_wall = None
@@ -370,6 +371,9 @@ class Obstacle_Run(Node):
         else:
             self.is_start_finish_straight = False
             self.standard_lane_ratio_approach = 0.70
+
+        if (self.target_turns - self.turn_count) == 1:
+            self.last_turn_for_parking = True 
 
     def imu_callback(self, msg):
         """
@@ -2275,9 +2279,7 @@ class Obstacle_Run(Node):
 
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
-        
-        # Max-Shift bestimmt die Geschwindigkeit des Spurwechsels (Glättung)
-        max_shift = 0.01
+        max_shift = 0.01 
         
         # --- DISTANZ-FALLBACK (Bei Abschattung durch Säulen) ---
         actual_dist = front_wall_dist if front_wall_dist is not None else 2.0
@@ -2487,7 +2489,7 @@ class Obstacle_Run(Node):
                 closest_f = front_wall_hnf[2]
                 if closest_f < 1.50:
                     self.state = 'STOPPED'
-                    self.get_logger
+                    self.get_logger().info("Stopped nach Gyro Kurve")
                     return
                 
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
@@ -2778,7 +2780,7 @@ class Obstacle_Run(Node):
                 self.pub_cmd_vel.publish(cmd)
 
                 self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
-                    
+
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
                 self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
                 
@@ -2813,6 +2815,9 @@ class Obstacle_Run(Node):
             timer_msg = Float64()
             timer_msg.data = self.elapsed_time
             self.pub_timer.publish(timer_msg)
+
+    def handle_park_maneuver(self, point_data):
+
     
     def execute_stop(self):
             cmd = Twist()
@@ -2843,6 +2848,10 @@ class Obstacle_Run(Node):
             
         elif self.state == 'STOPPED':
             self.execute_stop()
+
+        elif self.state == 'PARKING':
+            self.handle_park_maneuver(point_data)
+
         self.counter += 1
         self.update_timer()
         
