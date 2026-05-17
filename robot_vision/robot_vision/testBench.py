@@ -2280,7 +2280,7 @@ class Obstacle_Run(Node):
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
         max_shift = 0.01 
-        
+    
         # --- DISTANZ-FALLBACK (Bei Abschattung durch Säulen) ---
         actual_dist = front_wall_dist if front_wall_dist is not None else 2.0
 
@@ -2302,6 +2302,24 @@ class Obstacle_Run(Node):
         # 2. HINDERNIS-LOGIK
         # ==========================================
         if obstacle_cmd is not None:
+            if self.last_turn_for_parking and is_turn_exit:
+                if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
+                    target_ratio = 0.25
+                else:
+                    obst_is_relevant = False
+                    if obstacle.is_localized:
+                        obst_is_relevant = (obstacle.zone_id < 2) # Hindernis ist nur relevant wenn es direkt zu beginn der Geraden steht
+                    else: 
+                        if obstacle.prediction:
+                                obst_is_relevant = True
+
+                    if obst_is_relevant:
+                        target_ratio = 0.65
+                    else: 
+                        target_ratio = 0.25
+                return target_ratio
+            
+
             if not obstacle.is_localized:
                 # --- FALL A: HINDERNIS NICHT VERORTET (Kamera-Erkennung) ---
                 if obstacle.prediction and actual_dist < 1.35:
@@ -2488,8 +2506,8 @@ class Obstacle_Run(Node):
             if front_wall_hnf is not None:
                 closest_f = front_wall_hnf[2]
                 if closest_f < 1.50:
-                    self.state = 'STOPPED'
-                    self.get_logger().info("Stopped nach Gyro Kurve")
+                    self.state = 'PARKING'
+                    self.get_logger().info("Geht zum Parken über nach Gyro Kurve")
                     return
                 
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
@@ -2585,10 +2603,6 @@ class Obstacle_Run(Node):
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
         self.check_undetected_turn(front_wall_hnf)
-
-        if self.turn_count >= self.target_turns and front_wall_hnf is not None and front_wall_hnf[2] < 1.50:
-            self.state = 'STOPPED'
-            return
 
         self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
         self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
@@ -2782,14 +2796,20 @@ class Obstacle_Run(Node):
                 self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
 
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
-                self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
-                
-                # WICHTIG: PID-Gedächtnis für die neue Gerade löschen!
+
                 self.prev_error = 0.0
                 self.integral_error = 0.0
                 
                 self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
+
+                if self.turn_count == self.target_turns:
+                    self.state = 'PARKING'
+                else:
+                    self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
+                
+                # WICHTIG: PID-Gedächtnis für die neue Gerade löschen!
+
 
     def update_timer(self):
         now = self.get_clock().now()
@@ -2817,7 +2837,11 @@ class Obstacle_Run(Node):
             self.pub_timer.publish(timer_msg)
 
     def handle_park_maneuver(self, point_data):
-
+        if self.parking_phase == "STOP_AFTER_OBST_RUN":
+        elif self.parking_phase == "APPROACH":
+        elif self.parking_phase == "TURN_PREPARATION":
+        elif self.parking_phase == "EXECUTE_TURN":
+        elif self.parking_phase == "ADDRESSING_PARKING_SPACE":
     
     def execute_stop(self):
             cmd = Twist()
