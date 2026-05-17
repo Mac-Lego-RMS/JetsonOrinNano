@@ -11,10 +11,10 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 import threading
-from sensor_msgs.msg import LaserScan, Imu, Image, Bool
+from sensor_msgs.msg import LaserScan, Imu, Image
 from geometry_msgs.msg import Twist, Point
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import String, Float64
+from std_msgs.msg import String, Float64, Bool
 from rclpy.qos import qos_profile_sensor_data
 import math
 
@@ -351,8 +351,8 @@ class Obstacle_Run(Node):
             self.turn_speed = 400.0
             self.IDEAL_RADIUS_M = 0.35
             self.standard_lane_ratio_approach = 0.60
-            self.kp = 2.0   # Lenkt hart zur Karotte
-            self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
+            self.kp = 1.7    # Lenkt hart zur Karotte
+            self.ki = 0.0    # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
             self.kd = 0.05   # Verhindert das Schlingern (Dämpfung)
 
         else:
@@ -360,8 +360,8 @@ class Obstacle_Run(Node):
             self.turn_speed = 350.0
             self.IDEAL_RADIUS_M = 0.25
             self.standard_lane_ratio_approach = 0.70
-            self.kp = 2.3   # Lenkt hart zur Karotte
-            self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
+            self.kp = 2.0   # Lenkt hart zur Karotte
+            self.ki = 0.0   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
             self.kd = 0.05   # Verhindert das Schlingern (Dämpfung)
 
     def imu_callback(self, msg):

@@ -353,7 +353,7 @@ class Obstacle_Run(Node):
             self.standard_lane_ratio_approach = 0.60
             self.kp = 2.0   # Lenkt hart zur Karotte
             self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
-            self.kd = 0.05   # Verhindert das Schlingern (Dämpfung)
+            self.kd = 0.09   # Verhindert das Schlingern (Dämpfung)
 
         else:
             self.base_speed = 350.0
@@ -2085,69 +2085,62 @@ class Obstacle_Run(Node):
         # Multiplikator: 1.0 ändert nichts, -1.0 invertiert die Lenkung
         steer_mult = -1.0 if self.fahrtrichtung == "links" else 1.0
 
-        self.get_logger().info(f"START TEST: Hardcodierte Sequenz (Richtung: {self.fahrtrichtung})")
+        self.get_logger().info(f"START TEST: Auspark-Sequenz (Richtung: {self.fahrtrichtung})")
 
         # ==========================================
         # HILFSFUNKTION FÜR DEN WATCHDOG
         # ==========================================
-        def drive_step(steer_x, drive_z, duration_sec, step_info=""):
-            """
-            Publiziert die Fahrbefehle kontinuierlich für 'duration_sec' Sekunden,
-            damit der Motor-Controller nicht abschaltet.
-            Die Lenkung wird automatisch je nach 'auspark_richtung' invertiert.
-            """
-            if step_info:
-                self.get_logger().info(step_info)
-            
+        def drive_step(drive_x, steer_z, duration_sec, step_info=""):
             # Lenkung mit dem Multiplikator verrechnen
-            adjusted_steer_x = float(steer_x) * steer_mult
+            adjusted_steer_z = float(steer_z) * steer_mult
                 
             end_time = time.time() + duration_sec
             while time.time() < end_time:
                 cmd = Twist()
-                cmd.linear.x = adjusted_steer_x  # Angepasste Lenkung
-                cmd.angular.z = float(drive_z)   # Fahren (bleibt gleich)
+                # KORREKTUR: linear.x ist Fahren, angular.z ist Lenken!
+                cmd.linear.x = float(drive_x)     # FAHREN (PWM)
+                cmd.angular.z = adjusted_steer_z  # LENKEN (Winkel/Bogenmaß)
                 self.pub_cmd_vel.publish(cmd)
-                time.sleep(0.05) # 20 Nachrichten pro Sekunde (20 Hz)
+                time.sleep(0.001) # 20 Nachrichten pro Sekunde (20 Hz)
 
         # ==========================================
-        # DEINE SEQUENZ
+        # EURE SEQUENZ (Format: Fahren_x, Lenken_z, Zeit)
         # ==========================================
         # Schritt 1
-        drive_step(0.0, 0.8, 2.0, "Schritt 1: Geradeaus, Vorwärts")
+        drive_step(0.0, 0.8, 2.0)
         
         # Schritt 2
-        drive_step(-220.0, 1.4, 0.7, "Schritt 2: Lenkung Links (-220), Vorwärts schnell")
+        drive_step(-220.0, 1.4, 0.7)
         
         # Schritt 3
-        drive_step(0.0, -0.8, 1.5, "Schritt 3: Geradeaus, Rückwärts")
+        drive_step(0.0, -0.8, 1.5)
         
         # Schritt 4
-        drive_step(250.0, -0.8, 0.4, "Schritt 4: Lenkung Rechts (250), Rückwärts")
+        drive_step(250.0, -0.8, 0.4)
         
         # Schritt 5
-        drive_step(0.0, 0.8, 1.5, "Schritt 5: Geradeaus, Vorwärts")
+        drive_step(0.0, 0.8, 1.5)
         
         # Schritt 6
-        drive_step(-220.0, 1.4, 0.5, "Schritt 6: Lenkung Links (-220), Vorwärts schnell")
+        drive_step(-220.0, 1.4, 0.5)
         
         # Schritt 7
-        drive_step(0.0, -0.8, 1.5, "Schritt 7: Geradeaus, Rückwärts")
+        drive_step(0.0, -0.8, 1.5)
         
         # Schritt 8
-        drive_step(250.0, -0.8, 1.5, "Schritt 8: Lenkung Rechts (250), Rückwärts")
+        drive_step(250.0, -0.8, 1.5)
         
         # Schritt 9
-        drive_step(0.0, 0.8, 0.5, "Schritt 9: Geradeaus, Vorwärts")
+        drive_step(0.0, 0.8, 0.5)
         
         # Schritt 10
-        drive_step(350.0, 0.8, 1.4, "Schritt 10: Lenkung stark Rechts (350), Vorwärts")
+        drive_step(350.0, 0.8, 0.5)
 
-        # ==========================================
-        # STOP
-        # ==========================================
-        self.get_logger().info("Test-Sequenz beendet. Stoppe Roboter.")
-        self.execute_stop()
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        cmd.angular.z = 0.0
+        self.pub_cmd_vel.publish(cmd)
+        time.sleep(0.5)
 
     def test_turn_main_logic(self, point_data):
         if self.camera_calibration:
@@ -2443,8 +2436,8 @@ class Obstacle_Run(Node):
                 #self.get_logger().info(f"Zone id wurde detected: {zone_id}")
                 
                 if self.is_start_finish_straight:
-                    if self.obstacle.zone_id % 10 == 1:
-                        self.obstacle.zone_id -= 1  # Zwinge ID auf Innenbahn (01 wird zu 00, 11 zu 10 etc.)
+                    if zone_id % 10 == 1:
+                        zone_id -= 1  # Zwinge ID auf Innenbahn (01 wird zu 00, 11 zu 10 etc.)
                         self.get_logger().info(f"set_obst_pos: Zone auf Innenbahn korrigiert (Neue ID: {self.obstacle.zone_id})")
 
                 # ==========================================
