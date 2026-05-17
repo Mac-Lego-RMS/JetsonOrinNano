@@ -2134,7 +2134,10 @@ class Obstacle_Run(Node):
         drive_step(0.0, 0.8, 0.5)
         
         # Schritt 10
-        drive_step(350.0, 0.8, 0.5)
+        if self.fahrtrichtung == "links":
+            drive_step(350.0, 0.8, 0.5)
+        else:
+            drive_step(350.0, 0.8, 1.4)
 
         cmd = Twist()
         cmd.linear.x = 0.0
@@ -2292,7 +2295,7 @@ class Obstacle_Run(Node):
         # ==========================================
         # 2. HINDERNIS-LOGIK
         # ==========================================
-        if obstacle_cmd is not None:
+        if obstacle_cmd is not None and obstacle is not None:
             if not obstacle.is_localized:
                 # --- FALL A: HINDERNIS NICHT VERORTET (Kamera-Erkennung) ---
                 if obstacle.prediction and actual_dist < 1.35:
@@ -2345,7 +2348,7 @@ class Obstacle_Run(Node):
                         obst_is_outer = obst_zone_id % 10 == 1
                         
                         if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                            target_ratio = 0.35 if obst_is_outer else 0.25
+                            target_ratio = 0.35 if obst_is_outer else 0.22
                         else:
                             target_ratio = 0.80 if obst_is_outer else 0.65
                     else:
@@ -2598,18 +2601,20 @@ class Obstacle_Run(Node):
 
         current_straight = self.turn_count % 4
         current_obstacle = self.obstacle_memory[current_straight]
-        if current_obstacle is None or not current_obstacle.is_localized:
-            current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
 
-        if current_obstacle is None:
-            if front_wall_hnf is not None:
-                self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.75)
-        else: 
-            self.current_obstacle_cmd = current_obstacle.color
+        if self.turn_count != 0 or self.fahrtrichtung == 'rechts':      # Damit wir keine falschen Hindernisse direkt nachdem Ausparken erkennen
+            if current_obstacle is None or not current_obstacle.is_localized:
+                current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
+
+            if current_obstacle is None:
+                if front_wall_hnf is not None:
+                    self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.75)
+            else:
+                self.current_obstacle_cmd = current_obstacle.color
 
         front_dist = front_wall_hnf[2] if front_wall_hnf is not None else None
         self.lane_ratio = self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_dist)
-        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
+        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}, front_dist: {front_dist}m")
 
         if front_wall_hnf is not None and aussenbande_hnf is not None:
             self.check_for_obstacle_color(point_data, (self.turn_count + 1), front_wall_hnf[2] - 0.75, 2.0)
