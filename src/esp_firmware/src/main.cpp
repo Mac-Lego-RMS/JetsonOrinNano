@@ -63,9 +63,9 @@ TaskHandle_t MotorControlTaskHandle;
 volatile bool buttonTriggered = false;
 
 // Interrupt Service Routine (ISR)
-void IRAM_ATTR buttonISR() {
-    buttonTriggered = true;
-}
+//void IRAM_ATTR buttonISR() {
+//7    buttonTriggered = true;
+//}
 
 
 
@@ -246,7 +246,7 @@ public:
     void sendButtonEvent() {
         uint8_t packet[] = {START_BYTE, CMD_BUTTON, 0x01}; // 0x01 = Pressed
         serialPort->write(packet, sizeof(packet));
-        Serial.println("ESP: Button pressed, Event an Jetson gesendet.");
+        //Serial.println("ESP: Button pressed, Event an Jetson gesendet.");
     }
 
     void process() {
@@ -307,7 +307,7 @@ private:
             targetReverse = buffer[0];
             targetSpeed = (buffer[1] << 8) | buffer[2];
             
-            serialPort->printf("ESP: Motor OK | Speed: %d\n", targetSpeed);
+            //serialPort->printf("ESP: Motor OK | Speed: %d\n", targetSpeed);
         } 
         else if (currentCmd == CMD_SERVO) {
             // SCHUTZSPERRE
@@ -343,17 +343,17 @@ private:
             servo->WritePos(id, physicalPos, 0, 0);
             
             // Debug-Ausgabe zur Kontrolle (kannst du später auskommentieren)
-            serialPort->printf("ESP: Servo | CMD: %d%% | Limit(L/R): %d/%d | Pos: %d\n", steerPct, safeLeft, safeRight, physicalPos);
+            //serialPort->printf("ESP: Servo | CMD: %d%% | Limit(L/R): %d/%d | Pos: %d\n", steerPct, safeLeft, safeRight, physicalPos);
         }
         else if (currentCmd == CMD_LED) {
             bool turnOn = buffer[0];
             digitalWrite(PIN_LED, turnOn ? HIGH : LOW);
-            serialPort->printf("ESP: LED OK | State: %s\n", turnOn ? "ON" : "OFF");
+            //serialPort->printf("ESP: LED OK | State: %s\n", turnOn ? "ON" : "OFF");
         }
         else if (currentCmd == CMD_CALIBRATE) {
             runCalibrationRoutine(servo);
             // Jetson mitteilen, wo die neue Mitte liegt
-            serialPort->printf("ESP: Calib OK | Center: %d\n", softwareCenterPos);
+            //serialPort->printf("ESP: Calib OK | Center: %d\n", softwareCenterPos);
         }
         else if (currentCmd == CMD_TORQUE) {
             printTorque(servo);
@@ -395,8 +395,8 @@ void setup() {
     planetaryMotor.begin();
     jetson.begin(115200);     
     // Button Setup
-    pinMode(PIN_BUTTON, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), buttonISR, RISING); // RISING, da NC-Taster öffnet
+    //pinMode(PIN_BUTTON, INPUT_PULLUP);
+    //attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), buttonISR, RISING); // RISING, da NC-Taster öffnet
 
     Serial2.begin(1000000, SERIAL_8N1, PIN_SERVO_RX, PIN_SERVO_TX);
     sc09Servo.pSerial = &Serial2; 
@@ -444,7 +444,7 @@ void loop() {
         if (millis() - lastPressTime > 200) { 
             lastPressTime = millis();
             jetson.sendButtonEvent();
-            Serial.println("Button Pressed!");
+            //Serial.println("Button Pressed!");
         }
     }
     if (Serial.available() > 0) {
