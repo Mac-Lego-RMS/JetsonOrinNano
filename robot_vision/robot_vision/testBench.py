@@ -2116,8 +2116,8 @@ class Obstacle_Run(Node):
             end_time = time.time() + duration_sec
             while time.time() < end_time:
                 cmd = Twist()
-                cmd.linear.x = adjusted_steer_x  # Angepasste Lenkung
-                cmd.angular.z = float(drive_z)   # Fahren (bleibt gleich)
+                cmd.linear.x = float(drive_z) # Fahren
+                cmd.angular.z = adjusted_steer_x # Lenken
                 self.pub_cmd_vel.publish(cmd)
                 time.sleep(0.05) # 20 Nachrichten pro Sekunde (20 Hz)
 
@@ -2905,7 +2905,7 @@ class Obstacle_Run(Node):
                 if self.fahrtrichtung == 'links':
                     self.fahrtrichtung = 'rechts'
                 else: 
-                    self.fahrtrichtung == 'links'
+                    self.fahrtrichtung = 'links'
                 return
             else:
                 if front_dist < 1.60:
@@ -3010,7 +3010,7 @@ class Obstacle_Run(Node):
 
         self.get_logger().info(f"Einparken in die Parklücke. Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
 
-        #validated_clusters = self.validate_clusters_straight(all_clusters)
+        validated_clusters = self.validate_clusters_parking(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
         self.right_wall = merged_validated_clusters[2]
         self.front_wall = merged_validated_clusters[1]
@@ -3121,20 +3121,186 @@ class Obstacle_Run(Node):
 
         return (target_x, target_y)
     
+    def validate_clusters_parking(self, clusters):
+        u_profile = [None, None, None]
+        if not clusters:
+            return u_profile
+
+        # 1. Delta berechnen, wenn wir im Gyro-Modus sind
+        # (Wir gehen davon aus, dass self.last_turn_aborted gesetzt wird)
+        delta_yaw = 0.0
+
+        right_candidates = []
+        left_candidates = []
+        front_candidates = []
+
+        for c in clusters:
+            if len(c) < 20: continue
+            
+            # Hier holen wir den lokalen Winkel (relativ zum Roboter)
+            local_angle = self.get_cluster_angle(c)
+            if local_angle is None: continue
+            
+            # Jetzt nutzen wir den shifted_angle für die Normierung!
+            angle_norm = abs(local_angle) % 180
+            if angle_norm > 90:
+                angle_norm = 180 - angle_norm
+
+            if angle_norm <= 45.0:
+                # Seitenwand-Logik...
+                mean_x_local = sum(p[1] for p in c) / len(c)
+                
+                if abs(mean_x_local) <= 1.0:
+                    # GEOGRAFISCHER SPLIT
+                    if mean_x_local > 0:
+                        left_candidates.append(c)
+                    else:
+                        right_candidates.append(c)
+                        
+            else:
+                # Da p[2] bei dir Vorne/Hinten ist:
+                mean_y = sum(p[2] for p in c) / len(c)
+                if mean_y >= 0.10: # Nur Wände VOR dem Roboter
+                    front_candidates.append(c)
+
+        # ==========================================
+        # 2. SEITENWÄNDE ZUORDNEN & PLAUSIBILITÄT (MIT HNF)
+        # ==========================================
+        best_right = right_candidates[0] if right_candidates else None
+        best_left = left_candidates[0] if left_candidates else None
+        
+        best_left_hnf = self.cluster_to_hnf(best_left) if (best_left is not None) else None
+        best_right_hnf = self.cluster_to_hnf(best_right) if (best_right is not None) else None
+
+        if (best_right is not None) and (best_left is not None):
+            self.visualize_cluster_line(best_right, 10, "cyan")
+            self.visualize_cluster_line(best_left, 11, "magenta")
+            
+            if best_left_hnf is not None and best_right_hnf is not None:
+                _, _, left_dist = best_left_hnf
+                _, _, right_dist = best_right_hnf
+                
+                # Absolute HNF-Distanzen addieren, um die 40-Grad-Diagonale zu eliminieren!
+                track_width = abs(left_dist) + abs(right_dist)
+                self.get_logger().info(f"Echte Spurbreite: {track_width:.2f}m, L: {abs(left_dist):.2f}m, R: {abs(right_dist):.2f}m")
+                
+                if 2.50 <= track_width <= 3.50:
+                    u_profile[0] = best_right
+                    u_profile[2] = best_left
+                else:
+                    self.get_logger().warn(f"Spurbreite unplausibel ({track_width:.2f}m). Verwerfe kürzere Wand.")
+                    len_r = math.hypot(best_right[-1][1] - best_right[0][1], best_right[-1][2] - best_right[0][2])
+                    len_l = math.hypot(best_left[-1][1] - best_left[0][1], best_left[-1][2] - best_left[0][2])
+                    
+                    if len_r > len_l:
+                        u_profile[0] = best_right
+                    else:
+                        u_profile[2] = best_left
+            else:
+                self.get_logger().warn("HNF Berechnung für eine der Wände fehlgeschlagen.")
+                return [None, None, None]
+                    
+        elif best_right is not None:
+            u_profile[0] = best_right
+        elif best_left is not None:
+            u_profile[2] = best_left
+
+        # ==========================================
+        # 3. FRONTWAND ZUORDNEN (HARDWARE-FIX & ZONEN-LOGIK)
+        # ==========================================
+        if front_candidates:
+            # A) Y-Gruppierung (Tiefe / Abstand nach vorne)
+            groups = []
+            for c in front_candidates:
+                mean_y = sum(p[2] for p in c) / len(c)
+                
+                # Alles was extrem nah ist, verwerfen
+                if mean_y < 0.15:
+                    continue 
+                
+                placed = False
+                for g in groups:
+                    if abs(g['base_y'] - mean_y) < 0.15:
+                        g['clusters'].append(c)
+                        placed = True
+                        break
+                if not placed:
+                    groups.append({'base_y': mean_y, 'clusters': [c]})
+
+            # B) Breiten-Filter & Hybrider Zonen-Check (Der Phantom-Wand Fix)
+            valid_wall_groups = []
+            for g in groups:
+                all_x = [p[1] for c in g['clusters'] for p in c]
+                total_width = max(all_x) - min(all_x)
+                
+                min_x = min(all_x)
+                max_x = max(all_x)
+                mean_y = g['base_y']  # Das ist die Distanz der Wand!
+                
+                # ----------------------------------------------------
+                # DIE ZONEN-LOGIK
+                # ----------------------------------------------------
+                # 1. Ist die Wand im Fernbereich? (Keine Phantomwände möglich)
+                is_far_wall = mean_y > 0.70
+                min_allowed_width = 0.45 if self.is_start_finish_straight else 0.35
+                
+                # 2. Ist die Wand nah, aber blockiert physisch unseren Weg?
+                # (Wir definieren einen Fahrkorridor von X = -0.15m bis X = +0.15m)
+                is_blocking_path = (min_x < -0.05) and (max_x > 0.05)
+                
+                # Eine Wand ist gültig, wenn sie:
+                # - breit genug ist (kein Rauschen, min 35cm) UND
+                # - (entweder weit weg ist ODER unseren direkten Weg blockiert)
+                if total_width > min_allowed_width and (is_far_wall or is_blocking_path):
+                    if not is_far_wall and is_blocking_path:
+                        self.get_logger().warn(f"Nahe aber blockierende Wand gefunden! Abstand: {mean_y:.2f}m")
+                    valid_wall_groups.append(g)
+
+            # ==========================================
+            # 3. C) Zuweisung (SICHERE VERSION)
+            # ==========================================
+            if valid_wall_groups:
+                # Nur wenn Gruppen den Zonen-Check bestanden haben, 
+                # wählen wir die nächste/beste aus.
+                valid_wall_groups.sort(key=lambda g: g['base_y'])
+                winner_group = valid_wall_groups[0]['clusters']
+                winner_group.sort(key=len, reverse=True)
+                u_profile[1] = winner_group[0]
+            else:
+                # Wenn kein Cluster den Check bestanden hat, gibt es 
+                # für diesen Durchlauf einfach keine Frontwand.
+                u_profile[1] = None
+                
+                # Optionales Logging für die Fehlersuche:
+                if front_candidates:
+                    self.get_logger().debug("Front-Kandidaten vorhanden, aber als Phantomwände abgelehnt.")
+
+        return u_profile
+    
     def einparken(self):
-        end_time = time.time() + 3.0
-        while time.time() < end_time:
-            cmd = Twist()
-            cmd.linear.x = 0.0  # Angepasste Lenkung
-            cmd.angular.z = float(self.parking_speed)
+        if not hasattr(self, 'einpark_timer'):
+            self.einpark_timer = time.time() + 3.0
+            
+        cmd = Twist()
+        if time.time() < self.einpark_timer:
+            cmd.linear.x = float(self.parking_speed)
+            cmd.angular.z = 0.0
             self.pub_cmd_vel.publish(cmd)
-            time.sleep(0.05) # 20 Nachrichten pro Sekunde (20 Hz)
+        else:
+            self.execute_stop()
+            self.get_logger().info("PARKEN BEENDET! 15 Punkte.")
+            self.state = 'STOPPED'
 
     def handle_park_maneuver(self, point_data):
         if self.parking_phase == 'POSITIONING_FOR_STOP':
             self.handle_lane_following(point_data)
 
         elif self.parking_phase == 'STOP_AFTER_OBST_RUN':
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+
             if self.waiting_timer is None:
                 self.waiting_timer = time.time() + 3.5
             if time.time() < self.waiting_timer:
