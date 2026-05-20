@@ -127,6 +127,8 @@ class Obstacle_Run(Node):
             10
         )
 
+        self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
+
         self.button_state = False
         
         # Publisher für Bewegung und RViz [cite: 1, 19]
@@ -151,7 +153,7 @@ class Obstacle_Run(Node):
         self.get_logger().info('>>> WallFollower Template gestartet. Warte auf LiDAR... <<<')
 
         # --- STATE MACHINE & PFADPLANUNG ---
-        self.state = 'STARTING'    # Startzustand
+        self.state = 'INITIALIZING'    # Startzustand
         self.turn_phase = 'APPROACH'  # Bei Kurven: 'APPROACH', 'TURNING', 'EXIT'
         self.fahrtrichtung = None     # Wird automatisch erkannt
         self.saved_intersection_angle = None
@@ -342,6 +344,12 @@ class Obstacle_Run(Node):
             
         marker.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
         self.marker_pub.publish(marker)
+
+    def set_led(self, state: bool):
+        # Sendet das Signal an deine bestehende esp_serial_bridge
+        msg = Bool()
+        msg.data = state
+        self.led_pub.publish(msg)
 
     def update_strategy_params(self):
         """Passt physikalische Parameter basierend auf dem Fortschritt an."""
@@ -2514,16 +2522,32 @@ class Obstacle_Run(Node):
         steering_cmd = max(-1.0, min(1.0, steering_cmd))
 
         return steering_cmd
-
-    def execute_start(self, point_data):
+    
+    def execute_init(self):
+        self.get_logger().info("Starte den Roboter...")
+        with self.data_lock:
+            if len(self.latest_yolo_results) == 0:
+                self.get_logger().info("Warte auf ersten Kamera-Frame und YOLO-Inferenz...")
+                return
+        
         if not self.imu_ready:
             self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
             return  # Brich hier ab, mach noch nichts!
 
-        self.yaw_offset = self.current_yaw
-        self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen  
+        self.set_led(True)
+        self.state = 'STARTING'
 
-        self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
+    def execute_start(self, point_data):
+        if self.button_state == False:
+            return
+
+        self.button_state = False  # Flag sofort zurücksetzen
+        self.set_led(False)        # LED ausschalten als Bestätigung
+        
+        self.yaw_offset = self.current_yaw
+        self.start_straight_yaw = self.current_yaw 
+
+        self.get_logger().info("Evaluiere Fahrtrichtung und Parke aus")
 
         #self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
 
@@ -2551,13 +2575,6 @@ class Obstacle_Run(Node):
                 self.get_logger().info("Fehler! Keine Wand ist länger als die")
                 self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                 return
-        
-        
-
-        with self.data_lock:
-            if len(self.latest_yolo_results) == 0:
-                self.get_logger().info("Warte auf ersten Kamera-Frame und YOLO-Inferenz...")
-                return # Blockiert den Start, bis YOLO wirklich arbeitet
             
         self.ausparken()
         self.state = 'FOLLOW_LANE'
@@ -2830,7 +2847,10 @@ class Obstacle_Run(Node):
             self.clear_all_lines()
         self.get_logger().info(f"Aktueller Status: {self.state}, TurnCount: {self.turn_count}, Lane_Ratio: {self.lane_ratio}, EXIT_Ratio: {self.lane_ratio_exit}")
 
-        if self.state == 'STARTING':
+        if self.state == 'INITIALIZING':
+            self.execute_init()
+        
+        elif self.state == 'STARTING':
             self.execute_start(point_data)
 
         elif self.state == 'FOLLOW_LANE':
