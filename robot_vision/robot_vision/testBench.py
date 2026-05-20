@@ -127,6 +127,8 @@ class Obstacle_Run(Node):
             10
         )
 
+        self.button_start = False
+
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
         self.button_state = False
@@ -2538,8 +2540,12 @@ class Obstacle_Run(Node):
         self.state = 'STARTING'
 
     def execute_start(self, point_data):
-        if self.button_state == False:
-            return
+        if self.button_start:
+            if not self.button_state:
+                return
+            self.button_state = False
+        else:
+            pass
 
         self.button_state = False  # Flag sofort zurücksetzen
         self.set_led(False)        # LED ausschalten als Bestätigung
