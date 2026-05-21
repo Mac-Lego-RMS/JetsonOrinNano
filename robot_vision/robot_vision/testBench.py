@@ -359,7 +359,7 @@ class Obstacle_Run(Node):
         if self.turn_count > 4:
             self.base_speed = 500.0
             self.turn_speed = 400.0
-            self.IDEAL_RADIUS_M = 0.35
+            self.IDEAL_RADIUS_M = 0.28
             self.standard_lane_ratio_approach = 0.60
             self.kp = 2.0   # Lenkt hart zur Karotte
             self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
@@ -2120,32 +2120,32 @@ class Obstacle_Run(Node):
         drive_step(0.0, 0.8, 2.0)
         
         # Schritt 2
-        drive_step(-220.0, 1.4, 0.7)
+        drive_step(-200.0, 0.8, 0.75)
         
         # Schritt 3
         drive_step(0.0, -0.8, 1.5)
         
         # Schritt 4
-        drive_step(250.0, -0.8, 0.4)
+        drive_step(200.0, -0.8, 0.5)
         
         # Schritt 5
         drive_step(0.0, 0.8, 1.5)
         
         # Schritt 6
-        drive_step(-220.0, 1.4, 0.5)
+        drive_step(-200.0, 1.4, 0.55)
         
         # Schritt 7
         drive_step(0.0, -0.8, 1.5)
         
         # Schritt 8
-        drive_step(250.0, -0.8, 1.5)
+        drive_step(200.0, -0.8, 1.5)
         
         # Schritt 9
         drive_step(0.0, 0.8, 0.5)
         
         # Schritt 10
         if self.fahrtrichtung == "links":
-            drive_step(350.0, 0.8, 0.5)
+            drive_step(350.0, 0.8, 1.2)
         else:
             drive_step(350.0, 0.8, 1.4)
 
@@ -2448,10 +2448,10 @@ class Obstacle_Run(Node):
                 zone_id = self.calculate_zone_id(obst_to_front_wall_dist, obst_to_outer_wall_dist)
                 #self.get_logger().info(f"Zone id wurde detected: {zone_id}")
                 
-                if self.is_start_finish_straight:
+                if self.is_start_finish_straight and zone_id is not None:
                     if zone_id % 10 == 1:
                         zone_id -= 1  # Zwinge ID auf Innenbahn (01 wird zu 00, 11 zu 10 etc.)
-                        self.get_logger().info(f"set_obst_pos: Zone auf Innenbahn korrigiert (Neue ID: {self.obstacle.zone_id})")
+                        self.get_logger().info(f"set_obst_pos: Zone auf Innenbahn korrigiert (Neue ID: {zone_id})")
 
                 # ==========================================
                 # OBJEKT VERORTEN UND SPEICHERN

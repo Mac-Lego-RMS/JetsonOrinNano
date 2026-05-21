@@ -349,7 +349,7 @@ class Obstacle_Run(Node):
         if self.turn_count > 4:
             self.base_speed = 500.0
             self.turn_speed = 400.0
-            self.IDEAL_RADIUS_M = 0.35
+            self.IDEAL_RADIUS_M = 0.28
             self.standard_lane_ratio_approach = 0.60
             self.kp = 2.0   # Lenkt hart zur Karotte
             self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
