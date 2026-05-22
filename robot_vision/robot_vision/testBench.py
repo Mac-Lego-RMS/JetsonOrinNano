@@ -155,6 +155,7 @@ class Obstacle_Run(Node):
         # --- STATE MACHINE & PFADPLANUNG ---
         self.state = 'INITIALIZING'    # Startzustand
         self.turn_phase = 'APPROACH'  # Bei Kurven: 'APPROACH', 'TURNING', 'EXIT'
+        self.parking_phase = 'STOP_AFTER_OBST_RUN'
         self.fahrtrichtung = None     # Wird automatisch erkannt
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
@@ -162,6 +163,8 @@ class Obstacle_Run(Node):
         self.target_turns = 12
         self.turn_count = 0
         self.is_start_finish_straight = False
+        self.last_turn_for_parking = False
+        self.parking_straight = False
 
         self.front_wall = None
         self.left_wall = None
@@ -204,6 +207,8 @@ class Obstacle_Run(Node):
         self.start_turn_dist = 0
         self.target_point = (0, 0)
 
+        self.waiting_timer = None
+
         self.TRACK_WIDTH_M = 1.0
         self.ROBOT_WIDTH_M = 0.15
         self.LIDAR_OFFSET_M = 0.08
@@ -215,6 +220,7 @@ class Obstacle_Run(Node):
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
         self.base_speed = 350.0  # Normale Geschwindigkeit auf der Geraden
         self.turn_speed = 350.0  # Leicht reduzierter Speed in der Kurve
+        self.parking_speed = 250.0
 
         # --------------------------------
         # --- YOLO - Global Parameters ---
@@ -381,6 +387,19 @@ class Obstacle_Run(Node):
         else:
             self.is_start_finish_straight = False
             self.standard_lane_ratio_approach = 0.70
+
+        if (self.target_turns - self.turn_count) == 1 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
+            self.last_turn_for_parking = True
+        else: 
+            self.last_turn_for_parking = False
+
+        if self.target_turns == self.turn_count:
+            self.parking_straight = True
+            self.base_speed = 250.0
+            self.turn_speed = 250.0
+        else:
+            self.parking_straight = False
+
 
     def imu_callback(self, msg):
         """
@@ -1614,7 +1633,7 @@ class Obstacle_Run(Node):
 
         return front_straight, side_straight
 
-    def calculate_target_line(self, side_line_params, front_line_params, obstacle, desired_lane_ratio):
+    def calculate_target_line(self, side_line_params, front_line_params, desired_lane_ratio):
         if front_line_params is None:
             return None, None
 
@@ -1622,14 +1641,6 @@ class Obstacle_Run(Node):
         
         # 1. Basis-Zielgerade
         d_ziel = d_f - (1.0 - desired_lane_ratio)
-        
-        # 2. Hindernis auswerten
-        if obstacle is not None and obstacle.is_localized:
-            # Hier folgt die detaillierte Ausweichlogik basierend auf obstacle.farbe
-            # ...
-            # Beispielhaftes Überschreiben von d_ziel, falls Offset nötig ist:
-            # d_ziel = neues_sicheres_d
-            pass
             
         target_line_params = (n_xf, n_yf, d_ziel)
         
@@ -1941,10 +1952,10 @@ class Obstacle_Run(Node):
         self.visualize_hnf_line(side_straight, m_id=0, farbe_name="blau", label="")
         return front_straight, side_straight
 
-    def test_calculate_target_line(self, u_profile, obstacle, desired_lane_ratio):
+    def test_calculate_target_line(self, u_profile, desired_lane_ratio):
         '''Testet die Funktion calculate_target_line() und visualisiert die Ergebnisse in RViz.'''
         front_line_params, side_line_params = self.extract_wall_lines(u_profile)
-        target_line_params, max_radius = self.calculate_target_line(side_line_params, front_line_params, obstacle, desired_lane_ratio)
+        target_line_params, max_radius = self.calculate_target_line(side_line_params, front_line_params, desired_lane_ratio)
         radius = f"{max_radius:.2f}" if max_radius is not None else "None"
         #self.get_logger().info(f"Target Line HNF: {target_line_params}, Max Radius: {radius} m")
         self.visualize_hnf_line(target_line_params, m_id=3, farbe_name="gruen", label="")
@@ -2241,10 +2252,8 @@ class Obstacle_Run(Node):
 
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
-        
-        # Max-Shift bestimmt die Geschwindigkeit des Spurwechsels (Glättung)
-        max_shift = 0.01
-        
+        max_shift = 0.01 
+    
         # --- DISTANZ-FALLBACK (Bei Abschattung durch Säulen) ---
         actual_dist = front_wall_dist if front_wall_dist is not None else 2.0
 
@@ -2265,7 +2274,25 @@ class Obstacle_Run(Node):
         # ==========================================
         # 2. HINDERNIS-LOGIK
         # ==========================================
-        if obstacle_cmd is not None and obstacle is not None:
+        if obstacle_cmd is not None:
+            if self.last_turn_for_parking or self.parking_straight:
+                if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
+                    target_ratio = 0.25
+                else:
+                    obst_is_relevant = False
+                    if obstacle.is_localized:
+                        obst_is_relevant = (obstacle.zone_id < 2) # Hindernis ist nur relevant wenn es direkt zu beginn der Geraden steht
+                    else: 
+                        if obstacle.prediction:
+                                obst_is_relevant = True
+
+                    if obst_is_relevant:
+                        target_ratio = 0.65
+                    else:
+                        target_ratio = 0.25
+                return target_ratio
+            
+
             if not obstacle.is_localized:
                 # --- FALL A: HINDERNIS NICHT VERORTET (Kamera-Erkennung) ---
                 if obstacle.prediction and actual_dist < 1.35:
@@ -2451,8 +2478,9 @@ class Obstacle_Run(Node):
             if front_wall_hnf is not None:
                 closest_f = front_wall_hnf[2]
                 if closest_f < 1.50:
-                    self.state = 'STOPPED'
-                    self.get_logger
+                    self.state = 'PARKING'
+                    self.parking_phase = 'STOP_AFTER_OBST_RUN'
+                    self.get_logger().info("Geht zum Parken über nach Gyro Kurve")
                     return
                 
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
@@ -2461,7 +2489,10 @@ class Obstacle_Run(Node):
             self.turn_count += 1
 
     def evaluate_steering_straight(self, innenbande_hnf, aussenbande_hnf):
-        target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
+        if self.state == 'PARKING' and self.parking_phase == 'ADDRESSING_PARKING_SPACE':
+            target_x, target_y = self.parking_target_point(innenbande_hnf, aussenbande_hnf)
+        else:
+            target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
         self.visualize_target_point(target_x, target_y, farbe_name="orange", label="Target_Point")
         # 2. PID-REGLER BERECHNEN
         # Fehler: X-Abweichung der Karotte. Negatives X = Karotte links = Positiv lenken!
@@ -2580,7 +2611,6 @@ class Obstacle_Run(Node):
 
     def handle_lane_following(self, point_data):
         cmd = Twist()
-        marker_array = MarkerArray()
         all_clusters = self.get_all_clusters_sorted(point_data)
 
         self.get_logger().info(f"Verfolge die Spur... Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
@@ -2596,8 +2626,8 @@ class Obstacle_Run(Node):
 
         self.check_undetected_turn(front_wall_hnf)
 
-        if self.turn_count >= self.target_turns and front_wall_hnf is not None and front_wall_hnf[2] < 1.50:
-            self.state = 'STOPPED'
+        if self.parking_straight and front_wall_hnf is not None and front_wall_hnf[2] < 1.80:
+            self.parking_phase = 'STOP_AFTER_OBST_RUN'
             return
 
         self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
@@ -2656,7 +2686,6 @@ class Obstacle_Run(Node):
         self.pub_cmd_vel.publish(cmd)
         self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
         self.pub_cmd_vel.publish(cmd)
-        self.pub_markers.publish(marker_array)
 
     def handle_turn_maneuver(self, point_data):
         """
@@ -2672,13 +2701,6 @@ class Obstacle_Run(Node):
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
-            if front_wall_hnf is not None:
-                allowed_obst_dist = max(0.25, front_wall_hnf[2] - 0.25)
-            else:
-                allowed_obst_dist = 0.25
-            exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), allowed_obst_dist, 2.0)
-            self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
-            self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
             
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
@@ -2699,7 +2721,7 @@ class Obstacle_Run(Node):
             
             # Kurvengeometrie berechnen
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, exit_obstacle, self.lane_ratio_exit)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, self.lane_ratio_exit)
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             
@@ -2792,16 +2814,23 @@ class Obstacle_Run(Node):
                 self.pub_cmd_vel.publish(cmd)
 
                 self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
-                    
+
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
-                self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
-                
-                # WICHTIG: PID-Gedächtnis für die neue Gerade löschen!
+
                 self.prev_error = 0.0
                 self.integral_error = 0.0
                 
                 self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
+
+                if self.turn_count == self.target_turns:
+                    self.state = 'PARKING'
+                    self.parking_phase = 'STOP_AFTER_OBST_RUN'
+                else:
+                    self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
+                
+                # WICHTIG: PID-Gedächtnis für die neue Gerade löschen!
+
 
     def update_timer(self):
         now = self.get_clock().now()
@@ -2827,7 +2856,486 @@ class Obstacle_Run(Node):
             timer_msg = Float64()
             timer_msg.data = self.elapsed_time
             self.pub_timer.publish(timer_msg)
+
+    # =========================================================
+    # Park Funktionen
+    # =========================================================
+
+    def observe_sorroundings_while_waiting(self, point_data):
+        all_clusters = self.get_all_clusters_sorted(point_data)
+
+        self.get_logger().info("Beobachte die Umgebung, während 3 Sekunden gewartet werden.")
+
+        validated_clusters = self.validate_clusters_straight(all_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+        self.right_wall = merged_validated_clusters[2]
+        self.front_wall = merged_validated_clusters[1]
+        self.left_wall  = merged_validated_clusters[0]
+        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
+        self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
+        self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
+        self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
+
+    def positioning_before_parking(self, point_data):
+        cmd = Twist()
+        all_clusters = self.get_all_clusters_sorted(point_data)
+
+        self.get_logger().info(f"Positioniere mich fürs Einparken. Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
+
+        validated_clusters = self.validate_clusters_straight(all_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+        self.right_wall = merged_validated_clusters[2]
+        self.front_wall = merged_validated_clusters[1]
+        self.left_wall  = merged_validated_clusters[0]
+        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
+        self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
+        self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
+        self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
+
+        if self.fahrtrichtung == 'links':
+            innenbande = self.left_wall
+            innenbande_hnf = left_wall_hnf
+            aussenbande = self.right_wall
+            aussenbande_hnf = right_wall_hnf
+        else:
+            innenbande = self.right_wall
+            innenbande_hnf = right_wall_hnf
+            aussenbande = self.left_wall 
+            aussenbande_hnf = left_wall_hnf
+
+        if front_wall_hnf is not None and self.fahrtrichtung is not None:
+            _, _, front_dist = front_wall_hnf
+            
+            if front_dist < 1.50:
+                self.parking_phase = 'TURN_PREPARATION'
+                self.get_logger().warn(">>> PARK TURN_PREPARATION EINGELEITET<<<")
+                self.get_logger().info(f"Abstand zur Frontwall: {front_dist:.2f}m")
+                if self.fahrtrichtung == 'links':
+                    self.fahrtrichtung = 'rechts'
+                else: 
+                    self.fahrtrichtung = 'links'
+                return
+            else:
+                if front_dist < 1.60:
+                    self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
+        
+        self.lane_ratio = 0.25
+        steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
+        
+        # 3. BEFEHLE AN ESP SETZEN
+        cmd.linear.x = self.parking_speed
+        cmd.angular.z = float(steering_cmd)
+        self.pub_cmd_vel.publish(cmd)
+        self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
+
+    def handle_turn_preparation(self, point_data):
+        cmd = Twist()
+        self.front_wall = self.track_front_wall(point_data, self.front_wall)
+        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
+        if front_wall_hnf is not None:
+            allowed_obst_dist = max(0.25, front_wall_hnf[2] - 0.25)
+        else:
+            allowed_obst_dist = 0.25
+        exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), allowed_obst_dist, 2.0)
+        self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
+        self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
+        
+        validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
+        
+        # --- PID FÜR DIE ANNÄHERUNG ---
+        right_wall_hnf = self.cluster_to_hnf(validated_clusters[0])
+        left_wall_hnf = self.cluster_to_hnf(validated_clusters[2])
+        
+        if self.fahrtrichtung == 'links':
+            innenbande_hnf = left_wall_hnf
+            aussenbande_hnf = right_wall_hnf
+        else:
+            innenbande_hnf = right_wall_hnf
+            aussenbande_hnf = left_wall_hnf
+
+        # Lenkung für Approach berechnen
+        self.get_logger().info(f"InnenbandeHNF: {innenbande_hnf}, AussenbandeHNF: {aussenbande_hnf}")
+        steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
+        
+        # Kurvengeometrie berechnen
+        front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
+        target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, 1.13)
+        intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
+        curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
+        
+        # 2. Trigger prüfen
+        if self.test_check_turn_trigger(entry_distance_m):
+            self.get_logger().info(f"Trigger erreicht. Wechsle in EXECUTE-Phase. Abstand zur Wand: {front_wall_hnf[2]:.2f}m, Radius: {curve_radius_m:.2f}m")
+            self.saved_intersection_angle = intersection_angle
+            self.saved_curve_radius_m = curve_radius_m
+            self.start_turn_yaw = self.current_yaw
+            self.base_obst_cmd = self.current_obstacle_cmd
+            self.base_entry_distance = entry_distance_m
+
+            cmd.linear.x = self.parking_speed
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+            
+            self.parking_phase = 'EXECUTE_TURN'
+            return
+        
+        # 3. Lenken in der Annäherung
+        cmd.linear.x = self.turn_speed
+        cmd.angular.z = float(steering_cmd)
+        self.pub_cmd_vel.publish(cmd)
+
+    def handle_parking_turn(self, point_data):
+        cmd = Twist()
+        self.execute_turn(self.saved_curve_radius_m)
+        self.front_wall = self.track_front_wall(point_data, self.front_wall)
+        
+        if self.front_wall is not None:
+            front_wall_params = self.cluster_to_hnf(self.front_wall)
+        else:
+            front_wall_params = None
+        turn_completed = self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params)
+
+        if turn_completed:
+            cmd.linear.x = self.parking_speed
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+
+            self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
+
+            self.parking_phase = 'ADDRESSING_PARKING_SPACE' # Reset für die nächste Kurve
+
+            self.prev_error = 0.0
+            self.integral_error = 0.0
+            
+            self.turn_count += 1
+            self.start_straight_yaw = self.current_yaw
+            self.pub_cmd_vel.publish(cmd)
+
+    def parking_pid_steering(self, point_data):
+        cmd = Twist()
+        all_clusters = self.get_all_clusters_sorted(point_data)
+
+        self.get_logger().info(f"Einparken in die Parklücke. Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
+
+        validated_clusters = self.validate_clusters_parking(all_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+        self.right_wall = merged_validated_clusters[2]
+        self.front_wall = merged_validated_clusters[1]
+        self.left_wall  = merged_validated_clusters[0]
+        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
+        self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
+        self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
+        self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
+
+        if self.fahrtrichtung == 'links':
+            innenbande = self.left_wall
+            innenbande_hnf = left_wall_hnf
+            aussenbande = self.right_wall
+            aussenbande_hnf = right_wall_hnf
+        else:
+            innenbande = self.right_wall
+            innenbande_hnf = right_wall_hnf
+            aussenbande = self.left_wall 
+            aussenbande_hnf = left_wall_hnf
+
+        if front_wall_hnf is not None and self.fahrtrichtung is not None:
+            _, _, front_dist = front_wall_hnf
+            
+            if front_dist < 0.25:
+                self.parking_phase = 'ENTERING_PARKING_SPACE'
+                self.get_logger().warn(">>>AUTO PARK AB JETZT BLIND EIN<<<")
+                self.get_logger().info(f"Abstand zur Frontwall: {front_dist:.2f}m")
+            else:
+                if front_dist < 0.60:
+                    self.get_logger().info(f"Frontwand ist noch {front_dist:.2f}m entfernt")
+        
+        self.lane_ratio = 0.25
+        steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
+        
+        # 3. BEFEHLE AN ESP SETZEN
+        cmd.linear.x = self.parking_speed
+        cmd.angular.z = float(steering_cmd)
+        self.pub_cmd_vel.publish(cmd)
+        self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
+
+    def parking_target_point(self, hnf_innen, hnf_aussen):
+        target_y = self.lookahead_dist_straight
+        target_x = 0.0
+        
+        # Plausibilitäts-Check: Wände, die zu weit weg sind, ignorieren
+        if hnf_innen is not None and 0.80 > hnf_innen[2] > 2.5:
+            hnf_innen = None
+        if hnf_aussen is not None and 0.80 > hnf_innen[2] > 2.5:
+            hnf_aussen = None
+
+        def get_x_at_y(hnf_params, y_val):
+            nx, ny, d = hnf_params
+            if abs(nx) < 1e-6: return 0.0 
+            return (d - ny * y_val) / nx
+
+        # 1. Wo schneiden die erkannten Wände unsere Y-Sichtachse?
+        x_innen = get_x_at_y(hnf_innen, target_y) if hnf_innen else None
+        x_aussen = get_x_at_y(hnf_aussen, target_y) if hnf_aussen else None
+
+        if x_innen is not None and x_aussen is not None:
+            # Beide Wände da: Wir mitteln die Karotte aus BEIDEN Wänden! 
+            # Das halbiert das Sensor-Rauschen und der Roboter fährt wie auf Schienen.
+            if x_innen < 0: # Innenbande ist links
+                t_innen = x_innen + self.lane_ratio
+                t_aussen = x_aussen - (3.0 - self.lane_ratio)
+            else:           # Innenbande ist rechts
+                t_innen = x_innen - self.lane_ratio
+                t_aussen = x_aussen + (3.0 - self.lane_ratio)
+                
+            target_x = (t_innen + t_aussen) / 2.0
+
+        elif x_innen is not None:
+            # NUR Innenbande da (z.B. bei Ausfahrt aus der Kurve)
+            if x_innen < 0: 
+                target_x = x_innen + self.lane_ratio
+            else:           
+                target_x = x_innen - self.lane_ratio
+
+        elif x_aussen is not None:
+            # NUR Außenbande da (DAS IST DEINE KURVEN-ANNÄHERUNG!)
+            if x_aussen > 0: # Außenbande ist rechts (Wir fahren Linkskurve)
+                target_x = x_aussen - (3.0 - self.lane_ratio)
+            else:            # Außenbande ist links (Wir fahren Rechtskurve)
+                target_x = x_aussen + (3.0 - self.lane_ratio)
+                
+        else:
+            # Notfall (Beide Wände fehlen komplett)
+            target_x = 0.0
+
+        # ==========================================
+        # 3. KRAFTFELD (MINDESTABSTAND ERZWINGEN)
+        # ==========================================
+        # Verhindert, dass wir zu nah an EINE der sichtbaren Wände driften
+        if x_innen is not None:
+            if x_innen < 0 and target_x < x_innen + self.min_wall_dist:
+                target_x = x_innen + self.min_wall_dist
+            elif x_innen > 0 and target_x > x_innen - self.min_wall_dist:
+                target_x = x_innen - self.min_wall_dist
+                
+        if x_aussen is not None:
+            if x_aussen < 0 and target_x < x_aussen + self.min_wall_dist:
+                target_x = x_aussen + self.min_wall_dist
+            elif x_aussen > 0 and target_x > x_aussen - self.min_wall_dist:
+                target_x = x_aussen - self.min_wall_dist
+
+        return (target_x, target_y)
     
+    def validate_clusters_parking(self, clusters):
+        u_profile = [None, None, None]
+        if not clusters:
+            return u_profile
+
+        # 1. Delta berechnen, wenn wir im Gyro-Modus sind
+        # (Wir gehen davon aus, dass self.last_turn_aborted gesetzt wird)
+        delta_yaw = 0.0
+
+        right_candidates = []
+        left_candidates = []
+        front_candidates = []
+
+        for c in clusters:
+            if len(c) < 20: continue
+            
+            # Hier holen wir den lokalen Winkel (relativ zum Roboter)
+            local_angle = self.get_cluster_angle(c)
+            if local_angle is None: continue
+            
+            # Jetzt nutzen wir den shifted_angle für die Normierung!
+            angle_norm = abs(local_angle) % 180
+            if angle_norm > 90:
+                angle_norm = 180 - angle_norm
+
+            if angle_norm <= 45.0:
+                # Seitenwand-Logik...
+                mean_x_local = sum(p[1] for p in c) / len(c)
+                
+                if abs(mean_x_local) <= 1.0:
+                    # GEOGRAFISCHER SPLIT
+                    if mean_x_local > 0:
+                        left_candidates.append(c)
+                    else:
+                        right_candidates.append(c)
+                        
+            else:
+                # Da p[2] bei dir Vorne/Hinten ist:
+                mean_y = sum(p[2] for p in c) / len(c)
+                if mean_y >= 0.10: # Nur Wände VOR dem Roboter
+                    front_candidates.append(c)
+
+        # ==========================================
+        # 2. SEITENWÄNDE ZUORDNEN & PLAUSIBILITÄT (MIT HNF)
+        # ==========================================
+        best_right = right_candidates[0] if right_candidates else None
+        best_left = left_candidates[0] if left_candidates else None
+        
+        best_left_hnf = self.cluster_to_hnf(best_left) if (best_left is not None) else None
+        best_right_hnf = self.cluster_to_hnf(best_right) if (best_right is not None) else None
+
+        if (best_right is not None) and (best_left is not None):
+            self.visualize_cluster_line(best_right, 10, "cyan")
+            self.visualize_cluster_line(best_left, 11, "magenta")
+            
+            if best_left_hnf is not None and best_right_hnf is not None:
+                _, _, left_dist = best_left_hnf
+                _, _, right_dist = best_right_hnf
+                
+                # Absolute HNF-Distanzen addieren, um die 40-Grad-Diagonale zu eliminieren!
+                track_width = abs(left_dist) + abs(right_dist)
+                self.get_logger().info(f"Echte Spurbreite: {track_width:.2f}m, L: {abs(left_dist):.2f}m, R: {abs(right_dist):.2f}m")
+                
+                if 2.50 <= track_width <= 3.50:
+                    u_profile[0] = best_right
+                    u_profile[2] = best_left
+                else:
+                    self.get_logger().warn(f"Spurbreite unplausibel ({track_width:.2f}m). Verwerfe kürzere Wand.")
+                    len_r = math.hypot(best_right[-1][1] - best_right[0][1], best_right[-1][2] - best_right[0][2])
+                    len_l = math.hypot(best_left[-1][1] - best_left[0][1], best_left[-1][2] - best_left[0][2])
+                    
+                    if len_r > len_l:
+                        u_profile[0] = best_right
+                    else:
+                        u_profile[2] = best_left
+            else:
+                self.get_logger().warn("HNF Berechnung für eine der Wände fehlgeschlagen.")
+                return [None, None, None]
+                    
+        elif best_right is not None:
+            u_profile[0] = best_right
+        elif best_left is not None:
+            u_profile[2] = best_left
+
+        # ==========================================
+        # 3. FRONTWAND ZUORDNEN (HARDWARE-FIX & ZONEN-LOGIK)
+        # ==========================================
+        if front_candidates:
+            # A) Y-Gruppierung (Tiefe / Abstand nach vorne)
+            groups = []
+            for c in front_candidates:
+                mean_y = sum(p[2] for p in c) / len(c)
+                
+                # Alles was extrem nah ist, verwerfen
+                if mean_y < 0.15:
+                    continue 
+                
+                placed = False
+                for g in groups:
+                    if abs(g['base_y'] - mean_y) < 0.15:
+                        g['clusters'].append(c)
+                        placed = True
+                        break
+                if not placed:
+                    groups.append({'base_y': mean_y, 'clusters': [c]})
+
+            # B) Breiten-Filter & Hybrider Zonen-Check (Der Phantom-Wand Fix)
+            valid_wall_groups = []
+            for g in groups:
+                all_x = [p[1] for c in g['clusters'] for p in c]
+                total_width = max(all_x) - min(all_x)
+                
+                min_x = min(all_x)
+                max_x = max(all_x)
+                mean_y = g['base_y']  # Das ist die Distanz der Wand!
+                
+                # ----------------------------------------------------
+                # DIE ZONEN-LOGIK
+                # ----------------------------------------------------
+                # 1. Ist die Wand im Fernbereich? (Keine Phantomwände möglich)
+                is_far_wall = mean_y > 0.70
+                min_allowed_width = 0.45 if self.is_start_finish_straight else 0.35
+                
+                # 2. Ist die Wand nah, aber blockiert physisch unseren Weg?
+                # (Wir definieren einen Fahrkorridor von X = -0.15m bis X = +0.15m)
+                is_blocking_path = (min_x < -0.05) and (max_x > 0.05)
+                
+                # Eine Wand ist gültig, wenn sie:
+                # - breit genug ist (kein Rauschen, min 35cm) UND
+                # - (entweder weit weg ist ODER unseren direkten Weg blockiert)
+                if total_width > min_allowed_width and (is_far_wall or is_blocking_path):
+                    if not is_far_wall and is_blocking_path:
+                        self.get_logger().warn(f"Nahe aber blockierende Wand gefunden! Abstand: {mean_y:.2f}m")
+                    valid_wall_groups.append(g)
+
+            # ==========================================
+            # 3. C) Zuweisung (SICHERE VERSION)
+            # ==========================================
+            if valid_wall_groups:
+                # Nur wenn Gruppen den Zonen-Check bestanden haben, 
+                # wählen wir die nächste/beste aus.
+                valid_wall_groups.sort(key=lambda g: g['base_y'])
+                winner_group = valid_wall_groups[0]['clusters']
+                winner_group.sort(key=len, reverse=True)
+                u_profile[1] = winner_group[0]
+            else:
+                # Wenn kein Cluster den Check bestanden hat, gibt es 
+                # für diesen Durchlauf einfach keine Frontwand.
+                u_profile[1] = None
+                
+                # Optionales Logging für die Fehlersuche:
+                if front_candidates:
+                    self.get_logger().debug("Front-Kandidaten vorhanden, aber als Phantomwände abgelehnt.")
+
+        return u_profile
+    
+    def einparken(self):
+        if not hasattr(self, 'einpark_timer'):
+            self.einpark_timer = time.time() + 3.0
+            
+        cmd = Twist()
+        if time.time() < self.einpark_timer:
+            cmd.linear.x = float(self.parking_speed)
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+        else:
+            self.execute_stop()
+            self.get_logger().info("PARKEN BEENDET! 15 Punkte.")
+            self.state = 'STOPPED'
+
+    def handle_park_maneuver(self, point_data):
+        if self.parking_phase == 'POSITIONING_FOR_STOP':
+            self.handle_lane_following(point_data)
+
+        elif self.parking_phase == 'STOP_AFTER_OBST_RUN':
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+
+            if self.waiting_timer is None:
+                self.waiting_timer = time.time() + 3.5
+            if time.time() < self.waiting_timer:
+                self.observe_sorroundings_while_waiting(point_data)
+                pass
+            else: 
+                self.positioning_before_parking(point_data)
+
+        elif self.parking_phase == 'TURN_PREPARATION':
+            self.handle_turn_preparation(point_data)
+
+        elif self.parking_phase == 'EXECUTE_TURN':
+            self.handle_parking_turn(point_data)
+            
+        elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
+            self.parking_pid_steering(point_data)
+        
+        elif self.parking_phase == 'ENTERING_PARKING_SPACE':
+            self.einparken()
+
+
     def execute_stop(self):
             cmd = Twist()
             cmd.linear.x = 0.0
@@ -2863,6 +3371,10 @@ class Obstacle_Run(Node):
             
         elif self.state == 'STOPPED':
             self.execute_stop()
+
+        elif self.state == 'PARKING':
+            self.handle_park_maneuver(point_data)
+
         self.counter += 1
         self.update_timer()
         
