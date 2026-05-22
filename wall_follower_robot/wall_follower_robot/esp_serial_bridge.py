@@ -48,7 +48,7 @@ class EspSerialBridge(Node):
 
     def cmd_vel_callback(self, msg):
         target_pwm = msg.linear.x
-        direction = 0x00 if target_pwm <= 0 else 0x01
+        direction = 0x00 if target_pwm > 0 else 0x01
         
         pwm_val = int(abs(target_pwm)) 
         pwm_val = max(0, min(1023, pwm_val)) 

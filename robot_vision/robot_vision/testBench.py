@@ -2100,7 +2100,7 @@ class Obstacle_Run(Node):
             (-210.0, 0.8, 0.60),  # Schritt 2: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
             (210.0, -0.8, 0.40),   # Schritt 4: Vorwärts
-            (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenken
+            (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
             (-210.0, 1.4, 0.40),  # Schritt 6: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
             (260.0, -0.8, 1.5),   # Schritt 8: Vorwärts
