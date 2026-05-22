@@ -28,11 +28,10 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from robot_vision.steering_lib import SteeringController
 from robot_vision.camera_lib import TrackAnalyzer
-
 from robot_vision.obstacle import Obstacle
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-
 import time
+import logging
 
 '''
 =============================================================
@@ -82,8 +81,6 @@ class Obstacle_Run(Node):
     def __init__(self):
         super().__init__('obstacle_run')
 
-        
-
         # --- MULTITHREADING SETUP ---
         # MutuallyExclusive: Callbacks in dieser Gruppe blockieren sich nur gegenseitig.
         # Wir trennen YOLO und LiDAR physisch voneinander.
@@ -127,7 +124,7 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = False
+        self.button_start = True
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
@@ -196,6 +193,9 @@ class Obstacle_Run(Node):
         
         self.prev_error = 0.0
         self.integral_error = 0.0
+
+        self.auspark_step = 0
+        self.auspark_timer = None
 
         # Karotten-Parameter Kurve
         self.steering_ctrl = SteeringController(logger=self.get_logger())
@@ -374,7 +374,7 @@ class Obstacle_Run(Node):
             self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
             self.kd = 0.05   # Verhindert das Schlingern (Dämpfung)
         
-        if self.turn_count % 4 == 0:
+        if self.turn_count % 4 == 0 and self.state == 'FOLLOW_LANE' or self.turn_count % 4 == 3 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.is_start_finish_straight = True
             self.standard_lane_ratio_approach = 0.60
         else:
@@ -2091,112 +2091,71 @@ class Obstacle_Run(Node):
         # Nutzt m_id + 1, um nicht mit dem Bogen-Marker zu kollidieren
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
-    def ausparken(self):
-        # Multiplikator: 1.0 ändert nichts, -1.0 invertiert die Lenkung
-        steer_mult = -1.0 if self.fahrtrichtung == "links" else 1.0
+    def handle_ausparken(self, point_data):
+        # 1. Die Sequenz definieren (Format: Fahren_x, Lenken_z, Dauer_sec)
+        # Dies ersetzt deine bisherigen drive_step() Aufrufe.
+        sequence = [
+            (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
+            (-200.0, 0.8, 0.75),  # Schritt 2: Rückwärts
+            (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
+            (200.0, -0.8, 0.5),   # Schritt 4: Vorwärts
+            (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenken
+            (-200.0, 1.4, 0.55),  # Schritt 6: Rückwärts
+            (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
+            (200.0, -0.8, 1.5),   # Schritt 8: Vorwärts
+            (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
+            (350.0, 0.8, 1.2) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4) 
+        ]
 
-        self.get_logger().info(f"START TEST: Auspark-Sequenz (Richtung: {self.fahrtrichtung})")
+        # 2. Prüfen, ob die Sequenz komplett abgeschlossen ist
+        if self.auspark_step >= len(sequence):
+            self.get_logger().info("Auspark-Sequenz abgeschlossen!")
+            
+            # Finaler Stopp-Befehl
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+            
+            # Variablen zurücksetzen für die Zukunft (optional)
+            self.auspark_step = 0
+            self.auspark_timer = None
+            
+            # WICHTIG: Hier in den nächsten Zustand deiner State-Machine wechseln!
+            self.state = 'FOLLOW_LANE' 
+            return
 
-        # ==========================================
-        # HILFSFUNKTION FÜR DEN WATCHDOG
-        # ==========================================
-        def drive_step(drive_x, steer_z, duration_sec, step_info=""):
-            # Lenkung mit dem Multiplikator verrechnen
-            adjusted_steer_z = float(steer_z) * steer_mult
-                
-            end_time = time.time() + duration_sec
-            while time.time() < end_time:
-                cmd = Twist()
-                # KORREKTUR: linear.x ist Fahren, angular.z ist Lenken!
-                cmd.linear.x = float(drive_x)     # FAHREN (PWM)
-                cmd.angular.z = adjusted_steer_z  # LENKEN (Winkel/Bogenmaß)
-                self.pub_cmd_vel.publish(cmd)
-                time.sleep(0.001) # 20 Nachrichten pro Sekunde (20 Hz)
+        # 3. Aktuellen Schritt aus der Liste laden
+        current_drive_x, current_steer_z, current_duration = sequence[self.auspark_step]
 
-        # ==========================================
-        # EURE SEQUENZ (Format: Fahren_x, Lenken_z, Zeit)
-        # ==========================================
-        # Schritt 1
-        drive_step(0.0, 0.8, 2.0)
-        
-        # Schritt 2
-        drive_step(-200.0, 0.8, 0.75)
-        
-        # Schritt 3
-        drive_step(0.0, -0.8, 1.5)
-        
-        # Schritt 4
-        drive_step(200.0, -0.8, 0.5)
-        
-        # Schritt 5
-        drive_step(0.0, 0.8, 1.5)
-        
-        # Schritt 6
-        drive_step(-200.0, 1.4, 0.55)
-        
-        # Schritt 7
-        drive_step(0.0, -0.8, 1.5)
-        
-        # Schritt 8
-        drive_step(200.0, -0.8, 1.5)
-        
-        # Schritt 9
-        drive_step(0.0, 0.8, 0.5)
-        
-        # Schritt 10
-        if self.fahrtrichtung == "links":
-            drive_step(350.0, 0.8, 1.2)
+        # 4. Timer initialisieren (wird nur beim Start eines neuen Schritts ausgeführt)
+        if self.auspark_timer is None:
+            self.auspark_timer = time.time() + current_duration
+            self.get_logger().info(f"Starte Auspark-Schritt {self.auspark_step + 1}/{len(sequence)} (Dauer: {current_duration}s)")
+
+        # 5. Ausführen oder zum nächsten Schritt wechseln
+        if time.time() < self.auspark_timer:
+            # Wir sind noch in der Zeit -> Befehl senden
+            steer_mult = -1.0 if self.fahrtrichtung == "links" else 1.0
+            adjusted_steer_z = float(current_steer_z) * steer_mult
+
+            if self.auspark_step == (len(sequence) - 1) and self.fahrtrichtung == "links":
+                self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.40, 2.0)
+            
+            cmd = Twist()
+            cmd.linear.x = float(current_drive_x)
+            cmd.angular.z = adjusted_steer_z
+            self.pub_cmd_vel.publish(cmd)
         else:
-            drive_step(350.0, 0.8, 1.4)
-
-        cmd = Twist()
-        cmd.linear.x = 0.0
-        cmd.angular.z = 0.0
-        self.pub_cmd_vel.publish(cmd)
-        time.sleep(0.5)
+            # Zeit ist abgelaufen -> Bereit machen für den nächsten Schritt
+            self.auspark_step += 1
+            self.auspark_timer = None # Timer für den nächsten Schritt resetten
 
     def test_turn_main_logic(self, point_data):
         if self.camera_calibration:
             return
         self.ausparken()
         
-
-        """        self.clear_all_lines()
-        all_clusters = self.get_all_clusters_sorted(point_data)
-        validated_clusters = self.validate_clusters_straight(all_clusters)
-        '''        for i, c in enumerate(all_clusters):
-            self.visualize_cluster_line(c, m_id=i, farbe_name="rot")'''
-        # WICHTIG: Wir müssen uns die IDs der Basis-Wände merken, BEVOR sie 
-        # von der merge_clusters Funktion durch vstack überschrieben werden!
-        used_ids = set()
-        for c in validated_clusters:
-            if c is not None:
-                used_ids.add(id(c))
-                
-        # Merge durchführen
-        merged_clusters, left_c = self.merge_clusters(all_clusters, validated_clusters)
-        self.get_obstacles_from_camera(point_data)
-        
-        # 1. Füge auch alle kleinen "Schnipsel", die gemergt wurden, zu den genutzten IDs hinzu
-        for fach in left_c:
-            for c in fach:
-                used_ids.add(id(c))
-                
-        # 2. Filtere den "Rest" heraus: Alles, was nicht in used_ids steht!
-        rest_clusters = [c for c in all_clusters if id(c) not in used_ids]
-        
-        # 3. VISUALISIERUNG
-        
-        # A) Den ungenutzten Rest (Müll/Rauschen) in ROT zeichnen
-        for i, c in enumerate(rest_clusters):
-            self.visualize_cluster_line(c, m_id=i, farbe_name="rot")
-            
-        # B) Die fertigen, sauberen Hauptwände in GRÜN zeichnen 
-        # (ID ab 100, damit sie die roten Linien nicht überschreiben)
-        for i in range(3):
-            self.visualize_cluster_line(merged_clusters[i], m_id=i+15, farbe_name="gruen")
-        
-        self.get_logger().info(f"Rest Cluster: {len(rest_clusters)}, Front_wand: {(merged_clusters[1] is not None)}, Linke_wand: {(merged_clusters[2] is not None)}, Rechte_wand: {(merged_clusters[0] is not None)}")"""
 
     # -----------------------------------------
     # State Maschine Obstacle Parcour
@@ -2315,7 +2274,6 @@ class Obstacle_Run(Node):
                     # Wir müssen ausweichen!
                     is_evading = True
                     
-                    # Sonderregel Start-Ziel-Gerade: Hindernis steht zwingend INNEN (WRO Regel 7.7)
                     if self.is_start_finish_straight:
                         if obstacle_cmd == "green":
                             target_ratio = 0.25 if is_left else 0.60
@@ -2582,8 +2540,7 @@ class Obstacle_Run(Node):
                 self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                 return
             
-        self.ausparken()
-        self.state = 'FOLLOW_LANE'
+        self.state = 'PARKING_OUT'
 
     def handle_lane_following(self, point_data):
         cmd = Twist()
@@ -2858,6 +2815,9 @@ class Obstacle_Run(Node):
         
         elif self.state == 'STARTING':
             self.execute_start(point_data)
+
+        elif self.state == 'PARKING_OUT':
+            self.handle_ausparken(point_data)
 
         elif self.state == 'FOLLOW_LANE':
             self.handle_lane_following(point_data)
