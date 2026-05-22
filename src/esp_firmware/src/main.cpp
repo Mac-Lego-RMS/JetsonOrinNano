@@ -63,9 +63,9 @@ TaskHandle_t MotorControlTaskHandle;
 volatile bool buttonTriggered = false;
 
 // Interrupt Service Routine (ISR)
-//void IRAM_ATTR buttonISR() {
-//7    buttonTriggered = true;
-//}
+void IRAM_ATTR buttonISR() {
+    buttonTriggered = true;
+}
 
 
 
@@ -395,8 +395,8 @@ void setup() {
     planetaryMotor.begin();
     jetson.begin(115200);     
     // Button Setup
-    //pinMode(PIN_BUTTON, INPUT_PULLUP);
-    //attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), buttonISR, RISING); // RISING, da NC-Taster öffnet
+    pinMode(PIN_BUTTON, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), buttonISR, FALLING); // FALLING, da NO-Taster auf GND zieht
 
     Serial2.begin(1000000, SERIAL_8N1, PIN_SERVO_RX, PIN_SERVO_TX);
     sc09Servo.pSerial = &Serial2; 
