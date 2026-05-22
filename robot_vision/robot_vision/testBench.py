@@ -28,11 +28,10 @@ from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from robot_vision.steering_lib import SteeringController
 from robot_vision.camera_lib import TrackAnalyzer
-
 from robot_vision.obstacle import Obstacle
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-
 import time
+import logging
 
 '''
 =============================================================
@@ -82,8 +81,6 @@ class Obstacle_Run(Node):
     def __init__(self):
         super().__init__('obstacle_run')
 
-        
-
         # --- MULTITHREADING SETUP ---
         # MutuallyExclusive: Callbacks in dieser Gruppe blockieren sich nur gegenseitig.
         # Wir trennen YOLO und LiDAR physisch voneinander.
@@ -127,6 +124,11 @@ class Obstacle_Run(Node):
             10
         )
 
+        self.button_start = False
+        self.mit_ausparken = True
+
+        self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
+
         self.button_state = False
         
         # Publisher für Bewegung und RViz [cite: 1, 19]
@@ -151,7 +153,7 @@ class Obstacle_Run(Node):
         self.get_logger().info('>>> WallFollower Template gestartet. Warte auf LiDAR... <<<')
 
         # --- STATE MACHINE & PFADPLANUNG ---
-        self.state = 'STARTING'    # Startzustand
+        self.state = 'INITIALIZING'    # Startzustand
         self.turn_phase = 'APPROACH'  # Bei Kurven: 'APPROACH', 'TURNING', 'EXIT'
         self.parking_phase = 'STOP_AFTER_OBST_RUN'
         self.fahrtrichtung = None     # Wird automatisch erkannt
@@ -195,6 +197,9 @@ class Obstacle_Run(Node):
         
         self.prev_error = 0.0
         self.integral_error = 0.0
+
+        self.auspark_step = 0
+        self.auspark_timer = None
 
         # Karotten-Parameter Kurve
         self.steering_ctrl = SteeringController(logger=self.get_logger())
@@ -349,17 +354,23 @@ class Obstacle_Run(Node):
         marker.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
         self.marker_pub.publish(marker)
 
+    def set_led(self, state: bool):
+        # Sendet das Signal an deine bestehende esp_serial_bridge
+        msg = Bool()
+        msg.data = state
+        self.led_pub.publish(msg)
+
     def update_strategy_params(self):
         """Passt physikalische Parameter basierend auf dem Fortschritt an."""
         
         if self.turn_count > 4:
             self.base_speed = 500.0
             self.turn_speed = 400.0
-            self.IDEAL_RADIUS_M = 0.35
+            self.IDEAL_RADIUS_M = 0.28
             self.standard_lane_ratio_approach = 0.60
             self.kp = 2.0   # Lenkt hart zur Karotte
             self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
-            self.kd = 0.05   # Verhindert das Schlingern (Dämpfung)
+            self.kd = 0.09   # Verhindert das Schlingern (Dämpfung)
 
         else:
             self.base_speed = 350.0
@@ -370,7 +381,7 @@ class Obstacle_Run(Node):
             self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
             self.kd = 0.05   # Verhindert das Schlingern (Dämpfung)
         
-        if self.turn_count % 4 == 0:
+        if self.turn_count % 4 == 0 and self.state == 'FOLLOW_LANE' or self.turn_count % 4 == 3 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.is_start_finish_straight = True
             self.standard_lane_ratio_approach = 0.60
         else:
@@ -2092,116 +2103,71 @@ class Obstacle_Run(Node):
         # Nutzt m_id + 1, um nicht mit dem Bogen-Marker zu kollidieren
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
-    def ausparken(self):
-        # Multiplikator: 1.0 ändert nichts, -1.0 invertiert die Lenkung
-        steer_mult = -1.0 if self.fahrtrichtung == "links" else 1.0
+    def handle_ausparken(self, point_data):
+        # 1. Die Sequenz definieren (Format: Fahren_x, Lenken_z, Dauer_sec)
+        # Dies ersetzt deine bisherigen drive_step() Aufrufe.
+        sequence = [
+            (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
+            (-210.0, 0.8, 0.60),  # Schritt 2: Rückwärts
+            (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
+            (210.0, -0.8, 0.40),   # Schritt 4: Vorwärts
+            (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
+            (-210.0, 1.4, 0.40),  # Schritt 6: Rückwärts
+            (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
+            (260.0, -0.8, 1.5),   # Schritt 8: Vorwärts
+            (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
+            (350.0, 0.8, 1.2) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4) 
+        ]
 
-        self.get_logger().info(f"START TEST: Hardcodierte Sequenz (Richtung: {self.fahrtrichtung})")
-
-        # ==========================================
-        # HILFSFUNKTION FÜR DEN WATCHDOG
-        # ==========================================
-        def drive_step(steer_x, drive_z, duration_sec, step_info=""):
-            """
-            Publiziert die Fahrbefehle kontinuierlich für 'duration_sec' Sekunden,
-            damit der Motor-Controller nicht abschaltet.
-            Die Lenkung wird automatisch je nach 'auspark_richtung' invertiert.
-            """
-            if step_info:
-                self.get_logger().info(step_info)
+        # 2. Prüfen, ob die Sequenz komplett abgeschlossen ist
+        if self.auspark_step >= len(sequence):
+            self.get_logger().info("Auspark-Sequenz abgeschlossen!")
             
-            # Lenkung mit dem Multiplikator verrechnen
-            adjusted_steer_x = float(steer_x) * steer_mult
-                
-            end_time = time.time() + duration_sec
-            while time.time() < end_time:
-                cmd = Twist()
-                cmd.linear.x = float(drive_z) # Fahren
-                cmd.angular.z = adjusted_steer_x # Lenken
-                self.pub_cmd_vel.publish(cmd)
-                time.sleep(0.05) # 20 Nachrichten pro Sekunde (20 Hz)
+            # Finaler Stopp-Befehl
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+            
+            # Variablen zurücksetzen für die Zukunft (optional)
+            self.auspark_step = 0
+            self.auspark_timer = None
+            
+            # WICHTIG: Hier in den nächsten Zustand deiner State-Machine wechseln!
+            self.state = 'FOLLOW_LANE' 
+            return
 
-        # ==========================================
-        # DEINE SEQUENZ
-        # ==========================================
-        # Schritt 1
-        drive_step(0.0, 0.8, 2.0, "Schritt 1: Geradeaus, Vorwärts")
-        
-        # Schritt 2
-        drive_step(-220.0, 1.4, 0.7, "Schritt 2: Lenkung Links (-220), Vorwärts schnell")
-        
-        # Schritt 3
-        drive_step(0.0, -0.8, 1.5, "Schritt 3: Geradeaus, Rückwärts")
-        
-        # Schritt 4
-        drive_step(250.0, -0.8, 0.4, "Schritt 4: Lenkung Rechts (250), Rückwärts")
-        
-        # Schritt 5
-        drive_step(0.0, 0.8, 1.5, "Schritt 5: Geradeaus, Vorwärts")
-        
-        # Schritt 6
-        drive_step(-220.0, 1.4, 0.5, "Schritt 6: Lenkung Links (-220), Vorwärts schnell")
-        
-        # Schritt 7
-        drive_step(0.0, -0.8, 1.5, "Schritt 7: Geradeaus, Rückwärts")
-        
-        # Schritt 8
-        drive_step(250.0, -0.8, 1.5, "Schritt 8: Lenkung Rechts (250), Rückwärts")
-        
-        # Schritt 9
-        drive_step(0.0, 0.8, 0.5, "Schritt 9: Geradeaus, Vorwärts")
-        
-        # Schritt 10
-        drive_step(350.0, 0.8, 1.4, "Schritt 10: Lenkung stark Rechts (350), Vorwärts")
+        # 3. Aktuellen Schritt aus der Liste laden
+        current_drive_x, current_steer_z, current_duration = sequence[self.auspark_step]
 
-        # ==========================================
-        # STOP
-        # ==========================================
-        self.get_logger().info("Test-Sequenz beendet. Stoppe Roboter.")
-        self.execute_stop()
+        # 4. Timer initialisieren (wird nur beim Start eines neuen Schritts ausgeführt)
+        if self.auspark_timer is None:
+            self.auspark_timer = time.time() + current_duration
+            self.get_logger().info(f"Starte Auspark-Schritt {self.auspark_step + 1}/{len(sequence)} (Dauer: {current_duration}s)")
+
+        # 5. Ausführen oder zum nächsten Schritt wechseln
+        if time.time() < self.auspark_timer:
+            # Wir sind noch in der Zeit -> Befehl senden
+            steer_mult = -1.0 if self.fahrtrichtung == "links" else 1.0
+            adjusted_steer_z = float(current_steer_z) * steer_mult
+
+            if self.auspark_step == (len(sequence) - 1) and self.fahrtrichtung == "links":
+                self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.40, 2.0)
+            
+            cmd = Twist()
+            cmd.linear.x = float(current_drive_x)
+            cmd.angular.z = adjusted_steer_z
+            self.pub_cmd_vel.publish(cmd)
+        else:
+            # Zeit ist abgelaufen -> Bereit machen für den nächsten Schritt
+            self.auspark_step += 1
+            self.auspark_timer = None # Timer für den nächsten Schritt resetten
 
     def test_turn_main_logic(self, point_data):
         if self.camera_calibration:
             return
         self.ausparken()
         
-
-        """        self.clear_all_lines()
-        all_clusters = self.get_all_clusters_sorted(point_data)
-        validated_clusters = self.validate_clusters_straight(all_clusters)
-        '''        for i, c in enumerate(all_clusters):
-            self.visualize_cluster_line(c, m_id=i, farbe_name="rot")'''
-        # WICHTIG: Wir müssen uns die IDs der Basis-Wände merken, BEVOR sie 
-        # von der merge_clusters Funktion durch vstack überschrieben werden!
-        used_ids = set()
-        for c in validated_clusters:
-            if c is not None:
-                used_ids.add(id(c))
-                
-        # Merge durchführen
-        merged_clusters, left_c = self.merge_clusters(all_clusters, validated_clusters)
-        self.get_obstacles_from_camera(point_data)
-        
-        # 1. Füge auch alle kleinen "Schnipsel", die gemergt wurden, zu den genutzten IDs hinzu
-        for fach in left_c:
-            for c in fach:
-                used_ids.add(id(c))
-                
-        # 2. Filtere den "Rest" heraus: Alles, was nicht in used_ids steht!
-        rest_clusters = [c for c in all_clusters if id(c) not in used_ids]
-        
-        # 3. VISUALISIERUNG
-        
-        # A) Den ungenutzten Rest (Müll/Rauschen) in ROT zeichnen
-        for i, c in enumerate(rest_clusters):
-            self.visualize_cluster_line(c, m_id=i, farbe_name="rot")
-            
-        # B) Die fertigen, sauberen Hauptwände in GRÜN zeichnen 
-        # (ID ab 100, damit sie die roten Linien nicht überschreiben)
-        for i in range(3):
-            self.visualize_cluster_line(merged_clusters[i], m_id=i+15, farbe_name="gruen")
-        
-        self.get_logger().info(f"Rest Cluster: {len(rest_clusters)}, Front_wand: {(merged_clusters[1] is not None)}, Linke_wand: {(merged_clusters[2] is not None)}, Rechte_wand: {(merged_clusters[0] is not None)}")"""
 
     # -----------------------------------------
     # State Maschine Obstacle Parcour
@@ -2336,7 +2302,6 @@ class Obstacle_Run(Node):
                     # Wir müssen ausweichen!
                     is_evading = True
                     
-                    # Sonderregel Start-Ziel-Gerade: Hindernis steht zwingend INNEN (WRO Regel 7.7)
                     if self.is_start_finish_straight:
                         if obstacle_cmd == "green":
                             target_ratio = 0.25 if is_left else 0.60
@@ -2379,7 +2344,7 @@ class Obstacle_Run(Node):
                         obst_is_outer = obst_zone_id % 10 == 1
                         
                         if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                            target_ratio = 0.35 if obst_is_outer else 0.25
+                            target_ratio = 0.35 if obst_is_outer else 0.22
                         else:
                             target_ratio = 0.80 if obst_is_outer else 0.65
                     else:
@@ -2469,10 +2434,10 @@ class Obstacle_Run(Node):
                 zone_id = self.calculate_zone_id(obst_to_front_wall_dist, obst_to_outer_wall_dist)
                 #self.get_logger().info(f"Zone id wurde detected: {zone_id}")
                 
-                if self.is_start_finish_straight:
-                    if self.obstacle.zone_id % 10 == 1:
-                        self.obstacle.zone_id -= 1  # Zwinge ID auf Innenbahn (01 wird zu 00, 11 zu 10 etc.)
-                        self.get_logger().info(f"set_obst_pos: Zone auf Innenbahn korrigiert (Neue ID: {self.obstacle.zone_id})")
+                if self.is_start_finish_straight and zone_id is not None:
+                    if zone_id % 10 == 1:
+                        zone_id -= 1  # Zwinge ID auf Innenbahn (01 wird zu 00, 11 zu 10 etc.)
+                        self.get_logger().info(f"set_obst_pos: Zone auf Innenbahn korrigiert (Neue ID: {zone_id})")
 
                 # ==========================================
                 # OBJEKT VERORTEN UND SPEICHERN
@@ -2549,53 +2514,100 @@ class Obstacle_Run(Node):
         steering_cmd = max(-1.0, min(1.0, steering_cmd))
 
         return steering_cmd
-
-    def execute_start(self, point_data):
+    
+    def execute_init(self):
+        self.get_logger().info("Starte den Roboter...")
+        with self.data_lock:
+            if len(self.latest_yolo_results) == 0:
+                self.get_logger().info("Warte auf ersten Kamera-Frame und YOLO-Inferenz...")
+                return
+        
         if not self.imu_ready:
             self.get_logger().info("Warte auf Gyroskop-Bootvorgang...")
             return  # Brich hier ab, mach noch nichts!
 
+        self.set_led(True)
+        self.state = 'STARTING'
+
+    def execute_start(self, point_data):
+        if self.button_start:
+            if not self.button_state:
+                return
+            self.button_state = False
+        else:
+            pass
+
+        self.button_state = False  # Flag sofort zurücksetzen
+        self.set_led(False)        # LED ausschalten als Bestätigung
+        
         self.yaw_offset = self.current_yaw
-        self.start_straight_yaw = self.current_yaw  # Gyro-Kalibrierung: Aktuellen Winkel als Referenz setzen  
+        self.start_straight_yaw = self.current_yaw
 
-        self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
-
-        #self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
-
-        if self.fahrtrichtung is None:
-            # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
-            dist_left_point = self.get_closest_measure(point_data, 270.0)
-            dist_right_point = self.get_closest_measure(point_data, 90.0)
-
-            if dist_right_point is not None and dist_left_point is not None:
-                dist_right = dist_right_point[3]
-                dist_left = dist_left_point[3]
-            else: 
-                self.get_logger().info("Fehler: Mindestens eine Seite gibt keine Werte zurück")
-                return
-
-            self.get_logger().info(f"Scanne Strecke... Abstand Links: {dist_left:.2f}m, Länge Rechts: {dist_right:.2f}m")
-            if abs(dist_left - dist_right) > 0.50:
-                if dist_left < dist_right:        
-                    self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
-                    self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
-                else:
-                    self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
-                    self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
-            else:
-                self.get_logger().info("Fehler! Keine Wand ist länger als die")
-                self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
-                return
-        
-        
-
-        with self.data_lock:
-            if len(self.latest_yolo_results) == 0:
-                self.get_logger().info("Warte auf ersten Kamera-Frame und YOLO-Inferenz...")
-                return # Blockiert den Start, bis YOLO wirklich arbeitet
+        self.get_logger().info("Evaluiere Fahrtrichtung und Parke aus")
             
-        self.ausparken()
-        self.state = 'FOLLOW_LANE'
+        if self.mit_ausparken:
+            if self.fahrtrichtung is None:
+                # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
+                dist_left_point = self.get_closest_measure(point_data, 270.0)
+                dist_right_point = self.get_closest_measure(point_data, 90.0)
+
+                if dist_right_point is not None and dist_left_point is not None:
+                    dist_right = dist_right_point[3]
+                    dist_left = dist_left_point[3]
+                else: 
+                    self.get_logger().info("Fehler: Mindestens eine Seite gibt keine Werte zurück")
+                    return
+
+                self.get_logger().info(f"Scanne Strecke... Abstand Links: {dist_left:.2f}m, Länge Rechts: {dist_right:.2f}m")
+                if abs(dist_left - dist_right) > 0.50:
+                    if dist_left < dist_right:        
+                        self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
+                        self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
+                    else:
+                        self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
+                        self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
+                else:
+                    self.get_logger().info("Fehler! Keine Wand ist länger als die Andere!")
+                    return
+            self.state = 'PARKING_OUT'
+
+        else:
+            self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
+            all_clusters = self.get_all_clusters_sorted(point_data)
+            validated_clusters = self.validate_clusters_straight(all_clusters)
+            merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+            self.right_wall = merged_validated_clusters[2]
+            self.front_wall = merged_validated_clusters[1]
+            self.left_wall  = merged_validated_clusters[0]
+            right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+            front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+            left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
+            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
+
+            if self.fahrtrichtung is None:
+                # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
+                if (self.left_wall is not None and len(self.left_wall) > 0) and (self.right_wall is not None and len(self.right_wall) > 0):
+                        # Echte physikalische Länge in Metern berechnen (Satz des Pythagoras)
+                        left_len = math.hypot(self.left_wall[0][1] - self.left_wall[-1][1], self.left_wall[0][2] - self.left_wall[-1][2])
+                        right_len = math.hypot(self.right_wall[0][1] - self.right_wall[-1][1], self.right_wall[0][2] - self.right_wall[-1][2])
+                        
+                        self.get_logger().info(f"Scanne Strecke... Länge Links: {left_len:.2f}m, Länge Rechts: {right_len:.2f}m")
+                        
+                        # Wir brauchen einen deutlichen Unterschied (z.B. 40 cm), um sicher zu sein!
+                        if left_len > right_len + 0.30:
+                            self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
+                            self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
+                        elif right_len > left_len + 0.30:
+                            self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
+                            self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
+                        else:    
+                            self.get_logger().info("Fehler! Keine Wand ist länger als die")
+                            return
+                else:
+                    self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
+                    return
+            self.state = 'FOLLOW_LANE'
 
     def handle_lane_following(self, point_data):
         cmd = Twist()
@@ -2635,18 +2647,20 @@ class Obstacle_Run(Node):
 
         current_straight = self.turn_count % 4
         current_obstacle = self.obstacle_memory[current_straight]
-        if current_obstacle is None or not current_obstacle.is_localized:
-            current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
 
-        if current_obstacle is None:
-            if front_wall_hnf is not None:
-                self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.75)
-        else: 
-            self.current_obstacle_cmd = current_obstacle.color
+        if self.turn_count != 0 or self.fahrtrichtung == 'rechts':      # Damit wir keine falschen Hindernisse direkt nachdem Ausparken erkennen
+            if current_obstacle is None or not current_obstacle.is_localized:
+                current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
+
+            if current_obstacle is None:
+                if front_wall_hnf is not None:
+                    self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.75)
+            else:
+                self.current_obstacle_cmd = current_obstacle.color
 
         front_dist = front_wall_hnf[2] if front_wall_hnf is not None else None
         self.lane_ratio = self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_dist)
-        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}")
+        self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}, front_dist: {front_dist}m")
 
         if front_wall_hnf is not None and aussenbande_hnf is not None:
             self.check_for_obstacle_color(point_data, (self.turn_count + 1), front_wall_hnf[2] - 0.75, 2.0)
@@ -3340,8 +3354,14 @@ class Obstacle_Run(Node):
             self.clear_all_lines()
         self.get_logger().info(f"Aktueller Status: {self.state}, TurnCount: {self.turn_count}, Lane_Ratio: {self.lane_ratio}, EXIT_Ratio: {self.lane_ratio_exit}")
 
-        if self.state == 'STARTING':
+        if self.state == 'INITIALIZING':
+            self.execute_init()
+        
+        elif self.state == 'STARTING':
             self.execute_start(point_data)
+
+        elif self.state == 'PARKING_OUT':
+            self.handle_ausparken(point_data)
 
         elif self.state == 'FOLLOW_LANE':
             self.handle_lane_following(point_data)
