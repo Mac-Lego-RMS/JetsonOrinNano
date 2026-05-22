@@ -124,7 +124,8 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = True
+        self.button_start = False
+        self.mit_ausparken = True
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
@@ -2096,13 +2097,13 @@ class Obstacle_Run(Node):
         # Dies ersetzt deine bisherigen drive_step() Aufrufe.
         sequence = [
             (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-            (-200.0, 0.8, 0.75),  # Schritt 2: Rückwärts
+            (-210.0, 0.8, 0.60),  # Schritt 2: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-            (200.0, -0.8, 0.5),   # Schritt 4: Vorwärts
+            (210.0, -0.8, 0.40),   # Schritt 4: Vorwärts
             (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenken
-            (-200.0, 1.4, 0.55),  # Schritt 6: Rückwärts
+            (-210.0, 1.4, 0.40),  # Schritt 6: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-            (200.0, -0.8, 1.5),   # Schritt 8: Vorwärts
+            (260.0, -0.8, 1.5),   # Schritt 8: Vorwärts
             (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
             (350.0, 0.8, 1.2) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4) 
         ]
@@ -2509,38 +2510,73 @@ class Obstacle_Run(Node):
         self.set_led(False)        # LED ausschalten als Bestätigung
         
         self.yaw_offset = self.current_yaw
-        self.start_straight_yaw = self.current_yaw 
+        self.start_straight_yaw = self.current_yaw
 
         self.get_logger().info("Evaluiere Fahrtrichtung und Parke aus")
-
-        #self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
-
-        if self.fahrtrichtung is None:
-            # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
-            dist_left_point = self.get_closest_measure(point_data, 270.0)
-            dist_right_point = self.get_closest_measure(point_data, 90.0)
-
-            if dist_right_point is not None and dist_left_point is not None:
-                dist_right = dist_right_point[3]
-                dist_left = dist_left_point[3]
-            else: 
-                self.get_logger().info("Fehler: Mindestens eine Seite gibt keine Werte zurück")
-                return
-
-            self.get_logger().info(f"Scanne Strecke... Abstand Links: {dist_left:.2f}m, Länge Rechts: {dist_right:.2f}m")
-            if abs(dist_left - dist_right) > 0.50:
-                if dist_left < dist_right:        
-                    self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
-                    self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
-                else:
-                    self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
-                    self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
-            else:
-                self.get_logger().info("Fehler! Keine Wand ist länger als die")
-                self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
-                return
             
-        self.state = 'PARKING_OUT'
+        if self.mit_ausparken:
+            if self.fahrtrichtung is None:
+                # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
+                dist_left_point = self.get_closest_measure(point_data, 270.0)
+                dist_right_point = self.get_closest_measure(point_data, 90.0)
+
+                if dist_right_point is not None and dist_left_point is not None:
+                    dist_right = dist_right_point[3]
+                    dist_left = dist_left_point[3]
+                else: 
+                    self.get_logger().info("Fehler: Mindestens eine Seite gibt keine Werte zurück")
+                    return
+
+                self.get_logger().info(f"Scanne Strecke... Abstand Links: {dist_left:.2f}m, Länge Rechts: {dist_right:.2f}m")
+                if abs(dist_left - dist_right) > 0.50:
+                    if dist_left < dist_right:        
+                        self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
+                        self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
+                    else:
+                        self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
+                        self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
+                else:
+                    self.get_logger().info("Fehler! Keine Wand ist länger als die Andere!")
+                    return
+            self.state = 'PARKING_OUT'
+
+        else:
+            self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
+            all_clusters = self.get_all_clusters_sorted(point_data)
+            validated_clusters = self.validate_clusters_straight(all_clusters)
+            merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+            self.right_wall = merged_validated_clusters[2]
+            self.front_wall = merged_validated_clusters[1]
+            self.left_wall  = merged_validated_clusters[0]
+            right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+            front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+            left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
+            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
+
+            if self.fahrtrichtung is None:
+                # Wir brauchen zwingend beide Seitenwände für den Längenvergleich
+                if (self.left_wall is not None and len(self.left_wall) > 0) and (self.right_wall is not None and len(self.right_wall) > 0):
+                        # Echte physikalische Länge in Metern berechnen (Satz des Pythagoras)
+                        left_len = math.hypot(self.left_wall[0][1] - self.left_wall[-1][1], self.left_wall[0][2] - self.left_wall[-1][2])
+                        right_len = math.hypot(self.right_wall[0][1] - self.right_wall[-1][1], self.right_wall[0][2] - self.right_wall[-1][2])
+                        
+                        self.get_logger().info(f"Scanne Strecke... Länge Links: {left_len:.2f}m, Länge Rechts: {right_len:.2f}m")
+                        
+                        # Wir brauchen einen deutlichen Unterschied (z.B. 40 cm), um sicher zu sein!
+                        if left_len > right_len + 0.30:
+                            self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Wir fahren rechts herum!
+                            self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
+                        elif right_len > left_len + 0.30:
+                            self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Wir fahren links herum!
+                            self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
+                        else:    
+                            self.get_logger().info("Fehler! Keine Wand ist länger als die")
+                            return
+                else:
+                    self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
+                    return
+            self.state = 'FOLLOW_LANE'
 
     def handle_lane_following(self, point_data):
         cmd = Twist()
