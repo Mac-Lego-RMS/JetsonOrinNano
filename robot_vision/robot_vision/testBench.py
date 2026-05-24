@@ -124,7 +124,7 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = False
+        self.button_start = True
         self.mit_ausparken = True
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
@@ -306,7 +306,7 @@ class Obstacle_Run(Node):
         self.test_is_turning = False
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
-        self.camera_calibration = False
+        self.camera_calibration = True
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -2304,25 +2304,7 @@ class Obstacle_Run(Node):
         # ==========================================
         # 2. HINDERNIS-LOGIK
         # ==========================================
-        if obstacle_cmd is not None:
-            if self.last_turn_for_parking or self.parking_straight:
-                if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                    target_ratio = 0.25
-                else:
-                    obst_is_relevant = False
-                    if obstacle.is_localized:
-                        obst_is_relevant = (obstacle.zone_id < 2) # Hindernis ist nur relevant wenn es direkt zu beginn der Geraden steht
-                    else: 
-                        if obstacle.prediction:
-                                obst_is_relevant = True
-
-                    if obst_is_relevant:
-                        target_ratio = 0.65
-                    else:
-                        target_ratio = 0.25
-                return target_ratio
-            
-
+        if obstacle_cmd is not None and obstacle is not None:
             if not obstacle.is_localized:
                 # --- FALL A: HINDERNIS NICHT VERORTET (Kamera-Erkennung) ---
                 if obstacle.prediction and actual_dist < 1.35:
@@ -2379,10 +2361,11 @@ class Obstacle_Run(Node):
                             target_ratio = 0.80 if obst_is_outer else 0.65
                     else:
                         pass
-        
+
         # ==========================================
         # 3. STATE ANWENDEN ODER ZUKUNFT ZURÜCKGEBEN
         # ==========================================
+
         if not apply_state:
             return target_ratio
             
