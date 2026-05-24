@@ -395,6 +395,7 @@ class Obstacle_Run(Node):
 
         if self.target_turns == self.turn_count:
             self.parking_straight = True
+            self.IDEAL_RADIUS_M = 0.20
             self.base_speed = 250.0
             self.turn_speed = 250.0
         else:
@@ -2477,11 +2478,17 @@ class Obstacle_Run(Node):
         if self.turn_count >= self.target_turns and total_gedreht >= min_total_rotation:
             if front_wall_hnf is not None:
                 closest_f = front_wall_hnf[2]
-                if closest_f < 1.50:
-                    self.state = 'PARKING'
-                    self.parking_phase = 'STOP_AFTER_OBST_RUN'
-                    self.get_logger().info("Geht zum Parken über nach Gyro Kurve")
-                    return
+                if closest_f < 1.70:
+                    if self.fahrtrichtung == 'links':
+                        self.state = 'PARKING_LEFT'
+                        self.parking_phase = 'STOP_AFTER_OBST_RUN'
+                        self.get_logger().info("Geht zum Parken über nach Gyro Kurve")
+                        return
+                    else:
+                        self.state = 'PARKING_RIGHT'
+                        self.parking_phase = 'STOP_AFTER_OBST_RUN'
+                        self.get_logger().info("Geht zum Parken über nach Gyro Kurve")
+                        return
                 
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
             self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
@@ -2626,7 +2633,7 @@ class Obstacle_Run(Node):
 
         self.check_undetected_turn(front_wall_hnf)
 
-        if self.parking_straight and front_wall_hnf is not None and front_wall_hnf[2] < 1.80:
+        if self.state == 'PARKING_LEFT' and front_wall_hnf is not None and front_wall_hnf[2] < 1.80:
             self.parking_phase = 'STOP_AFTER_OBST_RUN'
             return
 
@@ -2824,8 +2831,12 @@ class Obstacle_Run(Node):
                 self.start_straight_yaw = self.current_yaw
 
                 if self.turn_count == self.target_turns:
-                    self.state = 'PARKING'
-                    self.parking_phase = 'STOP_AFTER_OBST_RUN'
+                    if self.fahrtrichtung == 'links':
+                        self.state = 'PARKING_LEFT'
+                        self.parking_phase = 'STOP_AFTER_OBST_RUN'
+                    else:
+                        self.state = 'PARKING_RIGHT'
+                        self.parking_phase = 'STOP_AFTER_OBST_RUN'
                 else:
                     self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
                 
@@ -2935,17 +2946,11 @@ class Obstacle_Run(Node):
         self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
 
     def handle_turn_preparation(self, point_data):
+        self.lane_ratio = 0.25
         cmd = Twist()
         self.front_wall = self.track_front_wall(point_data, self.front_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
-        if front_wall_hnf is not None:
-            allowed_obst_dist = max(0.25, front_wall_hnf[2] - 0.25)
-        else:
-            allowed_obst_dist = 0.25
-        exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), allowed_obst_dist, 2.0)
-        self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
-        self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
         
         validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
         
@@ -2966,7 +2971,10 @@ class Obstacle_Run(Node):
         
         # Kurvengeometrie berechnen
         front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-        target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, 1.13)
+        if self.state == 'PARKING_LEFT':
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.125)
+        else:
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.875)
         intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
         curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
         
@@ -3302,10 +3310,10 @@ class Obstacle_Run(Node):
             self.pub_cmd_vel.publish(cmd)
         else:
             self.execute_stop()
-            self.get_logger().info("PARKEN BEENDET! 15 Punkte.")
+            self.get_logger().info("PARKEN BEENDET!")
             self.state = 'STOPPED'
 
-    def handle_park_maneuver(self, point_data):
+    def handle_park_maneuver_left(self, point_data):
         if self.parking_phase == 'POSITIONING_FOR_STOP':
             self.handle_lane_following(point_data)
 
@@ -3331,6 +3339,30 @@ class Obstacle_Run(Node):
             
         elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
             self.parking_pid_steering(point_data)
+        
+        elif self.parking_phase == 'ENTERING_PARKING_SPACE':
+            self.einparken()
+
+    def handle_park_maneuver_right(self, point_data):
+        if self.parking_phase == 'APPROACH_TURN':
+            self.handle_turn_preparation(point_data)
+
+        elif self.parking_phase == 'EXECUTE_TURN':
+            self.handle_parking_turn(point_data)
+
+        elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
+            cmd = Twist()
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+
+            if self.waiting_timer is None:
+                self.waiting_timer = time.time() + 3.5
+            if time.time() < self.waiting_timer:
+                self.observe_sorroundings_while_waiting(point_data)
+                pass
+            else: 
+                self.parking_pid_steering(point_data)
         
         elif self.parking_phase == 'ENTERING_PARKING_SPACE':
             self.einparken()
@@ -3372,8 +3404,11 @@ class Obstacle_Run(Node):
         elif self.state == 'STOPPED':
             self.execute_stop()
 
-        elif self.state == 'PARKING':
-            self.handle_park_maneuver(point_data)
+        elif self.state == 'PARKING_LEFT':
+            self.handle_park_maneuver_left(point_data)
+
+        elif self.state == 'PARKING_RIGHT':
+            self.handle_park_maneuver_right(point_data)
 
         self.counter += 1
         self.update_timer()
