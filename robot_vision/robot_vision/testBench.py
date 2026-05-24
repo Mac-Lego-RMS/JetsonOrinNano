@@ -163,7 +163,7 @@ class Obstacle_Run(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 12
+        self.target_turns = 4
         self.turn_count = 0
         self.is_start_finish_straight = False
         self.last_turn_for_parking = False
@@ -306,7 +306,7 @@ class Obstacle_Run(Node):
         self.test_is_turning = False
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
-        self.camera_calibration = True
+        self.camera_calibration = False
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -2138,15 +2138,15 @@ class Obstacle_Run(Node):
         # Dies ersetzt deine bisherigen drive_step() Aufrufe.
         sequence = [
             (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-            (-210.0, 0.8, 0.60),  # Schritt 2: Rückwärts
+            (-185.0, 0.8, 0.80),  # Schritt 2: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-            (210.0, -0.8, 0.40),   # Schritt 4: Vorwärts
+            (185.0, -0.8, 0.60),   # Schritt 4: Vorwärts
             (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-            (-210.0, 1.4, 0.40),  # Schritt 6: Rückwärts
+            (-185.0, 1.4, 0.60),  # Schritt 6: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-            (260.0, -0.8, 1.5),   # Schritt 8: Vorwärts
+            (185.0, -0.8, 4.0),   # Schritt 8: Vorwärts
             (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
-            (350.0, 0.8, 1.2) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4) 
+            (350.0, 0.8, 2.0) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4) 
         ]
 
         # 2. Prüfen, ob die Sequenz komplett abgeschlossen ist
@@ -2305,6 +2305,25 @@ class Obstacle_Run(Node):
         # 2. HINDERNIS-LOGIK
         # ==========================================
         if obstacle_cmd is not None and obstacle is not None:
+            if self.last_turn_for_parking or self.parking_straight:
+                obst_is_green = obstacle.color == 'green'
+                if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
+                    target_ratio = 0.25
+                else:
+                    obst_is_relevant = False
+                    if obstacle.is_localized:
+                        obst_is_relevant = (obstacle.zone_id < 2) # Hindernis ist nur relevant wenn es direkt zu beginn der Geraden steht
+                    else: 
+                        if obstacle.prediction:
+                                obst_is_relevant = True
+
+                    if obst_is_relevant:
+                        target_ratio = 0.65
+                    else:
+                        target_ratio = 0.25
+                return target_ratio
+            
+
             if not obstacle.is_localized:
                 # --- FALL A: HINDERNIS NICHT VERORTET (Kamera-Erkennung) ---
                 if obstacle.prediction and actual_dist < 1.35:
@@ -2361,11 +2380,10 @@ class Obstacle_Run(Node):
                             target_ratio = 0.80 if obst_is_outer else 0.65
                     else:
                         pass
-
+        
         # ==========================================
         # 3. STATE ANWENDEN ODER ZUKUNFT ZURÜCKGEBEN
         # ==========================================
-
         if not apply_state:
             return target_ratio
             
@@ -2713,6 +2731,13 @@ class Obstacle_Run(Node):
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
+            if front_wall_hnf is not None:
+                allowed_obst_dist = max(0.25, front_wall_hnf[2] - 0.25)
+            else:
+                allowed_obst_dist = 0.25
+            exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), allowed_obst_dist, 2.0)
+            self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
+            self.get_logger().info(f"Geplanter Exit: Obst={exit_obstacle_cmd}, Ratio={self.lane_ratio_exit:.2f}")
             
             validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
             
@@ -2826,21 +2851,20 @@ class Obstacle_Run(Node):
                 self.pub_cmd_vel.publish(cmd)
 
                 self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
-
+                    
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
-
+                
+                if self.turn_count == self.target_turns:
+                    self.state = 'PARKING'
+                else:
+                    self.state = 'FOLLOW_LANE'
+                
+                # WICHTIG: PID-Gedächtnis für die neue Gerade löschen!
                 self.prev_error = 0.0
                 self.integral_error = 0.0
                 
                 self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
-
-                if self.turn_count == self.target_turns:
-                    self.state = 'PARKING'
-                else:
-                    self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
-                
-                # WICHTIG: PID-Gedächtnis für die neue Gerade löschen!
 
 
     def update_timer(self):
