@@ -155,8 +155,11 @@ class Obstacle_Run(Node):
         # --- STATE MACHINE & PFADPLANUNG ---
         self.state = 'INITIALIZING'    # Startzustand
         self.turn_phase = 'APPROACH'  # Bei Kurven: 'APPROACH', 'TURNING', 'EXIT'
-        self.parking_phase = 'STOP_AFTER_OBST_RUN'
-        self.fahrtrichtung = None     # Wird automatisch erkannt
+        self.parking_phase = None
+        self.park_direction = None
+        self.park_turn_richtung = None
+
+        self.fahrtrichtung = None
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
@@ -1330,6 +1333,11 @@ class Obstacle_Run(Node):
         return (target_x, target_y)
 
     def track_front_wall(self, point_data, last_front_wall):    # np array upgraded
+        if self.state == 'PARKING':
+            richtung = self.park_turn_richtung
+        else:
+            richtung = self.fahrtrichtung
+
         if last_front_wall is None or len(point_data) == 0:
             return None
 
@@ -1340,7 +1348,7 @@ class Obstacle_Run(Node):
         max_angle = np.max(last_fw_array[:, 0])
 
         # 2. Dynamisches Suchfenster (ROI)
-        if self.fahrtrichtung == 'links':
+        if richtung == 'links':
             roi_min = min_angle - 30.0
             roi_max = max_angle + 5.0
         else:
@@ -1594,7 +1602,11 @@ class Obstacle_Run(Node):
         return n_x, n_y, d
     
     def extract_wall_lines(self, u_profile):
-        if self.fahrtrichtung == "links":
+        if self.state == 'PARKING':
+            richtung = self.park_turn_richtung
+        else:
+            richtung = self.fahrtrichtung
+        if richtung == "links":
             side_cluster, front_cluster, opposite_cluster = u_profile
         else:
             opposite_cluster, front_cluster, side_cluster = u_profile
@@ -1665,6 +1677,11 @@ class Obstacle_Run(Node):
         """
         Berechnet den Schnittpunkt der y-Achse (Roboter-Trajektorie) mit der Zielgeraden.
         """
+        if self.state == 'PARKING':
+            richtung = self.park_turn_richtung
+        else:
+            richtung = self.fahrtrichtung
+
         if target_line_params is None:
             return None, None, None
             
@@ -1687,7 +1704,7 @@ class Obstacle_Run(Node):
             return None, None, None
         
         # 1. Vorzeichen des Skalarprodukts basierend auf der Kurvenrichtung setzen
-        if self.fahrtrichtung == 'links':
+        if richtung == 'links':
             nx_directional = n_x
         else:
             nx_directional = -n_x
@@ -1765,7 +1782,15 @@ class Obstacle_Run(Node):
         Übersetzt den Radius über den SteeringController und publisht die Twist-Message.
         """
 
-        if self.fahrtrichtung == "links":
+        if self.park_direction == 'PARKING_RIGHT_OBST' and self.parking_phase == 'EXECUTE_TURN':
+            self.turn_speed = - abs(self.turn_speed)
+
+        if self.state == 'PARKING':
+            richtung = self.park_turn_richtung
+        else:
+            richtung = self.fahrtrichtung
+
+        if richtung == "links":
             is_left_turn = True
         else:
             is_left_turn = False
@@ -1783,10 +1808,11 @@ class Obstacle_Run(Node):
 
         # 4. Twist-Message konstruieren und senden
         cmd.linear.x = float(self.turn_speed)
-        #cmd.linear.x = 0.0  # MOTOR AUS FÜR DEN TEST!
         cmd.angular.z = float(steering_signal)
         
         self.pub_cmd_vel.publish(cmd)
+
+        self.turn_speed = abs(self.turn_speed)
         
         return True
 
@@ -1991,8 +2017,11 @@ class Obstacle_Run(Node):
             # Einlenkpunkt (Start)
             self.send_sphere(marker_array, m_id=21, x=0.0, y=entry_point_distance_m, color=(0.0, 1.0, 0.0))
             
-            # Logische Richtung ermitteln
-            is_left = (self.fahrtrichtung == 'links')
+            if self.state == 'PARKING':
+                richtung = self.park_turn_richtung
+            else:
+                richtung = self.fahrtrichtung
+            is_left = (richtung == 'links')
             
             # GeoGebra Winkel-Sektor zeichnen (Radius 0.4 m)
             self.visualize_geogebra_angle(marker_array, intersection_y_m, turn_angle_deg, is_left_turn=is_left, m_id=20, radius=0.4)
@@ -2479,16 +2508,7 @@ class Obstacle_Run(Node):
             if front_wall_hnf is not None:
                 closest_f = front_wall_hnf[2]
                 if closest_f < 1.70:
-                    if self.fahrtrichtung == 'links':
-                        self.state = 'PARKING_LEFT'
-                        self.parking_phase = 'STOP_AFTER_OBST_RUN'
-                        self.get_logger().info("Geht zum Parken über nach Gyro Kurve")
-                        return
-                    else:
-                        self.state = 'PARKING_RIGHT'
-                        self.parking_phase = 'STOP_AFTER_OBST_RUN'
-                        self.get_logger().info("Geht zum Parken über nach Gyro Kurve")
-                        return
+                        self.state = 'PARKING'
                 
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
             self.get_logger().warn(f">>> GYRO KURVE ERKANNT! Zu weit auf der geraden gedreht (Gedreht: {abs(self.start_straight_yaw - self.current_yaw):.1f}°) <<<")
@@ -2633,9 +2653,11 @@ class Obstacle_Run(Node):
 
         self.check_undetected_turn(front_wall_hnf)
 
-        if self.state == 'PARKING_LEFT' and front_wall_hnf is not None and front_wall_hnf[2] < 1.80:
+        if self.park_direction == 'PARKING_LEFT' and front_wall_hnf is not None and front_wall_hnf[2] < 1.80:
             self.parking_phase = 'STOP_AFTER_OBST_RUN'
             return
+        elif self.park_direction == 'PARKING_RIGHT_OBST' and front_wall_hnf is not None and front_wall_hnf[2] < 1.67:
+            self.parking_phase = 'STOP_AFTER_OBST_RUN'
 
         self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
         self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
@@ -2831,12 +2853,7 @@ class Obstacle_Run(Node):
                 self.start_straight_yaw = self.current_yaw
 
                 if self.turn_count == self.target_turns:
-                    if self.fahrtrichtung == 'links':
-                        self.state = 'PARKING_LEFT'
-                        self.parking_phase = 'STOP_AFTER_OBST_RUN'
-                    else:
-                        self.state = 'PARKING_RIGHT'
-                        self.parking_phase = 'STOP_AFTER_OBST_RUN'
+                    self.state = 'PARKING'
                 else:
                     self.state = 'FOLLOW_LANE'   # Rückgabe der Kontrolle
                 
@@ -3001,6 +3018,7 @@ class Obstacle_Run(Node):
 
     def handle_parking_turn(self, point_data):
         cmd = Twist()
+
         self.execute_turn(self.saved_curve_radius_m)
         self.front_wall = self.track_front_wall(point_data, self.front_wall)
         
@@ -3010,6 +3028,7 @@ class Obstacle_Run(Node):
             front_wall_params = None
         turn_completed = self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params)
 
+
         if turn_completed:
             cmd.linear.x = self.parking_speed
             cmd.angular.z = 0.0
@@ -3017,12 +3036,14 @@ class Obstacle_Run(Node):
 
             self.lane_ratio = self.lane_ratio_exit # Reguläres Absetzen nach der Kurve
 
-            self.parking_phase = 'ADDRESSING_PARKING_SPACE' # Reset für die nächste Kurve
+            if self.park_direction == 'PARKING_RIGHT_NORMAL':
+                self.parking_phase = 'STOP_AFTER_OBST_RUN'
+            else:
+                self.parking_phase = 'ADDRESSING_PARKING_SPACE'
 
             self.prev_error = 0.0
             self.integral_error = 0.0
             
-            self.turn_count += 1
             self.start_straight_yaw = self.current_yaw
             self.pub_cmd_vel.publish(cmd)
 
@@ -3313,23 +3334,94 @@ class Obstacle_Run(Node):
             self.get_logger().info("PARKEN BEENDET!")
             self.state = 'STOPPED'
 
+    def evaluate_reverse_turn(self, point_data):
+        cmd = Twist()
+
+        all_clusters = self.get_all_clusters_sorted(point_data)
+        validated_clusters = self.validate_clusters_straight(all_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+        self.right_wall = merged_validated_clusters[2]
+        self.front_wall = merged_validated_clusters[1]
+        self.left_wall  = merged_validated_clusters[0]
+        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        
+        if self.fahrtrichtung == 'links':
+            innenbande_hnf = left_wall_hnf
+            aussenbande_hnf = right_wall_hnf
+        else:
+            innenbande_hnf = right_wall_hnf
+            aussenbande_hnf = left_wall_hnf
+
+        self.get_logger().info(f"InnenbandeHNF: {innenbande_hnf}, AussenbandeHNF: {aussenbande_hnf}")
+
+        n_xf, n_yf, d_f = front_wall_hnf
+        d_ziel = 0.20
+        target_line_params = (n_xf, n_yf, d_ziel)
+
+        _, _, intersection_angle = self.test_get_intersection_point(target_line_params)
+
+        curve_radius_m = 0.20
+        entry_distance_m = 0.0
+
+        self.get_logger().info(f"Warte auf das Ablaufen der 3s um dann rückwärts abzubiegen")
+        self.saved_intersection_angle = intersection_angle
+        self.saved_curve_radius_m = curve_radius_m
+        self.start_turn_yaw = self.current_yaw
+        self.base_entry_distance = entry_distance_m
+        
+        cmd.linear.x = 0.0
+        cmd.angular.z = 0.0
+        self.pub_cmd_vel.publish(cmd)
+    
+    def decide_park_direction(self, point_data):
+        if self.park_direction is None:
+            if self.fahrtrichtung == 'links':
+                self.park_direction = 'PARKING_LEFT'
+                self.parking_phase = 'POSITIONING_FOR_STOP'
+                self.park_turn_richtung = 'rechts'
+
+            elif self.obstacle_memory[0] is not None and (self.obstacle_memory[0].prediction or self.obstacle_memory[0].zone_id < 2) and self.obstacle_memory[0].color == 'green':
+                self.park_direction = 'PARKING_RIGHT_OBST'
+                self.parking_phase = 'POSITIONING_FOR_STOP'
+                self.park_turn_richtung = 'links'
+
+            else:
+                self.park_direction = 'PARKING_RIGHT_NORMAL'
+                self.parking_phase = 'APPROACH_TURN'
+                self.park_turn_richtung = 'links'
+
+        if self.park_direction == 'PARKING_LEFT':
+            self.handle_park_maneuver_left(point_data)
+
+        elif self.park_direction == 'PARKING_RIGHT_NORMAL':
+            self.handle_park_maneuver_right_normal(point_data)
+            
+        elif self.park_direction == 'PARKING_RIGHT_OBST':
+            self.handle_park_maneuver_right_obst(point_data)
+
     def handle_park_maneuver_left(self, point_data):
         if self.parking_phase == 'POSITIONING_FOR_STOP':
             self.handle_lane_following(point_data)
 
         elif self.parking_phase == 'STOP_AFTER_OBST_RUN':
-            cmd = Twist()
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            self.pub_cmd_vel.publish(cmd)
-
             if self.waiting_timer is None:
                 self.waiting_timer = time.time() + 3.5
             if time.time() < self.waiting_timer:
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0
+                self.pub_cmd_vel.publish(cmd)
                 self.observe_sorroundings_while_waiting(point_data)
                 pass
-            else: 
-                self.positioning_before_parking(point_data)
+            else:
+                self.parking_phase = 'POSITIONING_BEFORE_PARKING'
+                self.waiting_timer = None
+
+        elif self.parking_phase == 'POSITIONING_BEFORE_PARKING':
+            self.positioning_before_parking(point_data)
 
         elif self.parking_phase == 'TURN_PREPARATION':
             self.handle_turn_preparation(point_data)
@@ -3343,26 +3435,60 @@ class Obstacle_Run(Node):
         elif self.parking_phase == 'ENTERING_PARKING_SPACE':
             self.einparken()
 
-    def handle_park_maneuver_right(self, point_data):
+    def handle_park_maneuver_right_normal(self, point_data):
         if self.parking_phase == 'APPROACH_TURN':
             self.handle_turn_preparation(point_data)
 
         elif self.parking_phase == 'EXECUTE_TURN':
             self.handle_parking_turn(point_data)
 
-        elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
-            cmd = Twist()
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            self.pub_cmd_vel.publish(cmd)
-
+        elif self.parking_phase == 'STOP_AFTER_OBST_RUN':
             if self.waiting_timer is None:
                 self.waiting_timer = time.time() + 3.5
             if time.time() < self.waiting_timer:
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0
+                self.pub_cmd_vel.publish(cmd)
                 self.observe_sorroundings_while_waiting(point_data)
                 pass
             else: 
-                self.parking_pid_steering(point_data)
+                self.waiting_timer = None
+                self.parking_phase = 'ADDRESSING_PARKING_SPACE'
+        
+        elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
+            self.parking_pid_steering(point_data)
+        
+        elif self.parking_phase == 'ENTERING_PARKING_SPACE':
+            self.einparken()
+
+    def handle_park_maneuver_right_obst(self, point_data):
+        if self.parking_phase == 'POSITIONING_FOR_STOP':
+            self.handle_lane_following(point_data)
+
+        elif self.parking_phase == 'STOP_AFTER_OBST_RUN':
+            if self.waiting_timer is None:
+                self.waiting_timer = time.time() + 3.5
+            if time.time() < self.waiting_timer:
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0
+                self.pub_cmd_vel.publish(cmd)
+                self.evaluate_reverse_turn(point_data)
+                pass
+            else:
+                self.waiting_timer = None
+                self.parking_phase = 'EXECUTE_TURN'
+                cmd = Twist()
+                cmd.linear.x = 0.0
+                cmd.angular.z = - 0.8
+                self.pub_cmd_vel.publish(cmd)
+        
+        elif self.parking_phase == 'EXECUTE_TURN':
+            self.handle_parking_turn(point_data)
+
+        elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
+            self.parking_pid_steering(point_data)
         
         elif self.parking_phase == 'ENTERING_PARKING_SPACE':
             self.einparken()
@@ -3404,11 +3530,8 @@ class Obstacle_Run(Node):
         elif self.state == 'STOPPED':
             self.execute_stop()
 
-        elif self.state == 'PARKING_LEFT':
-            self.handle_park_maneuver_left(point_data)
-
-        elif self.state == 'PARKING_RIGHT':
-            self.handle_park_maneuver_right(point_data)
+        elif self.state == 'PARKING':
+            self.decide_park_direction(point_data)
 
         self.counter += 1
         self.update_timer()
