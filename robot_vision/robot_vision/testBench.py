@@ -124,7 +124,7 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = True
+        self.button_start = False
         self.mit_ausparken = True
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
@@ -2138,13 +2138,13 @@ class Obstacle_Run(Node):
         # Dies ersetzt deine bisherigen drive_step() Aufrufe.
         sequence = [
             (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-            (-185.0, 0.8, 0.80),  # Schritt 2: Rückwärts
+            (-200.0, 0.8, 0.80),  # Schritt 2: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
             (185.0, -0.8, 0.60),   # Schritt 4: Vorwärts
             (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-            (-185.0, 1.4, 0.60),  # Schritt 6: Rückwärts
+            (-200.0, 1.4, 0.60),  # Schritt 6: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-            (185.0, -0.8, 4.0),   # Schritt 8: Vorwärts
+            (185.0, -0.8, 3.0),   # Schritt 8: Vorwärts
             (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
             (350.0, 0.8, 2.0) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4) 
         ]
@@ -2182,7 +2182,7 @@ class Obstacle_Run(Node):
             adjusted_steer_z = float(current_steer_z) * steer_mult
 
             if self.auspark_step == (len(sequence) - 1) and self.fahrtrichtung == "links":
-                self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.40, 2.0)
+                self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.25, 2.0)
             
             cmd = Twist()
             cmd.linear.x = float(current_drive_x)
