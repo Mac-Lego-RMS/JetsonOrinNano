@@ -2141,13 +2141,13 @@ class Obstacle_Run(Node):
         # Dies ersetzt deine bisherigen drive_step() Aufrufe.
         sequence = [
             (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-            (-185.0, 0.8, 0.80),  # Schritt 2: Rückwärts
+            (-190.0, 0.8, 0.60),  # Schritt 2: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-            (185.0, -0.8, 0.60),   # Schritt 4: Vorwärts
+            (175.0, -0.8, 0.35),   # Schritt 4: Vorwärts
             (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-            (-185.0, 1.4, 0.60),  # Schritt 6: Rückwärts
+            (-190.0, 1.4, 0.30),  # Schritt 6: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-            (185.0, -0.8, 2.0),   # Schritt 8: Vorwärts
+            (175.0, -0.8, 1.7),   # Schritt 8: Vorwärts
             (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
             (230.0, 0.8, 2.2) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4)
         ]
