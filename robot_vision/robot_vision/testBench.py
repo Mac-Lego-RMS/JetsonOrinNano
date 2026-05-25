@@ -163,7 +163,7 @@ class Obstacle_Run(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 4
+        self.target_turns = 12
         self.turn_count = 0
         self.is_start_finish_straight = False
         self.last_turn_for_parking = False
@@ -217,7 +217,7 @@ class Obstacle_Run(Node):
         self.LIDAR_OFFSET_M = 0.08
         self.SAFETY_MARGIN_M = 0.05
         self.MAX_KINEMATIC_RADIUS_M = 1.2
-        self.IDEAL_RADIUS_M = 0.35
+        self.IDEAL_RADIUS_M = 0.28
         self.MIN_TURN_RADIUS_M = 0.20
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
@@ -2138,15 +2138,15 @@ class Obstacle_Run(Node):
         # Dies ersetzt deine bisherigen drive_step() Aufrufe.
         sequence = [
             (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-            (-200.0, 0.8, 0.80),  # Schritt 2: Rückwärts
+            (-240.0, 0.8, 0.80),  # Schritt 2: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-            (185.0, -0.8, 0.60),   # Schritt 4: Vorwärts
+            (195.0, -0.8, 0.60),   # Schritt 4: Vorwärts
             (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-            (-200.0, 1.4, 0.60),  # Schritt 6: Rückwärts
+            (-240.0, 1.4, 0.60),  # Schritt 6: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-            (185.0, -0.8, 3.0),   # Schritt 8: Vorwärts
+            (195.0, -0.8, 2.0),   # Schritt 8: Vorwärts
             (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
-            (350.0, 0.8, 2.0) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4) 
+            (230.0, 0.8, 3.0) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4)
         ]
 
         # 2. Prüfen, ob die Sequenz komplett abgeschlossen ist
@@ -2282,7 +2282,7 @@ class Obstacle_Run(Node):
 
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
-        max_shift = 0.01 
+        max_shift = 0.005 
     
         # --- DISTANZ-FALLBACK (Bei Abschattung durch Säulen) ---
         actual_dist = front_wall_dist if front_wall_dist is not None else 2.0
@@ -2391,14 +2391,16 @@ class Obstacle_Run(Node):
             # Sofortiges Umstellen ohne Rampe
             dist_to_inner_wall = target_ratio
         else:
-            # Sanftes Gleiten zur Ziel-Spur
-            diff = target_ratio - self.lane_ratio
-            if diff > max_shift:
-                dist_to_inner_wall = self.lane_ratio + max_shift
-            elif diff < -max_shift:
-                dist_to_inner_wall = self.lane_ratio - max_shift
+            if front_wall_dist > 1.40:
+                diff = target_ratio - self.lane_ratio
+                if diff > max_shift:
+                    dist_to_inner_wall = self.lane_ratio + max_shift
+                elif diff < -max_shift:
+                    dist_to_inner_wall = self.lane_ratio - max_shift
+                else:
+                    dist_to_inner_wall = target_ratio
             else:
-                dist_to_inner_wall = target_ratio
+                dist_to_inner_wall = self.lane_ratio
 
         return dist_to_inner_wall
 
