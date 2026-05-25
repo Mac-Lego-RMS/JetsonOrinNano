@@ -163,7 +163,7 @@ class Obstacle_Run(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 12
+        self.target_turns = 4
         self.turn_count = 0
         self.is_start_finish_straight = False
         self.last_turn_for_parking = False
@@ -1749,7 +1749,10 @@ class Obstacle_Run(Node):
         
         # 4. KINEMATISCHER OFFSET (Drehpunkt auf die Hinterachse verschieben)
         # Addiert 10 cm, da die Hinterachse 8 cm weiter weg ist als das LiDAR
-        real_axle_dist_m = lidar_entry_dist_m + self.LIDAR_OFFSET_M
+        if self.state == 'PARKING':
+            real_axle_dist_m = lidar_entry_dist_m + self.LIDAR_OFFSET_M
+        else:
+            real_axle_dist_m = lidar_entry_dist_m + self.LIDAR_OFFSET_M
         
         # 5. SICHERHEITS-CHECK: Echten Einlenkpunkt (Hinterachse) verpasst?
         if real_axle_dist_m <= 0.0:
@@ -2138,15 +2141,15 @@ class Obstacle_Run(Node):
         # Dies ersetzt deine bisherigen drive_step() Aufrufe.
         sequence = [
             (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-            (-240.0, 0.8, 0.80),  # Schritt 2: Rückwärts
+            (-185.0, 0.8, 0.80),  # Schritt 2: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-            (195.0, -0.8, 0.60),   # Schritt 4: Vorwärts
+            (185.0, -0.8, 0.60),   # Schritt 4: Vorwärts
             (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-            (-240.0, 1.4, 0.60),  # Schritt 6: Rückwärts
+            (-185.0, 1.4, 0.60),  # Schritt 6: Rückwärts
             (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-            (195.0, -0.8, 2.0),   # Schritt 8: Vorwärts
+            (185.0, -0.8, 2.0),   # Schritt 8: Vorwärts
             (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
-            (230.0, 0.8, 3.0) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4)
+            (230.0, 0.8, 2.2) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4)
         ]
 
         # 2. Prüfen, ob die Sequenz komplett abgeschlossen ist
@@ -2391,7 +2394,7 @@ class Obstacle_Run(Node):
             # Sofortiges Umstellen ohne Rampe
             dist_to_inner_wall = target_ratio
         else:
-            if front_wall_dist > 1.40:
+            if actual_dist > 1.40:
                 diff = target_ratio - self.lane_ratio
                 if diff > max_shift:
                     dist_to_inner_wall = self.lane_ratio + max_shift
@@ -2856,6 +2859,8 @@ class Obstacle_Run(Node):
                     
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
                 
+                self.turn_count += 1
+
                 if self.turn_count == self.target_turns:
                     self.state = 'PARKING'
                 else:
@@ -2865,7 +2870,6 @@ class Obstacle_Run(Node):
                 self.prev_error = 0.0
                 self.integral_error = 0.0
                 
-                self.turn_count += 1
                 self.start_straight_yaw = self.current_yaw
 
 
@@ -2993,12 +2997,12 @@ class Obstacle_Run(Node):
 
         # Lenkung für Approach berechnen
         self.get_logger().info(f"InnenbandeHNF: {innenbande_hnf}, AussenbandeHNF: {aussenbande_hnf}")
-        steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
+        steering_cmd = self.evaluate_steering_straight(right_wall_hnf, left_wall_hnf)
         
         # Kurvengeometrie berechnen
         front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-        if self.state == 'PARKING_LEFT':
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.125)
+        if self.park_direction == 'PARKING_LEFT':
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.02)
         else:
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.875)
         intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
@@ -3057,68 +3061,67 @@ class Obstacle_Run(Node):
             self.pub_cmd_vel.publish(cmd)
 
     def parking_pid_steering(self, point_data):
+        self.lane_ratio = 1.13
         cmd = Twist()
-        all_clusters = self.get_all_clusters_sorted(point_data)
+        if not hasattr(self, 'einpark_timer'):
+            self.einpark_timer = time.time() + 7.0
+        if time.time() < self.einpark_timer:
+            all_clusters = self.get_all_clusters_sorted(point_data)
 
-        self.get_logger().info(f"Einparken in die Parklücke. Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
+            self.get_logger().info(f"Einparken in die Parklücke. Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
 
-        validated_clusters = self.validate_clusters_parking(all_clusters)
-        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
-        self.front_wall = merged_validated_clusters[1]
-        self.left_wall  = merged_validated_clusters[0]
-        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
-        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
-        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+            validated_clusters = self.validate_clusters_parking(all_clusters)
+            merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+            self.right_wall = merged_validated_clusters[2]
+            self.front_wall = merged_validated_clusters[1]
+            self.left_wall  = merged_validated_clusters[0]
+            right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+            front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+            left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
-        self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
-        self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
-        self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
+            self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
+            self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
+            self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
 
-        if self.fahrtrichtung == 'links':
-            innenbande = self.left_wall
-            innenbande_hnf = left_wall_hnf
-            aussenbande = self.right_wall
-            aussenbande_hnf = right_wall_hnf
-        else:
-            innenbande = self.right_wall
-            innenbande_hnf = right_wall_hnf
-            aussenbande = self.left_wall 
-            aussenbande_hnf = left_wall_hnf
-
-        if front_wall_hnf is not None and self.fahrtrichtung is not None:
-            _, _, front_dist = front_wall_hnf
-            
-            if front_dist < 0.25:
-                self.parking_phase = 'ENTERING_PARKING_SPACE'
-                self.get_logger().warn(">>>AUTO PARK AB JETZT BLIND EIN<<<")
-                self.get_logger().info(f"Abstand zur Frontwall: {front_dist:.2f}m")
+            if self.fahrtrichtung == 'links':
+                innenbande = self.left_wall
+                innenbande_hnf = left_wall_hnf
+                aussenbande = self.right_wall
+                aussenbande_hnf = right_wall_hnf
             else:
-                if front_dist < 0.60:
-                    self.get_logger().info(f"Frontwand ist noch {front_dist:.2f}m entfernt")
-        
-        self.lane_ratio = 0.25
-        steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
-        
-        # 3. BEFEHLE AN ESP SETZEN
-        cmd.linear.x = self.parking_speed
-        cmd.angular.z = float(steering_cmd)
-        self.pub_cmd_vel.publish(cmd)
-        self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
+                innenbande = self.right_wall
+                innenbande_hnf = right_wall_hnf
+                aussenbande = self.left_wall 
+                aussenbande_hnf = left_wall_hnf
+
+            if front_wall_hnf is not None and self.fahrtrichtung is not None:
+                _, _, front_dist = front_wall_hnf
+            
+            steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
+            
+            # 3. BEFEHLE AN ESP SETZEN
+            cmd.linear.x = self.parking_speed
+            cmd.angular.z = float(steering_cmd)
+            self.pub_cmd_vel.publish(cmd)
+            self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
+        else:
+            self.execute_stop()
+            self.get_logger().info("PARKEN BEENDET!")
+            self.state = 'STOPPED'
 
     def parking_target_point(self, hnf_innen, hnf_aussen):
         target_y = self.lookahead_dist_straight
         target_x = 0.0
         
         # Plausibilitäts-Check: Wände, die zu weit weg sind, ignorieren
-        if hnf_innen is not None and 0.80 > hnf_innen[2] > 2.5:
+        if hnf_innen is not None and (0.80 > hnf_innen[2] or hnf_innen[2] > 2.5):
             hnf_innen = None
-        if hnf_aussen is not None and 0.80 > hnf_innen[2] > 2.5:
+        if hnf_aussen is not None and (0.80 > hnf_aussen[2] or hnf_aussen[2] > 2.5):
             hnf_aussen = None
 
         def get_x_at_y(hnf_params, y_val):
             nx, ny, d = hnf_params
-            if abs(nx) < 1e-6: return 0.0 
+            if abs(nx) < 1e-6: return 0.0
             return (d - ny * y_val) / nx
 
         # 1. Wo schneiden die erkannten Wände unsere Y-Sichtachse?
@@ -3440,9 +3443,6 @@ class Obstacle_Run(Node):
             
         elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
             self.parking_pid_steering(point_data)
-        
-        elif self.parking_phase == 'ENTERING_PARKING_SPACE':
-            self.einparken()
 
     def handle_park_maneuver_right_normal(self, point_data):
         if self.parking_phase == 'APPROACH_TURN':
@@ -3467,9 +3467,6 @@ class Obstacle_Run(Node):
         
         elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
             self.parking_pid_steering(point_data)
-        
-        elif self.parking_phase == 'ENTERING_PARKING_SPACE':
-            self.einparken()
 
     def handle_park_maneuver_right_obst(self, point_data):
         if self.parking_phase == 'POSITIONING_FOR_STOP':
@@ -3498,10 +3495,6 @@ class Obstacle_Run(Node):
 
         elif self.parking_phase == 'ADDRESSING_PARKING_SPACE':
             self.parking_pid_steering(point_data)
-        
-        elif self.parking_phase == 'ENTERING_PARKING_SPACE':
-            self.einparken()
-
 
     def execute_stop(self):
             cmd = Twist()
@@ -3519,7 +3512,7 @@ class Obstacle_Run(Node):
         if self.counter == 15:
             self.counter = 0
             self.clear_all_lines()
-        self.get_logger().info(f"Aktueller Status: {self.state}, TurnCount: {self.turn_count}, Lane_Ratio: {self.lane_ratio}, EXIT_Ratio: {self.lane_ratio_exit}")
+        self.get_logger().info(f"Aktueller Status: {self.state}, Aktuelle Parking_Phase: {self.parking_phase}, TurnCount: {self.turn_count}, Lane_Ratio: {self.lane_ratio}, EXIT_Ratio: {self.lane_ratio_exit}")
 
         if self.state == 'INITIALIZING':
             self.execute_init()

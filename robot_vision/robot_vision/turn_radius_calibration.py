@@ -140,8 +140,8 @@ class WallFollower(Node):
         self.turn_ki = 0.0
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 250.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 250.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 350.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 350.0  # Leicht reduzierter Speed in der Kurve
 
         self.max_turn_angle = 0.635  # Maximaler Lenkwinkel in Grad (für Sicherheit)    Min Außen 0.435, Max Innen 0.800
 
@@ -755,8 +755,8 @@ class WallFollower(Node):
             self.measure_start_yaw = self.current_yaw
         # --- FIX FÜR INDEX 8 (Geradeausfahrt) ---
         # Da eine 180°-Drehung bei u=0 unmöglich ist, setzen wir R=0 und überspringen.
-        if self.current_test_index == 6 and self.test_state != "DONE":
-            self.messwerte_y[6] = 0.0
+        if self.current_test_index == 5 and self.test_state != "DONE":
+            self.messwerte_y[5] = 0.0
             self.get_logger().info("Index 8 (u=0.0) wird übersprungen (Geradeausfahrt).")
             
             if self.single_test_mode:
@@ -789,6 +789,11 @@ class WallFollower(Node):
                         if 0 <= idx < len(self.messwerte_x):
                             self.current_test_index = idx
                             self.single_test_mode = True
+                            u = self.messwerte_x[self.current_test_index]
+                            test_cmd = Twist()
+                            test_cmd.linear.x = 0.0
+                            test_cmd.angular.z = float(u)
+                            self.pub_cmd_vel.publish(test_cmd)
                         else:
                             self.get_logger().error("Index out of bounds! Skript neustarten.")
                             self.test_state = "DONE"
