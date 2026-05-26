@@ -396,6 +396,7 @@ void setup() {
     jetson.begin(115200);     
     // Button Setup
     pinMode(PIN_BUTTON, INPUT_PULLUP);
+    pinMode(PIN_LED, OUTPUT);
     attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), buttonISR, FALLING); // FALLING, da NO-Taster auf GND zieht
 
     Serial2.begin(1000000, SERIAL_8N1, PIN_SERVO_RX, PIN_SERVO_TX);
