@@ -152,7 +152,7 @@ class WallFollower(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 4
+        self.target_turns = 120
         self.turn_count = 0
 
         self.front_wall = None
@@ -202,8 +202,8 @@ class WallFollower(Node):
         self.max_wall_lenght_for_turn = 0.25
 
         # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 250.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 250.0  # Leicht reduzierter Speed in der Kurve
+        self.base_speed = 500.0  # Normale Geschwindigkeit auf der Geraden
+        self.turn_speed = 500.0  # Leicht reduzierter Speed in der Kurve
 
         self.analyzer = TrackAnalyzer(
             logger=self.get_logger(),
@@ -1669,7 +1669,7 @@ class WallFollower(Node):
         if self.turn_count >= self.target_turns:
             if front_wall_hnf is not None:
                 closest_f = front_wall_hnf[2]
-                if closest_f < 1.50:
+                if closest_f < 1.70:
                         self.state = 'STOPPED'
                 
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
