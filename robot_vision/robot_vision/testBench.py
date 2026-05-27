@@ -124,7 +124,7 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = False
+        self.button_start = True
         self.mit_ausparken = True
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
@@ -203,6 +203,7 @@ class Obstacle_Run(Node):
 
         self.auspark_step = 0
         self.auspark_timer = None
+        self.auspark_sequenz_done = False
 
         # Karotten-Parameter Kurve
         self.steering_ctrl = SteeringController(logger=self.get_logger())
@@ -307,6 +308,7 @@ class Obstacle_Run(Node):
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
         self.camera_calibration = False
+        self.debug = True
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -1086,11 +1088,10 @@ class Obstacle_Run(Node):
 
         self.update_strategy_params()
 
-        if self.camera_calibration:
+        if self.camera_calibration or self.debug:
             self.test_turn_main_logic(point_data)
         else:
             self.main_logic(point_data)
-            #self.test_turn_main_logic(point_data)
     
     def get_closest_point_in_cluster(self, cluster):
         """
@@ -2137,69 +2138,99 @@ class Obstacle_Run(Node):
         self.send_text(marker_array, m_id=m_id + 1, text=f"{turn_angle_deg:.1f}°", x=text_x, y=text_y, color=(0.59, 0.0, 1.0))
 
     def handle_ausparken(self, point_data):
-        # 1. Die Sequenz definieren (Format: Fahren_x, Lenken_z, Dauer_sec)
-        # Dies ersetzt deine bisherigen drive_step() Aufrufe.
-        sequence = [
-            (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-            (-190.0, 0.8, 0.60),  # Schritt 2: Rückwärts
-            (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-            (175.0, -0.8, 0.35),   # Schritt 4: Vorwärts
-            (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-            (-190.0, 1.4, 0.30),  # Schritt 6: Rückwärts
-            (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-            (175.0, -0.8, 1.7),   # Schritt 8: Vorwärts
-            (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
-            (230.0, 0.8, 2.2) if self.fahrtrichtung == "links" else (350.0, 0.8, 1.4)
-        ]
+        # 1. Blockierender Teil: Schritt 1 bis 9
+        if not self.auspark_sequenz_done:
+            self.execute_blind_steps()
+            self.auspark_sequenz_done = True
+            return # Direkt aus der Funktion, wir brauchen hier noch keine LiDAR-Daten
 
-        # 2. Prüfen, ob die Sequenz komplett abgeschlossen ist
-        if self.auspark_step >= len(sequence):
-            self.get_logger().info("Auspark-Sequenz abgeschlossen!")
-            
-            # Finaler Stopp-Befehl
-            cmd = Twist()
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-            self.pub_cmd_vel.publish(cmd)
-            
-            # Variablen zurücksetzen für die Zukunft (optional)
-            self.auspark_step = 0
-            self.auspark_timer = None
-            
-            # WICHTIG: Hier in den nächsten Zustand deiner State-Machine wechseln!
-            self.state = 'FOLLOW_LANE' 
-            return
+        # 2. Kontinuierlicher Teil: Schritt 10 (Der Scan-Schritt)
+        self.handle_last_parking_step(point_data)
 
-        # 3. Aktuellen Schritt aus der Liste laden
-        current_drive_x, current_steer_z, current_duration = sequence[self.auspark_step]
+    def execute_blind_steps(self):
+        self.get_logger().info("Starte blinde Auspark-Sequenz (Schritte 1-9)...")
 
-        # 4. Timer initialisieren (wird nur beim Start eines neuen Schritts ausgeführt)
-        if self.auspark_timer is None:
-            self.auspark_timer = time.time() + current_duration
-            self.get_logger().info(f"Starte Auspark-Schritt {self.auspark_step + 1}/{len(sequence)} (Dauer: {current_duration}s)")
+        steer_mult = -1.0 if self.fahrtrichtung == "links" else 1.0
+        if self.fahrtrichtung == 'links':
+            steps = [
+                (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
+                (-190.0, 0.8, 0.65),  # Schritt 2: Rückwärts
+                (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
+                (190.0, -0.8, 0.50),   # Schritt 4: Vorwärts
+                (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
+                (-190.0, 1.4, 0.4),  # Schritt 6: Rückwärts
+                (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
+                (190.0, -0.8, 2.3),   # Schritt 8: Vorwärts
+                (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
+            ]
 
-        # 5. Ausführen oder zum nächsten Schritt wechseln
-        if time.time() < self.auspark_timer:
-            # Wir sind noch in der Zeit -> Befehl senden
-            steer_mult = -1.0 if self.fahrtrichtung == "links" else 1.0
-            adjusted_steer_z = float(current_steer_z) * steer_mult
-
-            if self.auspark_step == (len(sequence) - 1) and self.fahrtrichtung == "links":
-                self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.25, 2.0)
-            
-            cmd = Twist()
-            cmd.linear.x = float(current_drive_x)
-            cmd.angular.z = adjusted_steer_z
-            self.pub_cmd_vel.publish(cmd)
         else:
-            # Zeit ist abgelaufen -> Bereit machen für den nächsten Schritt
-            self.auspark_step += 1
-            self.auspark_timer = None # Timer für den nächsten Schritt resetten
+            steps = [
+                (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
+                (-190.0, 0.8, 0.60),  # Schritt 2: Rückwärts
+                (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
+                (190.0, -0.8, 0.60),   # Schritt 4: Vorwärts
+                (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
+                (-190.0, 1.4, 0.4),  # Schritt 6: Rückwärts
+                (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
+                (190.0, -0.8, 2.3),   # Schritt 8: Vorwärts
+                (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
+            ]
+
+
+        for i in range(len(steps)):
+            drive_x, steer_z, duration = steps[i]
+            
+            cmd = Twist()
+            cmd.linear.x = float(drive_x)
+            cmd.angular.z = float(steer_z) * steer_mult
+            
+            start_time = time.monotonic()
+            end_time = start_time + duration
+            counter = 0
+            
+            while time.monotonic() < end_time:
+                if counter % 20 == 0:
+                    self.pub_cmd_vel.publish(cmd)
+                
+                counter += 1
+                time.sleep(0.01)
+
+            stop_cmd = Twist()
+            stop_cmd.linear.x = 0.0
+            stop_cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(stop_cmd)
+
+        self.get_logger().info("Blinde Sequenz beendet.")
+
+    def handle_last_parking_step(self, point_data):
+        cmd = Twist()
+        if self.fahrtrichtung == "links":
+            self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.25, 2.0)
+            cmd.linear.x = 230.0
+        else:
+            cmd.linear.x = 350.0
+        
+        cmd.angular.z = 0.8 * (-1.0 if self.fahrtrichtung == "links" else 1.0)
+        self.pub_cmd_vel.publish(cmd)
+        
+        duration = 2.3 if self.fahrtrichtung == "links" else 1.4
+
+        self.get_logger().info("Letzten Ausparkschritt erreicht")
+
+        if self.auspark_timer is None:
+            self.auspark_timer = time.monotonic() + duration
+        
+        if time.monotonic() > self.auspark_timer:
+            self.get_logger().info("Ausparken abgeschlossen.")
+            self.state = 'FOLLOW_LANE'
+            self.execute_stop()
 
     def test_turn_main_logic(self, point_data):
         if self.camera_calibration:
             return
-        self.ausparken()
+        self.fahrtrichtung = 'links'
+        self.handle_ausparken(point_data)
         
 
     # -----------------------------------------
