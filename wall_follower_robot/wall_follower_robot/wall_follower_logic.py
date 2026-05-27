@@ -164,10 +164,17 @@ class WallFollower(Node):
         self.min_wall_dist = 0.15     
 
         self.lane_ratio = 0.40
-        self.last_target_wall_dist = 0.30
 
         self.base_entry_distance = None
         self.assumed_lane_width = 0.60
+
+        self.lane_width_avg = 0.60
+        self.lane_width_sum = 0
+        self.lane_width_n = 0
+
+        self.exit_lane_width_avg = 0.60
+        self.exit_lane_width_sum = 0
+        self.exit_lane_width_n = 0
 
         # --- PID-REGLER PARAMETER ---
         self.kp = 2.0   # Lenkt hart zur Karotte
@@ -1058,34 +1065,31 @@ class WallFollower(Node):
         # Der Offset zur AUSSENBANDE ist logischerweise (1.0 - lane_ratio) (z.B. 0.40).
 
         if x_innen is not None and x_aussen is not None:
-            # Beide Wände da: Wir mitteln die Karotte aus BEIDEN Wänden! 
-            # Das halbiert das Sensor-Rauschen und der Roboter fährt wie auf Schienen.
-            _, _, dist_innen = hnf_innen
-            _, _, dist_aussen = hnf_aussen
-            lane_width = abs(dist_innen + dist_aussen)
+            inv_ratio = 1.0 - self.lane_ratio
+            
             if x_innen < 0: # Innenbande ist links
-                t_innen = x_innen + self.lane_ratio
-                t_aussen = x_aussen - (lane_width * self.lane_ratio)
+                t_innen = x_innen + (self.lane_width_avg * self.lane_ratio)
+                t_aussen = x_aussen - (self.lane_width_avg * inv_ratio)
             else:           # Innenbande ist rechts
-                t_innen = x_innen - self.lane_ratio
-                t_aussen = x_aussen + (lane_width * self.lane_ratio)
+                t_innen = x_innen - (self.lane_width_avg * self.lane_ratio)
+                t_aussen = x_aussen + (self.lane_width_avg * inv_ratio)
                 
             target_x = (t_innen + t_aussen) / 2.0
 
         elif x_innen is not None:
             # NUR Innenbande da (z.B. bei Ausfahrt aus der Kurve)
             if x_innen < 0:
-                target_x = x_innen + (self.assumed_lane_width * self.lane_ratio)
+                target_x = x_innen + (self.lane_width_avg * self.lane_ratio)
             else:
-                target_x = x_innen - (self.assumed_lane_width * self.lane_ratio)
+                target_x = x_innen - (self.lane_width_avg * self.lane_ratio)
 
         elif x_aussen is not None:
             # NUR Außenbande da (DAS IST DEINE KURVEN-ANNÄHERUNG!)
             inv_ratio = 1.0 - self.lane_ratio
             if x_aussen < 0: 
-                target_x = x_aussen + (self.assumed_lane_width * inv_ratio)
+                target_x = x_aussen + (self.lane_width_avg * inv_ratio)
             else:
-                target_x = x_aussen - (self.assumed_lane_width * inv_ratio)
+                target_x = x_aussen - (self.lane_width_avg * inv_ratio)
                 
         else:
             # Notfall (Beide Wände fehlen komplett)
@@ -1711,9 +1715,6 @@ class WallFollower(Node):
         if self.button_start:
             if not self.button_state:
                 return
-            self.button_state = False
-        else:
-            pass
 
         self.button_state = False  # Flag sofort zurücksetzen
         self.set_led(False)        # LED ausschalten als Bestätigung
@@ -1754,6 +1755,7 @@ class WallFollower(Node):
             else:
                 self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                 return
+        self.button_state = False
         self.state = 'FOLLOW_LANE'
 
     def handle_lane_following(self, point_data):
@@ -1788,11 +1790,20 @@ class WallFollower(Node):
             aussenbande = self.left_wall 
             aussenbande_hnf = left_wall_hnf
 
+        if aussenbande_hnf is not None and innenbande_hnf is not None:
+            _, _, dist_innen = innenbande_hnf
+            _, _, dist_aussen = aussenbande_hnf
+            lane_width_current = abs(dist_innen + dist_aussen)
+            if 0.45 < lane_width_current < 1.15:   
+                self.lane_width_sum += lane_width_current
+                self.lane_width_n += 1
+                self.lane_width_avg = self.lane_width_sum / self.lane_width_n
+
         if front_wall_hnf is not None and self.fahrtrichtung is not None:
             _, _, front_dist = front_wall_hnf
             max_y_innen = 0.0
             if innenbande is not None and len(innenbande) > 0:
-                max_y_innen = max(p[2] for p in innenbande) 
+                max_y_innen = max(p[2] for p in innenbande)
 
             if front_dist < 1.20 and max_y_innen < self.max_wall_lenght_for_turn:
                 self.state = f"TURN_{self.fahrtrichtung.upper()}"
@@ -1855,15 +1866,19 @@ class WallFollower(Node):
             self.get_logger().warn(f"Innenbande ist vorhanden: {(innenbande is not None)} mit Länge: {len(innenbande) if innenbande is not None else None}")
             if innenbande is not None and len(innenbande) > 0:
                 max_y_innen = max(p[2] for p in innenbande)
-                calculated_lane_width = front_dist - max_y_innen
-                target_line_to_wall = abs(calculated_lane_width * 0.60)
-                self.get_logger().warn(f"calculated_lane_width: {calculated_lane_width}")
-                if 0.45 < calculated_lane_width < 1.15:
-                    self.last_target_wall_dist = target_line_to_wall
-                    self.get_logger().warn(f"Neuer last_target_wall_dist: {self.last_target_wall_dist}")
+                current_exit_lane_width = front_dist - max_y_innen
+                if 0.45 < current_exit_lane_width < 1.15:
+                    self.exit_lane_width_sum += current_exit_lane_width
+                    self.exit_lane_width_n += 1
+                    self.exit_lane_width_avg = self.exit_lane_width_sum / self.exit_lane_width_n
+                    self.get_logger().warn(f"current_exit_lane_width: {current_exit_lane_width} m")
+            target_line_to_wall = abs(self.exit_lane_width_avg * 0.60)
+            self.get_logger().warn(f"Exit_lane_ratio_AVG: {self.exit_lane_width_avg} m")
+            last_target_wall_dist = target_line_to_wall
+            self.get_logger().warn(f"Neuer last_target_wall_dist: {last_target_wall_dist}")
 
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, self.last_target_wall_dist)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, last_target_wall_dist)
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
             
@@ -1910,23 +1925,22 @@ class WallFollower(Node):
             # C) Kurve beenden
             if turn_completed:
                 self.get_logger().info("Kurve regulär beendet. Übergebe an Lane-Follower.")
-                
                 cmd.linear.x = self.base_speed
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
-                    
                 self.turn_phase = 'APPROACH'
-                
                 self.turn_count += 1
-
                 self.state = 'FOLLOW_LANE'
-                
                 self.prev_error = 0.0
                 self.integral_error = 0.0
-                
                 self.start_straight_yaw = self.current_yaw
 
-                self.last_target_wall_dist = 0.30
+                self.lane_width_avg = self.exit_lane_width_avg
+                self.lane_width_n = 0
+                self.lane_width_sum = 0
+                self.exit_lane_width_avg = 0.60
+                self.exit_lane_width_n = 0
+                self.exit_lane_width_sum = 0
 
     def update_timer(self):
         now = self.get_clock().now()
