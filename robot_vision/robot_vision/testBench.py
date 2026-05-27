@@ -309,6 +309,7 @@ class Obstacle_Run(Node):
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
         self.camera_calibration = False
         self.debug = True
+        self.debug_start = self.debug
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -884,7 +885,7 @@ class Obstacle_Run(Node):
             
             u_profile, _ = self.merge_clusters(clusters, u_profile)
             self.visualize_cluster_line(u_profile[0], 0, "cyan")
-            self.visualize_cluster_line(u_profile[1], 1, "cyan")
+            self.visualize_cluster_line(u_profile[1], 1, "rot")
             self.visualize_cluster_line(u_profile[2], 2, "cyan")
             return u_profile
 
@@ -1748,12 +1749,7 @@ class Obstacle_Run(Node):
         # 3. Finalen Einlenkpunkt (für das LiDAR) auf der y-Achse festlegen
         lidar_entry_dist_m = intersection_y_m - tangent_length_m
         
-        # 4. KINEMATISCHER OFFSET (Drehpunkt auf die Hinterachse verschieben)
-        # Addiert 10 cm, da die Hinterachse 8 cm weiter weg ist als das LiDAR
-        if self.state == 'PARKING':
-            real_axle_dist_m = lidar_entry_dist_m + self.LIDAR_OFFSET_M
-        else:
-            real_axle_dist_m = lidar_entry_dist_m + self.LIDAR_OFFSET_M
+        real_axle_dist_m = lidar_entry_dist_m + self.LIDAR_OFFSET_M
         
         # 5. SICHERHEITS-CHECK: Echten Einlenkpunkt (Hinterachse) verpasst?
         if real_axle_dist_m <= 0.0:
@@ -2154,24 +2150,24 @@ class Obstacle_Run(Node):
         if self.fahrtrichtung == 'links':
             steps = [
                 (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-                (-190.0, 0.8, 0.65),  # Schritt 2: Rückwärts
+                (-230.0, 0.8, 0.65),  # Schritt 2: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-                (190.0, -0.8, 0.50),   # Schritt 4: Vorwärts
+                (195.0, -0.8, 0.60),   # Schritt 4: Vorwärts
                 (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-                (-190.0, 1.4, 0.4),  # Schritt 6: Rückwärts
+                (-230.0, 1.4, 0.4),  # Schritt 6: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-                (190.0, -0.8, 2.3),   # Schritt 8: Vorwärts
+                (195.0, -0.8, 2.3),   # Schritt 8: Vorwärts
                 (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
             ]
 
         else:
             steps = [
                 (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-                (-190.0, 0.8, 0.60),  # Schritt 2: Rückwärts
+                (-200.0, 0.8, 0.60),  # Schritt 2: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
                 (190.0, -0.8, 0.60),   # Schritt 4: Vorwärts
                 (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-                (-190.0, 1.4, 0.4),  # Schritt 6: Rückwärts
+                (-200.0, 1.4, 0.4),  # Schritt 6: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
                 (190.0, -0.8, 2.3),   # Schritt 8: Vorwärts
                 (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
@@ -2214,7 +2210,7 @@ class Obstacle_Run(Node):
         cmd.angular.z = 0.8 * (-1.0 if self.fahrtrichtung == "links" else 1.0)
         self.pub_cmd_vel.publish(cmd)
         
-        duration = 2.3 if self.fahrtrichtung == "links" else 1.4
+        duration = 2.3 if self.fahrtrichtung == "links" else 1.1
 
         self.get_logger().info("Letzten Ausparkschritt erreicht")
 
@@ -2224,13 +2220,21 @@ class Obstacle_Run(Node):
         if time.monotonic() > self.auspark_timer:
             self.get_logger().info("Ausparken abgeschlossen.")
             self.state = 'FOLLOW_LANE'
-            self.execute_stop()
 
     def test_turn_main_logic(self, point_data):
         if self.camera_calibration:
             return
-        self.fahrtrichtung = 'links'
-        self.handle_ausparken(point_data)
+
+        if self.debug_start:
+            self.yaw_offset = self.current_yaw
+            self.start_straight_yaw = self.current_yaw
+            self.debug_start = False
+
+        clusters = self.get_all_clusters_sorted(point_data)
+        counter = 0
+        for c in clusters:
+            self.visualize_cluster_line(c, counter, "cyan")
+            counter += 1
         
 
     # -----------------------------------------
@@ -2988,11 +2992,6 @@ class Obstacle_Run(Node):
                 self.parking_phase = 'TURN_PREPARATION'
                 self.get_logger().warn(">>> PARK TURN_PREPARATION EINGELEITET<<<")
                 self.get_logger().info(f"Abstand zur Frontwall: {front_dist:.2f}m")
-                if self.fahrtrichtung == 'links':
-                    self.fahrtrichtung = 'rechts'
-                else: 
-                    self.fahrtrichtung = 'links'
-                return
             else:
                 if front_dist < 1.60:
                     self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
@@ -3009,15 +3008,16 @@ class Obstacle_Run(Node):
     def handle_turn_preparation(self, point_data):
         self.lane_ratio = 0.25
         cmd = Twist()
-        self.front_wall = self.track_front_wall(point_data, self.front_wall)
+        all_clusters = self.get_all_clusters_sorted(point_data)
+
+        validated_clusters = self.validate_clusters_straight(all_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+        self.right_wall = merged_validated_clusters[2]
+        self.front_wall = merged_validated_clusters[1]
+        self.left_wall  = merged_validated_clusters[0]
+        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
-        self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
-        
-        validated_clusters = self.validate_clusters_turn(self.front_wall, point_data)
-        
-        # --- PID FÜR DIE ANNÄHERUNG ---
-        right_wall_hnf = self.cluster_to_hnf(validated_clusters[0])
-        left_wall_hnf = self.cluster_to_hnf(validated_clusters[2])
+        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
         
         if self.fahrtrichtung == 'links':
             innenbande_hnf = left_wall_hnf
@@ -3028,12 +3028,12 @@ class Obstacle_Run(Node):
 
         # Lenkung für Approach berechnen
         self.get_logger().info(f"InnenbandeHNF: {innenbande_hnf}, AussenbandeHNF: {aussenbande_hnf}")
-        steering_cmd = self.evaluate_steering_straight(right_wall_hnf, left_wall_hnf)
+        steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
         
         # Kurvengeometrie berechnen
         front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
         if self.park_direction == 'PARKING_LEFT':
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.02)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.10)
         else:
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.875)
         intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
@@ -3095,7 +3095,7 @@ class Obstacle_Run(Node):
         self.lane_ratio = 1.13
         cmd = Twist()
         if not hasattr(self, 'einpark_timer'):
-            self.einpark_timer = time.time() + 7.0
+            self.einpark_timer = time.time() + 30.0
         if time.time() < self.einpark_timer:
             all_clusters = self.get_all_clusters_sorted(point_data)
 
@@ -3211,6 +3211,8 @@ class Obstacle_Run(Node):
         u_profile = [None, None, None]
         if not clusters:
             return u_profile
+        else:
+            self.get_logger().info(f"Anzahl aller Cluster: {len(clusters)}")
 
         # 1. Delta berechnen, wenn wir im Gyro-Modus sind
         # (Wir gehen davon aus, dass self.last_turn_aborted gesetzt wird)
@@ -3239,9 +3241,9 @@ class Obstacle_Run(Node):
                 if abs(mean_x_local) <= 1.0:
                     # GEOGRAFISCHER SPLIT
                     if mean_x_local > 0:
-                        left_candidates.append(c)
-                    else:
                         right_candidates.append(c)
+                    else:
+                        left_candidates.append(c)
                         
             else:
                 # Da p[2] bei dir Vorne/Hinten ist:
@@ -3254,6 +3256,8 @@ class Obstacle_Run(Node):
         # ==========================================
         best_right = right_candidates[0] if right_candidates else None
         best_left = left_candidates[0] if left_candidates else None
+
+        self.get_logger().warn(f"LeftCandidates: {len(left_candidates) if left_candidates else None}, RightCandidates: {len(right_candidates) if right_candidates else None}")
         
         best_left_hnf = self.cluster_to_hnf(best_left) if (best_left is not None) else None
         best_right_hnf = self.cluster_to_hnf(best_right) if (best_right is not None) else None
@@ -3282,14 +3286,43 @@ class Obstacle_Run(Node):
                         u_profile[0] = best_right
                     else:
                         u_profile[2] = best_left
+
+        elif best_right is not None:
+            self.visualize_cluster_line(best_right, 10, "cyan")
+        
+            if best_right_hnf is not None:
+                _, _, right_dist = best_right_hnf
+            
+                track_width = 3.0
+                self.get_logger().info(f"Abgeschätze TrackWidth rechts: {track_width:.2f}m, R: {abs(right_dist):.2f}m")
+                
+                if 1.30 < right_dist < 2.70:
+                    u_profile[0] = best_right
+                else:
+                    best_right = None
+
+            elif best_left is not None:
+                self.visualize_cluster_line(best_left, 10, "pink")
+            
+                if best_right_hnf is not None:
+                    _, _, left_dist = left_wall_hnf
+                
+                    track_width = 3.0
+                    self.get_logger().info(f"Abgeschätze TrackWidth links: {track_width:.2f}m, R: {abs(left_dist):.2f}m")
+                    
+                    if 0.50 < left_dist < 1.70:
+                        u_profile[2] = best_left
+                    else:
+                        best_left = None
+
             else:
                 self.get_logger().warn("HNF Berechnung für eine der Wände fehlgeschlagen.")
                 return [None, None, None]
                     
         elif best_right is not None:
-            u_profile[0] = best_right
+            u_profile[2] = best_right
         elif best_left is not None:
-            u_profile[2] = best_left
+            u_profile[0] = best_left
 
         # ==========================================
         # 3. FRONTWAND ZUORDNEN (HARDWARE-FIX & ZONEN-LOGIK)
@@ -3491,8 +3524,8 @@ class Obstacle_Run(Node):
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
                 self.observe_sorroundings_while_waiting(point_data)
-                pass
             else: 
+                
                 self.waiting_timer = None
                 self.parking_phase = 'ADDRESSING_PARKING_SPACE'
         
