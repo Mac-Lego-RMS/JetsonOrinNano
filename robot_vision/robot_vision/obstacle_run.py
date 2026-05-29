@@ -379,8 +379,7 @@ class Obstacle_Run(Node):
 
     def imu_callback(self, msg):
         """
-        Wandelt Quaternionen in einen UNENDLICHEN, sprungfreien Winkel um.
-        (Kein Zurückspringen bei 180° oder 360°!)
+        Gibt die Ergebnisse des IMU Sensors zurück.
         """
         self.imu_ready = True
         q = msg.orientation
@@ -459,8 +458,8 @@ class Obstacle_Run(Node):
 
     def send_text(self, marker_array, m_id, text, x, y, color=(1.0, 1.0, 1.0), scale=0.15):
         """
-        Fügt einen sichtbaren Text-Marker zum MarkerArray hinzu.
-        Schriftgröße in Metern (Standard 15cm)
+        Fügt einen Text-Marker zum MarkerArray hinzu.
+        Schriftgröße in Metern
         """
         marker = Marker()
         marker.header.frame_id = "base_link"
@@ -964,7 +963,6 @@ class Obstacle_Run(Node):
     def get_closest_point_in_cluster(self, cluster):
         """
         Gibt den Punkt eines Clusters zurück, der den kürzesten Abstand zum LiDAR hat.
-        cluster: Liste von Punkten im Format (angle, x, y, dist)
         """
         if cluster is None or len(cluster) == 0:
             return None
@@ -1055,8 +1053,7 @@ class Obstacle_Run(Node):
 
     def visualize_target_point(self, x, y, m_id=24, farbe_name="gelb", label="TARGET"):
         """
-        Visualisiert die 'Karotte' (Zielpunkt) als Kugel und Text-Label im Foxglove.
-        Nutzt das bestehende MarkerArray-System.
+        Visualisiert den Zielpunkt als Punkt und Text-Label im Foxglove.
         """
 
         farben = {
@@ -1105,8 +1102,7 @@ class Obstacle_Run(Node):
     def get_target_point_straight(self, hnf_innen, hnf_aussen):
         """
         Berechnet den Zielpunkt mithilfe der HNF.
-        Ist nur eine Wand vorhanden, wird der Offset direkt von dieser berechnet, 
-        ohne eine fehleranfällige virtuelle Wand zu projizieren!
+        Ist nur eine Wand vorhanden, wird der Offset direkt von dieser berechnet, ohne eine fehleranfällige virtuelle Wand zu projizieren!
         """
         target_y = self.lookahead_dist_straight
         target_x = 0.0
@@ -1361,7 +1357,7 @@ class Obstacle_Run(Node):
         return sum / len(cluster)
 
     def angle_diff(self, a, b):
-        """Berechnet den kleinsten Unterschied zwischen zwei Winkeln (Rad)."""
+        """Berechnet den Unterschied zwischen zwei Winkeln (Rad)."""
         return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
@@ -1372,7 +1368,6 @@ class Obstacle_Run(Node):
     def cluster_to_hnf(self, cluster):
         """
         Berechnet die Hessesche Normalform aus einem Cluster von Messpunkten.
-        Erwartetes Cluster-Format: Liste aus Tupeln (winkel, x_coord, y_coord, abstand)
         """
         if cluster is None:
             return None
@@ -1611,7 +1606,7 @@ class Obstacle_Run(Node):
 
     def check_turn_completion_fused(self, turn_angle, front_line_params):
         """
-        Kombiniert Gyro-Daten mit dem Wandwinkel für maximale Präzision am Kurvenausgang.
+        Gibt True zurück wenn die Kurve nach Gyro oder Wandwinkel beendet ist.
         """
 
         yaw_diff = (self.current_yaw - self.start_turn_yaw + 180) % 360 - 180
@@ -1655,14 +1650,7 @@ class Obstacle_Run(Node):
 
     def visualize_cluster_line(self, cluster, m_id, farbe_name="rot", label="CLUSTER_LINE"):
         """
-        Erstellt einen Marker für eine Gerade direkt aus dem ersten und letzten Punkt eines Clusters.
-        Das spart enorm CPU-Leistung im Vergleich zur HNF-Visualisierung.
-        
-        Args:
-            cluster: Liste oder Numpy-Array von Punkten (min. 2 Punkte nötig)
-            m_id: Eindeutige ID für den Marker
-            farbe_name: "rot", "gruen", "blau", "cyan", "magenta", "gelb"
-            label: Textbeschriftung an der Linie
+        Erstellt einen Marker für einen Cluster.
         """
 
         if cluster is None or len(cluster) < 2:
@@ -1696,12 +1684,6 @@ class Obstacle_Run(Node):
     def visualize_hnf_line(self, hnf_params, m_id, farbe_name="rot", label="HNF_LINE"):
         """
         Erstellt einen Marker für eine Gerade aus der Hesseschen Normalform (n_x, n_y, d).
-        
-        Args:
-            hnf_params: Tuple (n_x, n_y, d)
-            m_id: Eindeutige ID für den Marker
-            farbe_name: "rot", "gruen" oder "blau"
-            label: Textbeschriftung an der Linie
         """
         if hnf_params is None:
             return
@@ -1821,7 +1803,7 @@ class Obstacle_Run(Node):
         return success
 
     def test_check_turn_completion_fused(self, target_angle, front_line_params):
-        """Testet die Funktion check_turn_completion_fused() und loggt, ob die Kurve als abgeschlossen gilt."""
+        """Testet die Funktion check_turn_completion_fused() und loggt, ob die Kurve abgeschlossen ist."""
         self.visualize_hnf_line(front_line_params, m_id=1, farbe_name="rot", label="front_wall")
         completed = self.check_turn_completion_fused(target_angle, front_line_params)
         status = "COMPLETED" if completed else "IN PROGRESS"
@@ -2467,9 +2449,6 @@ class Obstacle_Run(Node):
         self.pub_cmd_vel.publish(cmd)
 
     def handle_turn_maneuver(self, point_data):
-        """
-        Kapselt die gesamte Logik für Kurven: Berechnung, Trigger, Ausführung und Abschluss.
-        """
         cmd = Twist()
         
         if self.turn_phase == 'APPROACH':
@@ -3033,7 +3012,7 @@ class Obstacle_Run(Node):
 
             elif best_left is not None:
                 if best_left_hnf is not None:
-                    _, _, left_dist = best_wall_hnf
+                    _, _, left_dist = best_left_hnf
                 
                     track_width = 3.0
                     self.get_logger().info(f"Abgeschätze TrackWidth links: {track_width:.2f}m, R: {abs(left_dist):.2f}m")
