@@ -541,7 +541,7 @@ class Obstacle_Run(Node):
                 mean_x_local = sum(p[1] for p in c) / len(c)
                 
                 if abs(mean_x_local) <= 1.0:
-                    if mean_x_local > 0:
+                    if mean_x_local < 0:
                         left_candidates.append(c)
                     else:
                         right_candidates.append(c)
@@ -1410,9 +1410,11 @@ class Obstacle_Run(Node):
         else:
             richtung = self.fahrtrichtung
         if richtung == "links":
-            side_cluster, front_cluster, opposite_cluster = u_profile
-        else:
+            # Bei Linkskurve ist Links (2) die Innenbande (side)
             opposite_cluster, front_cluster, side_cluster = u_profile
+        else:
+            # Bei Rechtskurve ist Rechts (0) die Innenbande (side)
+            side_cluster, front_cluster, opposite_cluster = u_profile
 
         # Frontwand extrahieren
         if front_cluster is None or len(front_cluster) < 2:
@@ -2337,9 +2339,9 @@ class Obstacle_Run(Node):
             all_clusters = self.get_all_clusters_sorted(point_data)
             validated_clusters = self.validate_clusters_straight(all_clusters)
             merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-            self.right_wall = merged_validated_clusters[2]
+            self.right_wall = merged_validated_clusters[0]
             self.front_wall = merged_validated_clusters[1]
-            self.left_wall  = merged_validated_clusters[0]
+            self.left_wall  = merged_validated_clusters[2]
             right_wall_hnf = self.cluster_to_hnf(self.right_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             left_wall_hnf = self.cluster_to_hnf(self.left_wall)
@@ -2377,9 +2379,9 @@ class Obstacle_Run(Node):
 
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
+        self.right_wall = merged_validated_clusters[0]
         self.front_wall = merged_validated_clusters[1]
-        self.left_wall  = merged_validated_clusters[0]
+        self.left_wall  = merged_validated_clusters[2]
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
@@ -2612,9 +2614,9 @@ class Obstacle_Run(Node):
 
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
+        self.right_wall = merged_validated_clusters[0]
         self.front_wall = merged_validated_clusters[1]
-        self.left_wall  = merged_validated_clusters[0]
+        self.left_wall  = merged_validated_clusters[2]
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
@@ -2631,9 +2633,9 @@ class Obstacle_Run(Node):
 
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
+        self.right_wall = merged_validated_clusters[0]
         self.front_wall = merged_validated_clusters[1]
-        self.left_wall  = merged_validated_clusters[0]
+        self.left_wall  = merged_validated_clusters[2]
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
@@ -2684,9 +2686,9 @@ class Obstacle_Run(Node):
 
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
+        self.right_wall = merged_validated_clusters[0]
         self.front_wall = merged_validated_clusters[1]
-        self.left_wall  = merged_validated_clusters[0]
+        self.left_wall  = merged_validated_clusters[2]
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
@@ -2775,9 +2777,9 @@ class Obstacle_Run(Node):
 
             validated_clusters = self.validate_clusters_parking(all_clusters)
             merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-            self.right_wall = merged_validated_clusters[2]
+            self.right_wall = merged_validated_clusters[0]
             self.front_wall = merged_validated_clusters[1]
-            self.left_wall  = merged_validated_clusters[0]
+            self.left_wall  = merged_validated_clusters[2]
             right_wall_hnf = self.cluster_to_hnf(self.right_wall)
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             left_wall_hnf = self.cluster_to_hnf(self.left_wall)
@@ -2821,9 +2823,9 @@ class Obstacle_Run(Node):
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_parking(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
+        self.right_wall = merged_validated_clusters[0]
         self.front_wall = merged_validated_clusters[1]
-        self.left_wall  = merged_validated_clusters[0]
+        self.left_wall  = merged_validated_clusters[2]
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
@@ -2862,12 +2864,11 @@ class Obstacle_Run(Node):
     def parking_target_point(self, hnf_innen, hnf_aussen):
         self.get_logger().info(f"Lane_Ratio: {self.lane_ratio} m")
         target_y = self.lookahead_dist_straight
-        target_x = 0.0
         
-        # Wände, die zu weit weg sind, ignorieren
-        if hnf_innen is not None and (0.60 > hnf_innen[2] or hnf_innen[2] > 2.5):
+        # Plausibilitäts-Check: Toleranzen auf 0.30m senken, um Abbrüche bei leichtem Drift zu vermeiden
+        if hnf_innen is not None and (0.30 > hnf_innen[2] or hnf_innen[2] > 3.5):
             hnf_innen = None
-        if hnf_aussen is not None and (0.60 > hnf_aussen[2] or hnf_aussen[2] > 2.5):
+        if hnf_aussen is not None and (0.30 > hnf_aussen[2] or hnf_aussen[2] > 3.5):
             hnf_aussen = None
 
         def get_x_at_y(hnf_params, y_val):
@@ -2875,49 +2876,28 @@ class Obstacle_Run(Node):
             if abs(nx) < 1e-6: return 0.0
             return (d - ny * y_val) / nx
 
-        # Schnittpunkt mit y - Achse
+        # 1. Wo schneiden die erkannten Wände unsere Y-Sichtachse?
         x_innen = get_x_at_y(hnf_innen, target_y) if hnf_innen else None
         x_aussen = get_x_at_y(hnf_aussen, target_y) if hnf_aussen else None
-        self.visualize_hnf_line(hnf_aussen, m_id=0, farbe_name="blau", label="")
-        self.visualize_hnf_line(hnf_innen, m_id=2, farbe_name="rot", label="")
 
-        if x_innen is not None and x_aussen is not None:
-            if x_innen < 0: # Innenbande ist links
-                t_innen = x_aussen + self.lane_ratio
-                t_aussen = x_innen - (3.0 - self.lane_ratio)
-            else:           # Innenbande ist rechts
-                t_innen = x_aussen - self.lane_ratio
-                t_aussen = x_innen + (3.0 - self.lane_ratio)
-                
-            target_x = (t_innen + t_aussen) / 2.0
-
-        elif x_innen is not None:
-            if x_innen < 0: 
-                target_x = x_innen + self.lane_ratio
-            else:           
-                target_x = x_innen - self.lane_ratio
-
-        elif x_aussen is not None:
-            if x_aussen > 0:
-                target_x = x_aussen - (3.0 - self.lane_ratio)
-            else:
-                target_x = x_aussen + (3.0 - self.lane_ratio)
-                    
-        else:
-            target_x = 0.0
-
-        # Verhindert, dass zu nah an eine der sichtbaren Wände gesteuert wird
-        if x_innen is not None:
-            if x_innen < 0 and target_x < x_innen + self.min_wall_dist:
-                target_x = x_innen + self.min_wall_dist
-            elif x_innen > 0 and target_x > x_innen - self.min_wall_dist:
-                target_x = x_innen - self.min_wall_dist
-                
+        # ========================================================
+        # NEUE LOGIK: Orientierung zwingend an der durchgehenden Außenbande
+        # ========================================================
         if x_aussen is not None:
-            if x_aussen < 0 and target_x < x_aussen + self.min_wall_dist:
-                target_x = x_aussen + self.min_wall_dist
-            elif x_aussen > 0 and target_x > x_aussen - self.min_wall_dist:
-                target_x = x_aussen - self.min_wall_dist
+            if x_aussen > 0: 
+                # Außenbande ist rechts (Roboter parkt in die linke Lücke)
+                target_x = x_aussen - self.lane_ratio
+            else:            
+                # Außenbande ist links (Roboter parkt in die rechte Lücke)
+                target_x = x_aussen + self.lane_ratio
+                
+        elif x_innen is not None:
+            # Nur Innenbande sichtbar: Stur geradeaus fahren
+            target_x = 0.0
+            
+        else:
+            # Keine Wand zu sehen -> stur geradeaus nach Gyro
+            target_x = 0.0
 
         return (target_x, target_y)
     
@@ -3027,9 +3007,9 @@ class Obstacle_Run(Node):
                 return [None, None, None]
                     
         elif best_right is not None:
-            u_profile[2] = best_right
+            u_profile[0] = best_right
         elif best_left is not None:
-            u_profile[0] = best_left
+            u_profile[2] = best_left
 
         if front_candidates:
             self.get_logger().warn(f"FrontCandidates: {len(front_candidates) if front_candidates else None}")
@@ -3103,9 +3083,9 @@ class Obstacle_Run(Node):
         all_clusters = self.get_all_clusters_sorted(point_data)
         validated_clusters = self.validate_clusters_straight(all_clusters)
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
-        self.right_wall = merged_validated_clusters[2]
+        self.right_wall = merged_validated_clusters[0]
         self.front_wall = merged_validated_clusters[1]
-        self.left_wall  = merged_validated_clusters[0]
+        self.left_wall  = merged_validated_clusters[2]
         right_wall_hnf = self.cluster_to_hnf(self.right_wall)
         front_wall_hnf = self.cluster_to_hnf(self.front_wall)
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
