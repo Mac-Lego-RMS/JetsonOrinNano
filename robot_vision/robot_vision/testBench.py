@@ -111,7 +111,7 @@ class Obstacle_Run(Node):
         )
 
         self.button_start = True
-        self.mit_ausparken = True
+        self.mit_ausparken = False
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 

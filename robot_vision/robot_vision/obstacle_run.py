@@ -111,7 +111,7 @@ class Obstacle_Run(Node):
         )
 
         self.button_start = True
-        self.mit_ausparken = True
+        self.mit_ausparken = False
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
@@ -177,6 +177,7 @@ class Obstacle_Run(Node):
         self.kd = 0.05
 
         self.lookahead_dist_straight = 0.20
+        self.lookahead_dist_parking = 0.40
         self.min_wall_dist = 0.15
         
         self.prev_error = 0.0
@@ -280,7 +281,7 @@ class Obstacle_Run(Node):
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
         self.camera_calibration = False
-        self.debug = False
+        self.debug = True
         self.debug_start = self.debug
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
@@ -2767,9 +2768,13 @@ class Obstacle_Run(Node):
 
     def parking_pid_steering(self, point_data):
         self.lane_ratio = 1.13
+        #self.parking_speed = 0.0
+        self.kp = 1.4
+        self.ki = 0.07
+        self.kd = 0.08
         cmd = Twist()
         if not hasattr(self, 'einpark_timer'):
-            self.einpark_timer = time.time() + 8.0
+            self.einpark_timer = time.time() + 60.0
         if time.time() < self.einpark_timer:
             all_clusters = self.get_all_clusters_sorted(point_data)
 
@@ -2863,7 +2868,7 @@ class Obstacle_Run(Node):
 
     def parking_target_point(self, hnf_innen, hnf_aussen):
         self.get_logger().info(f"Lane_Ratio: {self.lane_ratio} m")
-        target_y = self.lookahead_dist_straight
+        target_y = self.lookahead_dist_parking
         
         # Plausibilitäts-Check: Toleranzen auf 0.30m senken, um Abbrüche bei leichtem Drift zu vermeiden
         if hnf_innen is not None and (0.30 > hnf_innen[2] or hnf_innen[2] > 3.5):
@@ -2908,7 +2913,9 @@ class Obstacle_Run(Node):
         else:
             self.get_logger().info(f"Anzahl aller Cluster: {len(clusters)}")
 
-        delta_yaw = 0.0
+        delta_yaw = self.current_yaw - self.start_straight_yaw
+        while delta_yaw > 180: delta_yaw -= 360
+        while delta_yaw < -180: delta_yaw += 360
 
         right_candidates = []
         left_candidates = []
@@ -2921,11 +2928,13 @@ class Obstacle_Run(Node):
                 self.get_logger().info(f"Cluster hat zu wenige Punkte")
                 self.visualize_cluster_line(c, counter, "rot")
                 continue
-            
+
             local_angle = self.get_cluster_angle(c)
             if local_angle is None: continue
+
+            shifted_angle = local_angle - delta_yaw
+            angle_norm = abs(shifted_angle) % 180
             
-            angle_norm = abs(local_angle) % 180
             if angle_norm > 90:
                 angle_norm = 180 - angle_norm
 
@@ -2985,7 +2994,7 @@ class Obstacle_Run(Node):
                 track_width = 3.0
                 self.get_logger().info(f"Abgeschätze TrackWidth rechts: {track_width:.2f}m, R: {abs(right_dist):.2f}m")
                 
-                if 1.30 < right_dist < 2.70:
+                if 0.70 < right_dist < 2.70:
                     u_profile[0] = best_right
                 else:
                     best_right = None
@@ -2997,7 +3006,7 @@ class Obstacle_Run(Node):
                     track_width = 3.0
                     self.get_logger().info(f"Abgeschätze TrackWidth links: {track_width:.2f}m, R: {abs(left_dist):.2f}m")
                     
-                    if 0.40 < left_dist < 1.70:
+                    if 0.40 < left_dist < 2.30:
                         u_profile[2] = best_left
                     else:
                         best_left = None
