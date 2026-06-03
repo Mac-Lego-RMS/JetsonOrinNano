@@ -2910,71 +2910,66 @@ class Obstacle_Run(Node):
         u_profile = [None, None, None]
         if not clusters:
             return u_profile
-        else:
-            self.get_logger().info(f"Anzahl aller Cluster: {len(clusters)}")
 
-        delta_yaw = self.current_yaw - self.start_straight_yaw
-        while delta_yaw > 180: delta_yaw -= 360
-        while delta_yaw < -180: delta_yaw += 360
+        delta_yaw = 0.0
+        if not self.last_turn_aborted:
+            delta_yaw = self.current_yaw - self.start_straight_yaw
+            
+            # Normierung auf -180 bis 180
+            while delta_yaw > 180: delta_yaw -= 360
+            while delta_yaw < -180: delta_yaw += 360
 
         right_candidates = []
         left_candidates = []
         front_candidates = []
 
-        counter = 0
-
         for c in clusters:
-            if len(c) < 20:
-                self.get_logger().info(f"Cluster hat zu wenige Punkte")
-                self.visualize_cluster_line(c, counter, "rot")
-                continue
-
+            if len(c) < 20: continue
+            
             local_angle = self.get_cluster_angle(c)
             if local_angle is None: continue
 
             shifted_angle = local_angle - delta_yaw
-            angle_norm = abs(shifted_angle) % 180
             
+            angle_norm = abs(shifted_angle) % 180
             if angle_norm > 90:
                 angle_norm = 180 - angle_norm
 
             if angle_norm <= 45.0:
                 mean_x_local = sum(p[1] for p in c) / len(c)
                 
-                if abs(mean_x_local) <= 3.5:
-                    if mean_x_local > 0:
-                        right_candidates.append(c)
-                    else:
+                if abs(mean_x_local) <= 1.0:
+                    if mean_x_local < 0:
                         left_candidates.append(c)
-                else:
-                    self.get_logger().info(f"Cluster hat zu geringen x Wert")
-                    self.visualize_cluster_line(c, counter, "gelb")
+                    else:
+                        right_candidates.append(c)
                         
+            # FRONTWÄNDE (> 45°)
             else:
+                # p[2] ist Vorne/Hinten
                 mean_y = sum(p[2] for p in c) / len(c)
-                if mean_y >= 0.10:
+                if mean_y >= 0.15: # Nur Wände vor dem Roboter
                     front_candidates.append(c)
-            counter += 1
 
+        # SEITENWÄNDE ZUORDNEN
         best_right = right_candidates[0] if right_candidates else None
         best_left = left_candidates[0] if left_candidates else None
-
-        self.get_logger().warn(f"LeftCandidates: {len(left_candidates) if left_candidates else None}, RightCandidates: {len(right_candidates) if right_candidates else None}")
         
         best_left_hnf = self.cluster_to_hnf(best_left) if (best_left is not None) else None
         best_right_hnf = self.cluster_to_hnf(best_right) if (best_right is not None) else None
 
         if (best_right is not None) and (best_left is not None):
+            self.visualize_cluster_line(best_right, 10, "cyan")
+            self.visualize_cluster_line(best_left, 11, "magenta")
             
             if best_left_hnf is not None and best_right_hnf is not None:
                 _, _, left_dist = best_left_hnf
                 _, _, right_dist = best_right_hnf
                 
-                # Absolute HNF-Distanzen addieren
                 track_width = abs(left_dist) + abs(right_dist)
                 self.get_logger().info(f"Echte Spurbreite: {track_width:.2f}m, L: {abs(left_dist):.2f}m, R: {abs(right_dist):.2f}m")
                 
-                if 2.50 <= track_width <= 3.50:
+                if 0.75 <= track_width <= 1.25:
                     u_profile[0] = best_right
                     u_profile[2] = best_left
                 else:
@@ -2986,31 +2981,6 @@ class Obstacle_Run(Node):
                         u_profile[0] = best_right
                     else:
                         u_profile[2] = best_left
-
-        elif best_right is not None:
-            if best_right_hnf is not None:
-                _, _, right_dist = best_right_hnf
-            
-                track_width = 3.0
-                self.get_logger().info(f"Abgeschätze TrackWidth rechts: {track_width:.2f}m, R: {abs(right_dist):.2f}m")
-                
-                if 0.70 < right_dist < 2.70:
-                    u_profile[0] = best_right
-                else:
-                    best_right = None
-
-            elif best_left is not None:
-                if best_left_hnf is not None:
-                    _, _, left_dist = best_left_hnf
-                
-                    track_width = 3.0
-                    self.get_logger().info(f"Abgeschätze TrackWidth links: {track_width:.2f}m, R: {abs(left_dist):.2f}m")
-                    
-                    if 0.40 < left_dist < 2.30:
-                        u_profile[2] = best_left
-                    else:
-                        best_left = None
-
             else:
                 self.get_logger().warn("HNF Berechnung für eine der Wände fehlgeschlagen.")
                 return [None, None, None]
@@ -3020,14 +2990,14 @@ class Obstacle_Run(Node):
         elif best_left is not None:
             u_profile[2] = best_left
 
+        # FRONTWAND ZUORDNEN
         if front_candidates:
-            self.get_logger().warn(f"FrontCandidates: {len(front_candidates) if front_candidates else None}")
             groups = []
             for c in front_candidates:
                 mean_y = sum(p[2] for p in c) / len(c)
                 
                 # Alles was extrem nah ist, verwerfen
-                if mean_y < 0.15:
+                if mean_y < 0.20:
                     continue 
                 
                 placed = False
@@ -3046,18 +3016,17 @@ class Obstacle_Run(Node):
                 
                 min_x = min(all_x)
                 max_x = max(all_x)
-                mean_y = g['base_y']
-                
+                mean_y = g['base_y']  # Distanz zur Wand
+
                 is_far_wall = mean_y > 0.70
                 min_allowed_width = 0.45 if self.is_start_finish_straight else 0.35
                 
-                is_blocking_path = (min_x < -0.05) and (max_x > 0.05)
+                is_blocking_path = (min_x < -0.15) and (max_x > 0.15)
                 
                 if total_width > min_allowed_width and (is_far_wall or is_blocking_path):
                     if not is_far_wall and is_blocking_path:
-                        self.get_logger().warn(f"Nahe aber blockierende Wand gefunden! Abstand: {mean_y:.2f}m")
+                        self.get_logger().warn(f"Nahe aber blockierende Wand gefunden. Abstand: {mean_y:.2f}m")
                     valid_wall_groups.append(g)
-
 
             if valid_wall_groups:
                 valid_wall_groups.sort(key=lambda g: g['base_y'])
@@ -3066,7 +3035,6 @@ class Obstacle_Run(Node):
                 u_profile[1] = winner_group[0]
             else:
                 u_profile[1] = None
-                
                 if front_candidates:
                     self.get_logger().debug("Front-Kandidaten vorhanden, aber als Phantomwände abgelehnt.")
 
