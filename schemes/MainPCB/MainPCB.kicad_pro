@@ -76,32 +76,7 @@
           "width": 0.0
         }
       ],
-      "drc_exclusions": [
-        [
-          "courtyards_overlap|156609380|131733860|1680aa69-bdd7-4dc8-b2dc-aa2c18cbfe63|b3e31960-4dad-4cec-b53d-aa65f9c801bc",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|111797349|155760000|f01e886a-33ab-408a-ba58-d7c80eb2dafb|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|113628932|168821068|fb45fedd-0abb-4235-a6d7-b9898a4fe2a1|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|128297349|155500000|2095ca8a-6616-4610-8b6a-4024aebe1f84|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "lib_footprint_mismatch|132628932|173821068|5815cde5-a4c4-4e56-bea9-f070fcab9a5d|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "silk_over_copper|129971039|150892430|e599e92e-65e8-4ec7-a227-8edc34805fdd|00000000-0000-0000-0000-000000000000",
-          ""
-        ]
-      ],
+      "drc_exclusions": [],
       "meta": {
         "version": 2
       },
@@ -492,11 +467,14 @@
       "duplicate_sheet_names": "error",
       "endpoint_off_grid": "warning",
       "extra_units": "error",
+      "field_name_whitespace": "warning",
       "footprint_filter": "ignore",
       "footprint_link_issues": "warning",
       "four_way_junction": "ignore",
       "global_label_dangling": "warning",
+      "ground_pin_not_ground": "warning",
       "hier_label_mismatch": "error",
+      "isolated_pin_label": "warning",
       "label_dangling": "error",
       "label_multiple_wires": "warning",
       "lib_symbol_issues": "warning",
@@ -519,6 +497,7 @@
       "similar_power": "warning",
       "simulation_model_issue": "ignore",
       "single_global_label": "ignore",
+      "stacked_pin_name": "warning",
       "unannotated": "error",
       "unconnected_wire_endpoint": "warning",
       "undefined_netclass": "error",
@@ -582,6 +561,10 @@
   },
   "schematic": {
     "annotate_start_num": 0,
+    "annotation": {
+      "method": 0,
+      "sort_order": 0
+    },
     "bom_export_filename": "",
     "bom_fmt_presets": [],
     "bom_fmt_settings": {
@@ -781,6 +764,7 @@
       "default_line_thickness": 6.0,
       "default_text_size": 50.0,
       "field_names": [],
+      "hop_over_size_choice": 0,
       "intersheets_ref_own_page": false,
       "intersheets_ref_prefix": "",
       "intersheets_ref_short": false,
@@ -804,6 +788,7 @@
     "net_format_name": "KiCad",
     "page_layout_descr_file": "",
     "plot_directory": "",
+    "reuse_designators": true,
     "space_save_all_events": true,
     "spice_current_sheet_as_root": false,
     "spice_external_command": "spice \"%I\"",
@@ -817,14 +802,16 @@
       {
         "filename": "MainPCB.kicad_sch",
         "name": "MainPCB",
-        "uuid": "00000000-0000-0000-0000-000000000000"
+        "uuid": "7151ca28-a9e5-4f38-89bc-823cda88dfa4"
       }
-    ]
+    ],
+    "used_designators": "J5",
+    "variants": []
   },
   "sheets": [
     [
       "7151ca28-a9e5-4f38-89bc-823cda88dfa4",
-      "Root"
+      "MainPCB"
     ]
   ],
   "text_variables": {},
