@@ -127,9 +127,9 @@ class WallFollower(Node):
         self.rviz_frame = 'ldlidar_link'  # Muss in RViz als "Fixed Frame" stehen
         self.get_logger().info('>>> WallFollower Template gestartet. Warte auf LiDAR... <<<')
 
-        # --- STATE MACHINE & PFADPLANUNG ---
+        
         self.state = 'INITIALIZING'    # Startzustand
-        self.turn_phase = 'APPROACH'  # Bei Kurven: 'APPROACH', 'TURNING', 'EXIT'
+        self.turn_phase = 'APPROACH'
 
         self.fahrtrichtung = None
         self.saved_intersection_angle = None
@@ -159,15 +159,15 @@ class WallFollower(Node):
         self.exit_lane_width_sum = 0
         self.exit_lane_width_n = 0
 
-        # --- PID-REGLER PARAMETER ---
-        self.kp = 2.0   # Lenkt hart zur Karotte
-        self.ki = 0.07   # Integral (oft bei WRO auf 0 gelassen, da schnelle Spurwechsel)
-        self.kd = 0.05   # Verhindert das Schlingern (Dämpfung)
+        self.kp = 2.0
+        self.ki = 0.07
+        self.kd = 0.05
         
         self.prev_error = 0.0
         self.integral_error = 0.0
 
-        # Karotten-Parameter Kurve
+        self.strategy = 1
+
         self.steering_ctrl = SteeringController(logger=self.get_logger())
         self.lookahead_dist_turn = 0.20
         self.target_point = (0, 0)
@@ -182,11 +182,16 @@ class WallFollower(Node):
         self.IDEAL_RADIUS_M = 0.28
         self.MIN_TURN_RADIUS_M = 0.20
 
+        self.current_active_speed = 0.0
+        self.accel_step = 15.0
+        self.decel_step = 30.0
+        self.brake_start_dist = 1.8
+        self.brake_end_dist = 0.8
+
         self.max_wall_lenght_for_turn = 0.25
 
-        # --- MOTOR PARAMETER (ESP PWM 0 - 1023) ---
-        self.base_speed = 500.0  # Normale Geschwindigkeit auf der Geraden
-        self.turn_speed = 500.0  # Leicht reduzierter Speed in der Kurve
+        self.base_target_speed = 500.0
+        self.turn_target_speed = 500.0
 
         self.analyzer = TrackAnalyzer(
             logger=self.get_logger(),
@@ -204,6 +209,70 @@ class WallFollower(Node):
         self.test_is_turning = False
         self.curve_radius_m = None
         self.camera_calibration = False
+
+    def strategy_params(self):
+        match self.strategy:
+            case 0:
+                self.lane_ratio = 0.40
+
+                self.kp = 2.0
+                self.ki = 0.07
+                self.kd = 0.05
+                
+                self.base_target_speed = 500.0
+                self.turn_target_speed = 500.0
+
+                self.IDEAL_RADIUS_M = 0.28
+
+            case 1:
+                self.lane_ratio = 0.40
+
+                self.kp = 2.0
+                self.ki = 0.07
+                self.kd = 0.05
+                
+                self.base_target_speed = 500.0
+                self.turn_target_speed = 500.0
+
+                self.IDEAL_RADIUS_M = 0.28
+
+            case 2:
+                self.lane_ratio = 0.40
+
+                self.kp = 2.0
+                self.ki = 0.07
+                self.kd = 0.05
+                
+                self.base_target_speed = 500.0
+                self.turn_target_speed = 500.0
+
+                self.IDEAL_RADIUS_M = 0.28
+
+    def set_speed(self, front_wall_dist, is_braking=False):
+        if front_wall_dist is None and is_braking:
+            target_speed = self.turn_target_speed
+        elif front_wall_dist is None:
+            target_speed = self.base_target_speed
+        elif front_wall_dist >= self.brake_start_dist:
+            target_speed = self.base_target_speed
+        elif front_wall_dist <= self.brake_end_dist:
+            target_speed = self.turn_target_speed
+        else:
+            ratio = (front_wall_dist - self.brake_end_dist) / (self.brake_start_dist - self.brake_end_dist)
+            target_speed = self.turn_target_speed + ratio * (self.base_target_speed - self.turn_target_speed)
+
+        if self.current_active_speed < target_speed:
+            # Beschleunigen
+            self.current_active_speed += self.accel_step
+            self.current_active_speed = min(self.current_active_speed, target_speed)
+        else:
+            # Bremsen
+            if (self.current_active_speed - target_speed) > self.decel_step:
+                self.current_active_speed -= self.decel_step
+            else:
+                self.current_active_speed = target_speed
+
+        return float(self.current_active_speed)
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
         """Hilfsfunktion zum Erstellen einer Linie für das MarkerArray."""
@@ -1292,7 +1361,6 @@ class WallFollower(Node):
         """
         Übersetzt den Radius über den SteeringController und publisht die Twist-Message.
         """
-
         if self.fahrtrichtung == "links":
             is_left_turn = True
         else:
@@ -1310,13 +1378,10 @@ class WallFollower(Node):
         self.get_logger().info(f"Steering-Signal: {steering_signal:.3f}")
 
         # Twist-Message konstruieren und senden
-        cmd.linear.x = float(self.turn_speed)
+        cmd.linear.x = float(self.turn_target_speed)
         cmd.angular.z = float(steering_signal)
         
         self.pub_cmd_vel.publish(cmd)
-
-        self.turn_speed = abs(self.turn_speed)
-        
         return True
 
     def check_turn_completion_fused(self, turn_angle, front_line_params):
@@ -1709,14 +1774,16 @@ class WallFollower(Node):
             else:
                 if front_dist < 1.40:
                     self.get_logger().info(f"Warte auf Ecke... (Innenbande ragt noch {max_y_innen:.2f}m nach vorne)")
+        else:
+            front_dist = None
         
         steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
         
         # BEFEHLE AN ESP SETZEN
-        cmd.linear.x = self.base_speed
+        cmd.linear.x = self.set_speed(front_dist)
         cmd.angular.z = float(steering_cmd)
         self.pub_cmd_vel.publish(cmd)
-        self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
+        self.get_logger().info(f"Lenkung: Speed={self.current_active_speed:.3f}, Steering={steering_cmd:.3f}")
         self.pub_cmd_vel.publish(cmd)
 
     def handle_turn_maneuver(self, point_data):
@@ -1777,6 +1844,11 @@ class WallFollower(Node):
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, last_target_wall_dist)
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
+
+            if front_wall_hnf is not None:
+                _, _, front_dist = front_wall_hnf
+            else:
+                front_dist = None
             
             # Trigger prüfen
             if self.test_check_turn_trigger(entry_distance_m):
@@ -1786,7 +1858,7 @@ class WallFollower(Node):
                 self.start_turn_yaw = self.current_yaw
                 self.base_entry_distance = entry_distance_m
 
-                cmd.linear.x = self.turn_speed
+                cmd.linear.x = self.set_speed(front_dist, True)
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
                 
@@ -1794,13 +1866,11 @@ class WallFollower(Node):
                 return
             
             # Lenken in der Annäherung
-            cmd.linear.x = self.turn_speed
+            cmd.linear.x = self.set_speed(front_dist, True)
             cmd.angular.z = float(steering_cmd)
             self.pub_cmd_vel.publish(cmd)
                 
-        # ---------------------------------------------------------
-        # PHASE 2: AUSFÜHRUNG (Servo lenkt, Gyro prüft)
-        # ---------------------------------------------------------
+
         elif self.turn_phase == 'EXECUTE':
             # Ausführen und Tracken
             self.execute_turn(self.saved_curve_radius_m)
@@ -1817,7 +1887,7 @@ class WallFollower(Node):
 
             if turn_completed:
                 self.get_logger().info("Kurve regulär beendet. Übergebe an Lane-Follower.")
-                cmd.linear.x = self.base_speed
+                cmd.linear.x = self.set_speed(2.0)
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
                 self.turn_phase = 'APPROACH'

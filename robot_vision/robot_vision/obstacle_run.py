@@ -527,10 +527,16 @@ class Obstacle_Run(Node):
         front_candidates = []
 
         for c in clusters:
-            if len(c) < 20: continue
+            if len(c) < 20:
+                self.get_logger().info(f"Cluster hat zu wenige Punkte")
+                self.visualize_cluster_line(c, counter, "rot")
+                counter += 1
+                continue
             
             local_angle = self.get_cluster_angle(c)
-            if local_angle is None: continue
+            if local_angle is None: 
+                counter += 1
+                continue
 
             shifted_angle = local_angle - delta_yaw
             
@@ -538,21 +544,28 @@ class Obstacle_Run(Node):
             if angle_norm > 90:
                 angle_norm = 180 - angle_norm
 
+            mean_x_local = sum(p[1] for p in c) / len(c)
+            mean_y_local = sum(p[2] for p in c) / len(c)
+            
+            rad = math.radians(delta_yaw)
+            mean_x_straight = mean_x_local * math.cos(rad) - mean_y_local * math.sin(rad)
+            mean_y_straight = mean_x_local * math.sin(rad) + mean_y_local * math.cos(rad)
+
             if angle_norm <= 45.0:
-                mean_x_local = sum(p[1] for p in c) / len(c)
-                
-                if abs(mean_x_local) <= 1.0:
-                    if mean_x_local < 0:
-                        left_candidates.append(c)
-                    else:
+                if abs(mean_x_straight) <= 1.0:
+                    if mean_x_straight > 0:
                         right_candidates.append(c)
+                    else:
+                        left_candidates.append(c)
+                else:
+                    self.get_logger().info("Cluster hat zu großen x Wert")
+                    self.visualize_cluster_line(c, counter, "gelb")
                         
-            # FRONTWÄNDE (> 45°)
             else:
-                # p[2] ist Vorne/Hinten
-                mean_y = sum(p[2] for p in c) / len(c)
-                if mean_y >= 0.15: # Nur Wände vor dem Roboter
+                if mean_y_straight >= 0.15:
                     front_candidates.append(c)
+                    
+            counter += 1
 
         # SEITENWÄNDE ZUORDNEN
         best_right = right_candidates[0] if right_candidates else None
@@ -2915,7 +2928,6 @@ class Obstacle_Run(Node):
         if not self.last_turn_aborted:
             delta_yaw = self.current_yaw - self.start_straight_yaw
             
-            # Normierung auf -180 bis 180
             while delta_yaw > 180: delta_yaw -= 360
             while delta_yaw < -180: delta_yaw += 360
 
@@ -2924,10 +2936,16 @@ class Obstacle_Run(Node):
         front_candidates = []
 
         for c in clusters:
-            if len(c) < 20: continue
+            if len(c) < 20:
+                self.get_logger().info(f"Cluster hat zu wenige Punkte")
+                self.visualize_cluster_line(c, counter, "rot")
+                counter += 1
+                continue
             
             local_angle = self.get_cluster_angle(c)
-            if local_angle is None: continue
+            if local_angle is None: 
+                counter += 1
+                continue
 
             shifted_angle = local_angle - delta_yaw
             
@@ -2935,21 +2953,28 @@ class Obstacle_Run(Node):
             if angle_norm > 90:
                 angle_norm = 180 - angle_norm
 
+            mean_x_local = sum(p[1] for p in c) / len(c)
+            mean_y_local = sum(p[2] for p in c) / len(c)
+            
+            rad = math.radians(delta_yaw)
+            mean_x_straight = mean_x_local * math.cos(rad) - mean_y_local * math.sin(rad)
+            mean_y_straight = mean_x_local * math.sin(rad) + mean_y_local * math.cos(rad)
+
             if angle_norm <= 45.0:
-                mean_x_local = sum(p[1] for p in c) / len(c)
-                
-                if abs(mean_x_local) <= 1.0:
-                    if mean_x_local < 0:
-                        left_candidates.append(c)
-                    else:
+                if abs(mean_x_straight) <= 3.5:
+                    if mean_x_straight > 0:
                         right_candidates.append(c)
+                    else:
+                        left_candidates.append(c)
+                else:
+                    self.get_logger().info("Cluster hat zu großen x Wert")
+                    self.visualize_cluster_line(c, counter, "gelb")
                         
-            # FRONTWÄNDE (> 45°)
             else:
-                # p[2] ist Vorne/Hinten
-                mean_y = sum(p[2] for p in c) / len(c)
-                if mean_y >= 0.15: # Nur Wände vor dem Roboter
+                if mean_y_straight >= 0.10:
                     front_candidates.append(c)
+                    
+            counter += 1
 
         # SEITENWÄNDE ZUORDNEN
         best_right = right_candidates[0] if right_candidates else None
