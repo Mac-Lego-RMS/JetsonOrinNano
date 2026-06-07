@@ -530,13 +530,14 @@
         "priority": 2147483647,
         "schematic_color": "rgba(0, 0, 0, 0.000)",
         "track_width": 0.2,
+        "tuning_profile": "",
         "via_diameter": 0.6,
         "via_drill": 0.3,
         "wire_width": 6
       }
     ],
     "meta": {
-      "version": 4
+      "version": 5
     },
     "net_colors": {
       "12Vout": "rgb(255, 4, 13)"
@@ -804,7 +805,7 @@
         "uuid": "7151ca28-a9e5-4f38-89bc-823cda88dfa4"
       }
     ],
-    "used_designators": "J5",
+    "used_designators": "",
     "variants": []
   },
   "sheets": [
