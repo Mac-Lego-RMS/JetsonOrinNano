@@ -3,3 +3,7 @@ isaac_ros_*/
 ldrobot-lidar-ros2/
 vscode*/
 .vscode/
+*.pyc
+**/__pycache__/
+ros_deep_learning/
+ros_deep_learning/**/*
