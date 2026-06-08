@@ -101,7 +101,7 @@ class WallFollower(Node):
             10
         )
 
-        self.button_start = True
+        self.button_start = False
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
@@ -135,7 +135,7 @@ class WallFollower(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 120
+        self.target_turns = 12
         self.turn_count = 0
 
         self.front_wall = None
@@ -182,6 +182,8 @@ class WallFollower(Node):
         self.IDEAL_RADIUS_M = 0.28
         self.MIN_TURN_RADIUS_M = 0.20
 
+        self.turn_puffer = 0.05
+
         self.current_active_speed = 0.0
         self.accel_step = 15.0
         self.decel_step = 30.0
@@ -225,41 +227,64 @@ class WallFollower(Node):
                 self.IDEAL_RADIUS_M = 0.28
 
             case 1:
-                self.lane_ratio = 0.40
+                self.lane_ratio = 0.35
 
-                self.kp = 2.0
-                self.ki = 0.07
-                self.kd = 0.05
+                self.kp = 2.15
+                self.ki = 0.0
+                self.kd = 0.5
                 
-                self.base_target_speed = 500.0
-                self.turn_target_speed = 500.0
+                self.base_target_speed = 900.0
+                self.turn_target_speed = 700.0
 
-                self.IDEAL_RADIUS_M = 0.28
+                self.IDEAL_RADIUS_M = 0.30
+
+                self.turn_puffer = 0.10
+
+                self.accel_step = 50.0
+                self.decel_step = 40.0
+                self.brake_start_dist = 1.2
+                self.brake_end_dist = 0.85
 
             case 2:
-                self.lane_ratio = 0.40
+                self.lane_ratio = 0.35
 
-                self.kp = 2.0
-                self.ki = 0.07
-                self.kd = 0.05
+                self.kp = 2.15
+                self.ki = 0.0
+                self.kd = 0.5
                 
-                self.base_target_speed = 500.0
-                self.turn_target_speed = 500.0
+                self.base_target_speed = 900.0
+                self.turn_target_speed = 700.0
 
-                self.IDEAL_RADIUS_M = 0.28
+                self.IDEAL_RADIUS_M = 0.30
+
+                self.turn_puffer = 0.10
+
+                self.accel_step = 50.0
+                self.decel_step = 40.0
+                self.brake_start_dist = 1.2
+                self.brake_end_dist = 0.85
 
     def set_speed(self, front_wall_dist, is_braking=False):
         if front_wall_dist is None and is_braking:
             target_speed = self.turn_target_speed
+            self.get_logger().warn(f"0")
+
         elif front_wall_dist is None:
             target_speed = self.base_target_speed
+            self.get_logger().warn(f"1")
+
         elif front_wall_dist >= self.brake_start_dist:
             target_speed = self.base_target_speed
+            self.get_logger().warn(f"2")
+
         elif front_wall_dist <= self.brake_end_dist:
             target_speed = self.turn_target_speed
+            self.get_logger().warn(f"3")
+
         else:
             ratio = (front_wall_dist - self.brake_end_dist) / (self.brake_start_dist - self.brake_end_dist)
             target_speed = self.turn_target_speed + ratio * (self.base_target_speed - self.turn_target_speed)
+            self.get_logger().warn(f"4")
 
         if self.current_active_speed < target_speed:
             # Beschleunigen
@@ -271,6 +296,8 @@ class WallFollower(Node):
                 self.current_active_speed -= self.decel_step
             else:
                 self.current_active_speed = target_speed
+
+        self.get_logger().warn(f"TargetSpeed: {target_speed}, ActiveSpeed: {self.current_active_speed}")
 
         return float(self.current_active_speed)
 
@@ -1350,7 +1377,7 @@ class WallFollower(Node):
             return False
 
         # Toleranzwert (z.B. 7 cm), um Verzögerungen in der Hauptschleife abzufangen
-        trigger_tolerance_m = 0.05
+        trigger_tolerance_m = self.turn_puffer
 
         if entry_point_distance_m <= trigger_tolerance_m:
             return True
@@ -1395,11 +1422,11 @@ class WallFollower(Node):
         
         target_angle_abs = abs(turn_angle)
         
-        if progressed_angle >= (target_angle_abs - 10.0):
+        if progressed_angle >= (target_angle_abs - 15.0):
             self.get_logger().info(f"Kurve beendet (Gyro Hard-Exit): {progressed_angle:.1f}° erreicht.")
             return True
             
-        if progressed_angle < (target_angle_abs - 25.0):
+        if progressed_angle < (target_angle_abs - 30.0):
             return False
             
         if front_line_params is not None:
@@ -1410,7 +1437,7 @@ class WallFollower(Node):
             # Fehler zur perfekten Orthogonalität berechnen (0° oder 180° zur X-Achse)
             wall_error_deg = min(abs(wall_angle_deg % 180), abs(180 - (wall_angle_deg % 180)))
             
-            if wall_error_deg < 15.0:
+            if wall_error_deg < 20.0:
                 self.get_logger().info(f"Fused Match! Gyro bei {progressed_angle:.1f}°, Wand perfekt parallel (Error: {wall_error_deg:.1f}°).")
                 return True
 
@@ -1631,7 +1658,7 @@ class WallFollower(Node):
         if self.turn_count >= self.target_turns:
             if front_wall_hnf is not None:
                 closest_f = front_wall_hnf[2]
-                if closest_f < 1.70:
+                if closest_f < 1.80:
                         self.state = 'STOPPED'
                 
         if abs(self.start_straight_yaw - self.current_yaw) > 75.0:
@@ -1783,7 +1810,7 @@ class WallFollower(Node):
         cmd.linear.x = self.set_speed(front_dist)
         cmd.angular.z = float(steering_cmd)
         self.pub_cmd_vel.publish(cmd)
-        self.get_logger().info(f"Lenkung: Speed={self.current_active_speed:.3f}, Steering={steering_cmd:.3f}")
+        #self.get_logger().info(f"Lenkung: Speed={self.current_active_speed:.3f}, Steering={steering_cmd:.3f}")
         self.pub_cmd_vel.publish(cmd)
 
     def handle_turn_maneuver(self, point_data):
@@ -1835,10 +1862,9 @@ class WallFollower(Node):
                     self.exit_lane_width_n += 1
                     self.exit_lane_width_avg = self.exit_lane_width_sum / self.exit_lane_width_n
                     self.get_logger().warn(f"current_exit_lane_width: {current_exit_lane_width} m")
-            target_line_to_wall = abs(self.exit_lane_width_avg * 0.60)
+            target_line_to_wall = abs(self.exit_lane_width_avg * (1.0 - self.lane_ratio))
             self.get_logger().warn(f"Exit_lane_ratio_AVG: {self.exit_lane_width_avg} m")
             last_target_wall_dist = target_line_to_wall
-            self.get_logger().warn(f"Neuer last_target_wall_dist: {last_target_wall_dist}")
 
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, last_target_wall_dist)
@@ -1941,6 +1967,8 @@ class WallFollower(Node):
 
     def main_logic(self, point_data):
         # ... (Grundlegende LiDAR-Datenvorbereitung, falls für alle States nötig) ...
+        self.strategy_params()
+
         if self.counter == 15:
             self.counter = 0
             self.clear_all_lines()

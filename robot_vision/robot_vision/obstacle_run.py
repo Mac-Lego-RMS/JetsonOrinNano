@@ -110,7 +110,7 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = True
+        self.button_start = False
         self.mit_ausparken = False
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
@@ -145,7 +145,7 @@ class Obstacle_Run(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 12
+        self.target_turns = 8
         self.turn_count = 0
         self.is_start_finish_straight = False
         self.last_turn_for_parking = False
@@ -176,7 +176,7 @@ class Obstacle_Run(Node):
         self.ki = 0.07
         self.kd = 0.05
 
-        self.kp_gyro = 0.04
+        self.kp_gyro = 0.07
         self.ki_gyro = 0.0
         self.kd_gyro = 0.0
         self.prev_gyro_error = 0.0
@@ -221,19 +221,6 @@ class Obstacle_Run(Node):
             logger=self.get_logger(),
             visualizer_cb=self.visualize_cluster_line
         )
-
-        self.K = np.array([
-            [820.7558,   0.0000, 639.0000],
-            [  0.0000, 817.4016, 359.0000],
-            [  0.0000,   0.0000,   1.0000]
-        ])
-        
-        self.D = np.array([
-            [-0.05801], 
-            [ 0.22847], 
-            [-0.58155], 
-            [ 0.41406]
-        ])
         
         self.get_logger().info('Lade YOLO TensorRT Engine')
         self.model = YOLO('/workspace/best.engine', task='detect')
@@ -535,13 +522,10 @@ class Obstacle_Run(Node):
         for c in clusters:
             if len(c) < 20:
                 self.get_logger().info(f"Cluster hat zu wenige Punkte")
-                self.visualize_cluster_line(c, counter, "rot")
-                counter += 1
                 continue
             
             local_angle = self.get_cluster_angle(c)
             if local_angle is None: 
-                counter += 1
                 continue
 
             shifted_angle = local_angle - delta_yaw
@@ -565,13 +549,10 @@ class Obstacle_Run(Node):
                         left_candidates.append(c)
                 else:
                     self.get_logger().info("Cluster hat zu großen x Wert")
-                    self.visualize_cluster_line(c, counter, "gelb")
 
             else:  
                 if mean_y_straight >= 0.15:
                     front_candidates.append(c)
-                    
-            counter += 1
 
         # SEITENWÄNDE ZUORDNEN
         best_right = right_candidates[0] if right_candidates else None
@@ -1997,7 +1978,7 @@ class Obstacle_Run(Node):
             self.parking_phase = 'ADDRESSING_PARKING_SPACE'
             self.state = 'PARKING'
 
-        self.parking_pid_steering(point_data)
+        self.parking_imu_pid_steering()
 
 
     # -----------------------------------------
@@ -2845,9 +2826,9 @@ class Obstacle_Run(Node):
             self.pub_cmd_vel.publish(cmd)
             self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
 
-    def parking_imu_pid_steering(self, ):
+    def parking_imu_pid_steering(self):
         if not hasattr(self, 'einpark_timer'):
-            self.einpark_timer = time.time() + 5.0
+            self.einpark_timer = time.time() + 15.0
         if time.time() < self.einpark_timer:
             cmd = Twist()
             cmd.linear.x = self.parking_speed
@@ -2956,13 +2937,10 @@ class Obstacle_Run(Node):
         for c in clusters:
             if len(c) < 20:
                 self.get_logger().info(f"Cluster hat zu wenige Punkte")
-                self.visualize_cluster_line(c, counter, "rot")
-                counter += 1
                 continue
             
             local_angle = self.get_cluster_angle(c)
             if local_angle is None: 
-                counter += 1
                 continue
 
             shifted_angle = local_angle - delta_yaw
@@ -2986,13 +2964,10 @@ class Obstacle_Run(Node):
                         left_candidates.append(c)
                 else:
                     self.get_logger().info("Cluster hat zu großen x Wert")
-                    self.visualize_cluster_line(c, counter, "gelb")
                         
             else:
                 if mean_y_straight >= 0.10:
                     front_candidates.append(c)
-                    
-            counter += 1
 
         # SEITENWÄNDE ZUORDNEN
         best_right = right_candidates[0] if right_candidates else None
