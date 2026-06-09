@@ -2296,434 +2296,6 @@
 			)
 			(embedded_fonts no)
 		)
-		(symbol "Device:Thermistor_PTC"
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 0)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(in_pos_files yes)
-			(duplicate_pin_numbers_are_jumpers no)
-			(property "Reference" "TH"
-				(at -4.064 0 90)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" "Thermistor_PTC"
-				(at 3.048 0 90)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" ""
-				(at 1.27 -5.08 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(justify left)
-				)
-			)
-			(property "Datasheet" ""
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Description" "Temperature dependent resistor, positive temperature coefficient"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_keywords" "resistor PTC thermistor sensor RTD"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_fp_filters" "*PTC* *Thermistor* PIN?ARRAY* bornier* *Terminal?Block* R_*"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(symbol "Thermistor_PTC_0_1"
-				(arc
-					(start -3.175 2.413)
-					(mid -3.0506 2.3165)
-					(end -3.048 2.159)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(arc
-					(start -3.048 2.794)
-					(mid -2.9736 2.9736)
-					(end -2.794 3.048)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(arc
-					(start -2.794 3.048)
-					(mid -2.6144 2.9736)
-					(end -2.54 2.794)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(arc
-					(start -2.794 2.54)
-					(mid -2.9736 2.6144)
-					(end -3.048 2.794)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(arc
-					(start -2.794 1.905)
-					(mid -2.9736 1.9794)
-					(end -3.048 2.159)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(arc
-					(start -2.54 2.159)
-					(mid -2.6144 1.9794)
-					(end -2.794 1.905)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(arc
-					(start -2.159 2.794)
-					(mid -2.434 2.5608)
-					(end -2.794 2.54)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy -2.54 2.159) (xy -2.54 2.794)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy -2.54 -3.683) (xy -2.54 -1.397) (xy -2.794 -2.159) (xy -2.286 -2.159) (xy -2.54 -1.397) (xy -2.54 -1.651)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(polyline
-					(pts
-						(xy -1.778 2.54) (xy -1.778 1.524) (xy 1.778 -1.524) (xy 1.778 -2.54)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy -1.778 -3.683) (xy -1.778 -1.397) (xy -2.032 -2.159) (xy -1.524 -2.159) (xy -1.778 -1.397)
-						(xy -1.778 -1.651)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type outline)
-					)
-				)
-				(rectangle
-					(start -1.016 2.54)
-					(end 1.016 -2.54)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "Thermistor_PTC_1_1"
-				(pin passive line
-					(at 0 3.81 270)
-					(length 1.27)
-					(name ""
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 0 -3.81 90)
-					(length 1.27)
-					(name ""
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
-		(symbol "Diode:1N62xxA"
-			(pin_numbers
-				(hide yes)
-			)
-			(pin_names
-				(offset 1.016)
-				(hide yes)
-			)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(in_pos_files yes)
-			(duplicate_pin_numbers_are_jumpers no)
-			(property "Reference" "D"
-				(at 0 2.54 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" "1N62xxA"
-				(at 0 -2.54 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" "Diode_THT:D_DO-201AE_P15.24mm_Horizontal"
-				(at 0 -5.08 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Datasheet" "https://www.vishay.com/docs/88301/15ke.pdf"
-				(at -1.27 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Description" "1500W unidirectional TRANSZORB® Transient Voltage Suppressor, DO-201AE"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_keywords" "diode TVS voltage suppressor"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "ki_fp_filters" "D?DO?201AE*"
-				(at 0 0 0)
-				(show_name no)
-				(do_not_autoplace no)
-				(hide yes)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(symbol "1N62xxA_0_1"
-				(polyline
-					(pts
-						(xy -0.762 1.27) (xy -1.27 1.27) (xy -1.27 -1.27)
-					)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy 1.27 1.27) (xy 1.27 -1.27) (xy -1.27 0) (xy 1.27 1.27)
-					)
-					(stroke
-						(width 0.254)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "1N62xxA_1_1"
-				(pin passive line
-					(at -3.81 0 0)
-					(length 2.54)
-					(name "A1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 3.81 0 180)
-					(length 2.54)
-					(name "A2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-			(embedded_fonts no)
-		)
 		(symbol "Mechanical:MountingHole_Pad"
 			(pin_numbers
 				(hide yes)
@@ -5181,12 +4753,6 @@
 		(uuid "14ad053f-e4c7-4de9-a83c-a5526e98d548")
 	)
 	(junction
-		(at 160.02 138.43)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "17263904-76af-4a04-9150-bf58c7e81461")
-	)
-	(junction
 		(at 203.2 73.66)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -5203,12 +4769,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "304b3e1d-3ad4-4159-a5b2-6c10dcf6e025")
-	)
-	(junction
-		(at 142.24 138.43)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "34b9b94b-cdb9-4f32-bc39-385b143c4d56")
 	)
 	(junction
 		(at 91.44 165.1)
@@ -5365,12 +4925,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "b1e226e4-e52a-43fb-8a8e-aa0e1e35cdc6")
-	)
-	(junction
-		(at 27.94 96.52)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "b8c1269b-01c3-4ad9-abf2-348f2fb5646a")
 	)
 	(junction
 		(at 27.94 91.44)
@@ -5732,7 +5286,7 @@
 	)
 	(wire
 		(pts
-			(xy 129.54 138.43) (xy 142.24 138.43)
+			(xy 129.54 138.43) (xy 165.1 138.43)
 		)
 		(stroke
 			(width 0)
@@ -6176,16 +5730,6 @@
 			(type default)
 		)
 		(uuid "903d0df7-f9ce-4932-93c3-fa3f8f46210a")
-	)
-	(wire
-		(pts
-			(xy 160.02 138.43) (xy 157.48 138.43)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "9194ad61-9939-4ca8-b993-51fa9e7d53ba")
 	)
 	(wire
 		(pts
@@ -6853,16 +6397,6 @@
 	)
 	(wire
 		(pts
-			(xy 160.02 138.43) (xy 165.1 138.43)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "fb3342a0-597b-4395-b93b-e539e808eb67")
-	)
-	(wire
-		(pts
 			(xy 156.21 49.53) (xy 156.21 52.07)
 		)
 		(stroke
@@ -6881,16 +6415,6 @@
 			(color 255 0 204 1)
 		)
 		(uuid "fc7c3c35-7515-4cd0-93fc-34ddd784f471")
-	)
-	(wire
-		(pts
-			(xy 142.24 138.43) (xy 149.86 138.43)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "fcf6beea-f222-4bf3-afc9-41a46e106516")
 	)
 	(wire
 		(pts
@@ -7632,6 +7156,30 @@
 			)
 		)
 	)
+	(global_label "15Vin"
+		(shape input)
+		(at 57.15 17.78 90)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "fb6521a1-c3da-4919-9207-c9e5847ecb0f")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 57.15 9.5334 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+	)
 	(global_label "Servo RX"
 		(shape input)
 		(at 172.72 21.59 270)
@@ -8030,87 +7578,6 @@
 		)
 	)
 	(symbol
-		(lib_id "Diode:1N62xxA")
-		(at 160.02 142.24 270)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "08e68373-3f69-4cfa-a14a-ea707720853c")
-		(property "Reference" "D5"
-			(at 155.956 142.24 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "TVS Diode 5V"
-			(at 149.86 145.288 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Diode_THT:D_DO-201AD_P15.24mm_Horizontal"
-			(at 154.94 142.24 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" "https://www.vishay.com/docs/88301/15ke.pdf"
-			(at 160.02 140.97 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "1500W unidirectional TRANSZORB® Transient Voltage Suppressor, DO-201AE"
-			(at 160.02 142.24 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "2"
-			(uuid "7c6f727f-9fae-4999-a554-c351ef3bb18a")
-		)
-		(pin "1"
-			(uuid "65bdcd59-ae46-4da0-96d8-63ad5679778f")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "D5")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:R")
 		(at 215.9 67.31 90)
 		(unit 1)
@@ -8368,7 +7835,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "10333374-e96b-4ae7-9011-3aae3316b59a")
-		(property "Reference" "SW2"
+		(property "Reference" "Boot1"
 			(at 185.42 73.66 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8430,7 +7897,7 @@
 		(instances
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "SW2")
+					(reference "Boot1")
 					(unit 1)
 				)
 			)
@@ -8470,7 +7937,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal"
+		(property "Footprint" "Connector_JST:JST_XH_B2B-XH-A_1x02_P2.50mm_Vertical"
 			(at 120.65 16.51 0)
 			(hide yes)
 			(show_name no)
@@ -9156,84 +8623,6 @@
 		)
 	)
 	(symbol
-		(lib_id "power:GND")
-		(at 25.4 157.48 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "2821a504-9997-4530-9633-96144430effd")
-		(property "Reference" "#PWR016"
-			(at 25.4 163.83 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "GND"
-			(at 25.4 162.56 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 25.4 157.48 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 25.4 157.48 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 25.4 157.48 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "194007b3-06b4-46d2-b372-ffef6e8bdd66")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR016")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:R")
 		(at 71.12 107.95 180)
 		(unit 1)
@@ -9783,87 +9172,6 @@
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "#PWR017")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:Thermistor_PTC")
-		(at 153.67 138.43 270)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "37c06458-f269-498d-8257-452fc6b93f61")
-		(property "Reference" "TH1"
-			(at 153.3525 130.81 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "Thermistor_PTC"
-			(at 153.3525 133.35 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "PCB Design:PFRA400"
-			(at 148.59 139.7 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Datasheet" ""
-			(at 153.67 138.43 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Temperature dependent resistor, positive temperature coefficient"
-			(at 153.67 138.43 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "2"
-			(uuid "e8adfeb2-be7f-4f4f-a07d-5c01c55f5f0c")
-		)
-		(pin "1"
-			(uuid "8f06bee5-b8c8-4e79-9f41-d3a13f84b358")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "TH1")
 					(unit 1)
 				)
 			)
@@ -12823,85 +12131,6 @@
 		)
 	)
 	(symbol
-		(lib_id "power:GND")
-		(at 142.24 146.05 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "775473b1-64ee-4da9-bb3a-767e264ef4ff")
-		(property "Reference" "#PWR022"
-			(at 142.24 152.4 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "GND"
-			(at 142.24 151.13 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 142.24 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 142.24 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 142.24 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "3983a4d5-0ebe-4ca0-88de-814acb23b077")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR022")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "easyeda2kicad:TS2509CS")
 		(at 60.96 146.05 0)
 		(unit 1)
@@ -15071,7 +14300,7 @@
 	)
 	(symbol
 		(lib_id "Device:C_Polarized")
-		(at 27.94 100.33 0)
+		(at 57.15 21.59 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -15081,7 +14310,7 @@
 		(dnp no)
 		(uuid "a1f14c90-dfc5-414f-a5f9-6a0855edd1b3")
 		(property "Reference" "C1"
-			(at 19.812 98.298 0)
+			(at 49.022 19.558 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -15092,7 +14321,7 @@
 			)
 		)
 		(property "Value" "470 uF"
-			(at 17.78 100.584 0)
+			(at 46.99 21.844 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -15103,7 +14332,7 @@
 			)
 		)
 		(property "Footprint" "Capacitor_SMD:CP_Elec_10x10.5"
-			(at 28.9052 104.14 0)
+			(at 58.1152 25.4 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15114,7 +14343,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 27.94 100.33 0)
+			(at 57.15 21.59 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15125,7 +14354,7 @@
 			)
 		)
 		(property "Description" "Polarized capacitor"
-			(at 27.94 100.33 0)
+			(at 57.15 21.59 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15644,7 +14873,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "aec87d9e-1ce0-4114-a5d6-af537ccbfd29")
-		(property "Reference" "SW1"
+		(property "Reference" "Reset1"
 			(at 185.42 63.5 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15706,7 +14935,7 @@
 		(instances
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "SW1")
+					(reference "Reset1")
 					(unit 1)
 				)
 			)
@@ -16023,85 +15252,6 @@
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "#PWR046")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 160.02 146.05 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "b8efc3db-a258-4fb2-80ae-98d6aa41dbb3")
-		(property "Reference" "#PWR033"
-			(at 160.02 152.4 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "GND"
-			(at 160.02 151.13 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 160.02 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 160.02 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 160.02 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "1d9184c3-11d1-4eda-9876-40debd262c91")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "#PWR033")
 					(unit 1)
 				)
 			)
@@ -16488,7 +15638,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Capacitor_THT:CP_Radial_D8.0mm_P3.80mm"
+		(property "Footprint" "Capacitor_SMD:CP_Elec_10x10.5"
 			(at 197.8152 29.21 0)
 			(hide yes)
 			(show_name no)
@@ -16558,7 +15708,7 @@
 				)
 			)
 		)
-		(property "Value" "Conn_01x04"
+		(property "Value" "MotorCom"
 			(at 227.33 12.7 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -16617,87 +15767,6 @@
 			(project "MainPCB"
 				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
 					(reference "J5")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C_Polarized")
-		(at 142.24 142.24 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "c24b75dd-33a2-4d94-b867-865c5a2531c3")
-		(property "Reference" "C6"
-			(at 142.748 139.7 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "220uF 15V"
-			(at 136.906 144.018 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 0.635 0.635)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "Capacitor_THT:C_Radial_D6.3mm_H7.0mm_P2.50mm"
-			(at 143.2052 146.05 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 142.24 142.24 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Polarized capacitor"
-			(at 142.24 142.24 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "2"
-			(uuid "691dd192-da0e-4ad3-abcf-5804e089a223")
-		)
-		(pin "1"
-			(uuid "e7e453cc-0c3b-40fe-b26d-2c9871604cef")
-		)
-		(instances
-			(project "MainPCB"
-				(path "/7151ca28-a9e5-4f38-89bc-823cda88dfa4"
-					(reference "C6")
 					(unit 1)
 				)
 			)
@@ -16973,7 +16042,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal"
+		(property "Footprint" "Connector_JST:JST_XH_B2B-XH-A_1x02_P2.50mm_Vertical"
 			(at 76.2 20.32 0)
 			(hide yes)
 			(show_name no)
@@ -17101,7 +16170,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 27.94 104.14 0)
+		(at 57.15 25.4 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -17112,7 +16181,7 @@
 		(fields_autoplaced yes)
 		(uuid "cfd0e96a-e365-4016-bc6a-3888bcef12c7")
 		(property "Reference" "#PWR03"
-			(at 27.94 110.49 0)
+			(at 57.15 31.75 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17123,7 +16192,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 27.94 109.22 0)
+			(at 57.15 30.48 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -17133,7 +16202,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 27.94 104.14 0)
+			(at 57.15 25.4 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17144,7 +16213,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 27.94 104.14 0)
+			(at 57.15 25.4 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17155,7 +16224,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 27.94 104.14 0)
+			(at 57.15 25.4 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18645,7 +17714,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal"
+		(property "Footprint" "Connector_JST:JST_XH_B2B-XH-A_1x02_P2.50mm_Vertical"
 			(at 127 16.51 0)
 			(hide yes)
 			(show_name no)
