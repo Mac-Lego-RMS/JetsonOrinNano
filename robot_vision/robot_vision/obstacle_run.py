@@ -274,7 +274,7 @@ class Obstacle_Run(Node):
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
         self.camera_calibration = False
-        self.debug = True
+        self.debug = False
         self.debug_start = self.debug
 
     def send_line(self, marker_array, m_id, p1, p2, color=(1.0, 1.0, 1.0)):
@@ -521,7 +521,7 @@ class Obstacle_Run(Node):
 
         for c in clusters:
             if len(c) < 20:
-                self.get_logger().info(f"Cluster hat zu wenige Punkte")
+                #self.get_logger().info(f"Cluster hat zu wenige Punkte")
                 continue
             
             local_angle = self.get_cluster_angle(c)
@@ -622,7 +622,7 @@ class Obstacle_Run(Node):
                 mean_y = g['base_y']  # Distanz zur Wand
 
                 is_far_wall = mean_y > 0.70
-                min_allowed_width = 0.45 if self.is_start_finish_straight else 0.35
+                min_allowed_width = 0.40 if self.is_start_finish_straight else 0.35
                 
                 is_blocking_path = (min_x < -0.15) and (max_x > 0.15)
                 
@@ -1971,6 +1971,10 @@ class Obstacle_Run(Node):
         if self.camera_calibration:
             return
 
+        if not self.imu_ready:
+            self.get_logger().info("Warte auf IMU für Debug-Modus...")
+            return
+
         if self.debug_start:
             self.yaw_offset = self.current_yaw
             self.start_straight_yaw = self.current_yaw
@@ -1978,12 +1982,7 @@ class Obstacle_Run(Node):
             self.parking_phase = 'ADDRESSING_PARKING_SPACE'
             self.state = 'PARKING'
 
-        self.parking_imu_pid_steering()
-
-
-    # -----------------------------------------
-    # State Maschine Obstacle Run
-    # -----------------------------------------
+        self.parking_lidar_pid_steering(point_data)
 
     def check_for_obstacle_color(self, point_data, requested_turn_count, min_distance_to_obstacle=0.0, max_distance_to_obstacle=2.0, front_wall_dist=None):
         current_straight = requested_turn_count % 4
@@ -2253,13 +2252,31 @@ class Obstacle_Run(Node):
             self.turn_count += 1
 
     def evaluate_steering_straight(self, innenbande_hnf, aussenbande_hnf):
-        if self.state == 'PARKING' and self.parking_phase == 'ADDRESSING_PARKING_SPACE':
-            target_x, target_y = self.parking_target_point(innenbande_hnf, aussenbande_hnf)
-        else:
-            target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
+        target_x, target_y = self.get_target_point_straight(innenbande_hnf, aussenbande_hnf)
 
         error = -target_x
         self.get_logger().info(f"SteeringError: {error:.2f}")
+        
+        # Integral berechnen
+        self.integral_error += error
+        self.integral_error = max(-1.0, min(1.0, self.integral_error))
+        
+        # Derivative berechnen
+        derivative = error - self.prev_error
+        self.prev_error = error
+        
+        # Stellgröße berechnen
+        steering_cmd = (self.kp * error) + (self.ki * self.integral_error) + (self.kd * derivative)
+        
+        steering_cmd = max(-1.0, min(1.0, steering_cmd))
+
+        return steering_cmd
+
+    def evaluate_steering_straight_parking(self, left_wall_hnf, right_wall_hnf):
+        target_x, target_y = self.parking_target_point(left_wall_hnf, right_wall_hnf)
+
+        error = -target_x
+        self.get_logger().warn(f"SteeringError: {error:.2f}")
         
         # Integral berechnen
         self.integral_error += error
@@ -2286,6 +2303,8 @@ class Obstacle_Run(Node):
         self.prev_gyro_error = error
         
         steering_cmd = (self.kp_gyro * error) + (self.ki_gyro * self.integral_gyro_error) + (self.kd_gyro * derivative)
+
+        self.get_logger().info(f"Error: {error}")
 
         return max(-1.0, min(1.0, steering_cmd))
     
@@ -2719,7 +2738,7 @@ class Obstacle_Run(Node):
         if self.park_direction == 'PARKING_LEFT':
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.10)
         else:
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.875)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.87)
         intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
         curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
         
@@ -2776,11 +2795,11 @@ class Obstacle_Run(Node):
             self.pub_cmd_vel.publish(cmd)
 
     def parking_lidar_pid_steering(self, point_data):
-        self.lane_ratio = 1.13
+        self.lane_ratio = 1.11
         #self.parking_speed = 0.0
-        self.kp = 1.4
-        self.ki = 0.07
-        self.kd = 0.08
+        self.kp = 2.2
+        self.ki = 0.0
+        self.kd = 0.10
         cmd = Twist()
 
         all_clusters = self.get_all_clusters_sorted(point_data)
@@ -2800,26 +2819,22 @@ class Obstacle_Run(Node):
         self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
         self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
 
-        if self.fahrtrichtung == 'links':
-            innenbande = self.left_wall
-            innenbande_hnf = left_wall_hnf
-            aussenbande = self.right_wall
-            aussenbande_hnf = right_wall_hnf
-        else:
-            innenbande = self.right_wall
-            innenbande_hnf = right_wall_hnf
-            aussenbande = self.left_wall 
-            aussenbande_hnf = left_wall_hnf
-
-        if front_wall_hnf is not None and self.fahrtrichtung is not None:
+        if front_wall_hnf is not None:
             _, _, front_dist = front_wall_hnf
         else:
             front_dist = None
         
-        steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
+        steering_cmd = self.evaluate_steering_straight_parking(left_wall_hnf, right_wall_hnf)
             
-        if front_dist is not None and front_dist <= 0.30:
+        """        if front_dist is not None and front_dist <= 0.35:
             self.parking_phase = 'RETIRE_THE_CAR'
+            self.get_logger().warn("Übergeben an den IMU PID!")"""
+
+        if not hasattr(self, 'einpark_timer'):
+            self.einpark_timer = time.time() + 6.0
+        if time.time() >= self.einpark_timer:
+            self.state = 'STOPPED'
+            return
         else:
             cmd.linear.x = self.parking_speed
             cmd.angular.z = float(steering_cmd)
@@ -2828,7 +2843,7 @@ class Obstacle_Run(Node):
 
     def parking_imu_pid_steering(self):
         if not hasattr(self, 'einpark_timer'):
-            self.einpark_timer = time.time() + 15.0
+            self.einpark_timer = time.time() + 5.0
         if time.time() < self.einpark_timer:
             cmd = Twist()
             cmd.linear.x = self.parking_speed
@@ -2837,6 +2852,7 @@ class Obstacle_Run(Node):
         else:
             self.state = 'STOPPED'
             self.get_logger().info("PARKEN BEENDET!")
+            self.execute_stop()
             return
 
     def parking_pid_steering_reverse(self, point_data):
@@ -2887,7 +2903,6 @@ class Obstacle_Run(Node):
             self.parking_phase = 'ADDRESSING_PARKING_SPACE'
 
     def parking_target_point(self, hnf_innen, hnf_aussen):
-        self.get_logger().info(f"Lane_Ratio: {self.lane_ratio} m")
         target_y = self.lookahead_dist_parking
         target_x = 0.0
         
@@ -2912,9 +2927,14 @@ class Obstacle_Run(Node):
                 
         elif x_innen is not None:
             target_x = 0.0
-            
+
         else:
             target_x = 0.0
+
+        if target_x >= 0.20:    # Gekappt gegen unmögliche Werte
+            target_x = 0
+
+        self.get_logger().info(f"Target_Point: {target_x} , {target_y}")
 
         return (target_x, target_y)
     
@@ -2936,7 +2956,7 @@ class Obstacle_Run(Node):
 
         for c in clusters:
             if len(c) < 20:
-                self.get_logger().info(f"Cluster hat zu wenige Punkte")
+                #self.get_logger().info(f"Cluster hat zu wenige Punkte")
                 continue
             
             local_angle = self.get_cluster_angle(c)
@@ -2957,7 +2977,7 @@ class Obstacle_Run(Node):
             mean_y_straight = mean_x_local * math.sin(rad) + mean_y_local * math.cos(rad)
 
             if angle_norm <= 45.0:
-                if abs(mean_x_straight) <= 3.5:
+                if 0.30 <= abs(mean_x_straight) <= 3.5:
                     if mean_x_straight > 0:
                         right_candidates.append(c)
                     else:
@@ -2987,7 +3007,7 @@ class Obstacle_Run(Node):
                 track_width = abs(left_dist) + abs(right_dist)
                 self.get_logger().info(f"Echte Spurbreite: {track_width:.2f}m, L: {abs(left_dist):.2f}m, R: {abs(right_dist):.2f}m")
                 
-                if 0.75 <= track_width <= 1.25:
+                if 2.0 <= track_width <= 4.0:
                     u_profile[0] = best_right
                     u_profile[2] = best_left
                 else:
@@ -3037,7 +3057,7 @@ class Obstacle_Run(Node):
                 mean_y = g['base_y']  # Distanz zur Wand
 
                 is_far_wall = mean_y > 0.70
-                min_allowed_width = 0.45 if self.is_start_finish_straight else 0.35
+                min_allowed_width = 0.50 if self.is_start_finish_straight else 0.35
                 
                 is_blocking_path = (min_x < -0.15) and (max_x > 0.15)
                 
