@@ -110,8 +110,8 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = False
-        self.mit_ausparken = False
+        self.button_start = True
+        self.mit_ausparken = True
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
@@ -145,7 +145,7 @@ class Obstacle_Run(Node):
         self.saved_intersection_angle = None
         self.saved_curve_radius_m = None
 
-        self.target_turns = 8
+        self.target_turns = 12
         self.turn_count = 0
         self.is_start_finish_straight = False
         self.last_turn_for_parking = False
@@ -332,21 +332,23 @@ class Obstacle_Run(Node):
     def update_strategy_params(self):
         if self.turn_count > 4:
             self.base_speed = 500.0
-            self.turn_speed = 350.0
+            self.turn_speed = 375.0
             self.IDEAL_RADIUS_M = 0.28
             self.standard_lane_ratio_approach = 0.60
-            self.kp = 2.0
+            self.kp = 2.2
             self.ki = 0.07
             self.kd = 0.09
-
         else:
-            self.base_speed = 350.0
-            self.turn_speed = 300.0
+            if self.turn_count == 0 and self.fahrtrichtung == 'rechts':
+                self.base_speed = 280.0
+            else:
+                self.base_speed = 400.0
+            self.turn_speed = 320.0
             self.IDEAL_RADIUS_M = 0.25
             self.standard_lane_ratio_approach = 0.70
-            self.kp = 2.3
+            self.kp = 2.5
             self.ki = 0.07
-            self.kd = 0.05
+            self.kd = 0.08
         
         if self.turn_count % 4 == 0 and self.state == 'FOLLOW_LANE' or self.turn_count % 4 == 3 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.is_start_finish_straight = True
@@ -501,6 +503,148 @@ class Obstacle_Run(Node):
         marker.color.r, marker.color.g, marker.color.b = color
         marker.color.a = 1.0
         marker_array.markers.append(marker)
+
+    def validate_clusters_far_front_wall(self, clusters):
+        u_profile = [None, None, None]
+        if not clusters:
+            return u_profile
+
+        delta_yaw = 0.0
+        if not self.last_turn_aborted:
+            delta_yaw = self.current_yaw - self.start_straight_yaw
+            
+            # Normierung auf -180 bis 180
+            while delta_yaw > 180: delta_yaw -= 360
+            while delta_yaw < -180: delta_yaw += 360
+
+        right_candidates = []
+        left_candidates = []
+        front_candidates = []
+
+        for c in clusters:
+            if len(c) < 12:
+                #self.get_logger().info(f"Cluster hat zu wenige Punkte")
+                continue
+            
+            local_angle = self.get_cluster_angle(c)
+            if local_angle is None: 
+                continue
+
+            shifted_angle = local_angle - delta_yaw
+            
+            angle_norm = abs(shifted_angle) % 180
+            if angle_norm > 90:
+                angle_norm = 180 - angle_norm
+
+            mean_x_local = sum(p[1] for p in c) / len(c)
+            mean_y_local = sum(p[2] for p in c) / len(c)
+            
+            rad = math.radians(delta_yaw)
+            mean_x_straight = mean_x_local * math.cos(rad) - mean_y_local * math.sin(rad)
+            mean_y_straight = mean_x_local * math.sin(rad) + mean_y_local * math.cos(rad)
+
+            if angle_norm <= 45.0:
+                if abs(mean_x_straight) <= 1.0:
+                    if mean_x_straight > 0:
+                        right_candidates.append(c)
+                    else:
+                        left_candidates.append(c)
+                else:
+                    self.get_logger().info("Cluster hat zu großen x Wert")
+
+            else:  
+                if mean_y_straight >= 0.15:
+                    front_candidates.append(c)
+
+        # SEITENWÄNDE ZUORDNEN
+        best_right = right_candidates[0] if right_candidates else None
+        best_left = left_candidates[0] if left_candidates else None
+        
+        best_left_hnf = self.cluster_to_hnf(best_left) if (best_left is not None) else None
+        best_right_hnf = self.cluster_to_hnf(best_right) if (best_right is not None) else None
+
+        if (best_right is not None) and (best_left is not None):
+            self.visualize_cluster_line(best_right, 10, "cyan")
+            self.visualize_cluster_line(best_left, 11, "magenta")
+            
+            if best_left_hnf is not None and best_right_hnf is not None:
+                _, _, left_dist = best_left_hnf
+                _, _, right_dist = best_right_hnf
+                
+                track_width = abs(left_dist) + abs(right_dist)
+                self.get_logger().info(f"Echte Spurbreite: {track_width:.2f}m, L: {abs(left_dist):.2f}m, R: {abs(right_dist):.2f}m")
+                
+                if 0.75 <= track_width <= 1.25:
+                    u_profile[0] = best_right
+                    u_profile[2] = best_left
+                else:
+                    self.get_logger().warn(f"Spurbreite unplausibel ({track_width:.2f}m). Verwerfe kürzere Wand.")
+                    len_r = math.hypot(best_right[-1][1] - best_right[0][1], best_right[-1][2] - best_right[0][2])
+                    len_l = math.hypot(best_left[-1][1] - best_left[0][1], best_left[-1][2] - best_left[0][2])
+                    
+                    if len_r > len_l:
+                        u_profile[0] = best_right
+                    else:
+                        u_profile[2] = best_left
+            else:
+                self.get_logger().warn("HNF Berechnung für eine der Wände fehlgeschlagen.")
+                return [None, None, None]
+                    
+        elif best_right is not None:
+            u_profile[0] = best_right
+        elif best_left is not None:
+            u_profile[2] = best_left
+
+        # FRONTWAND ZUORDNEN
+        if front_candidates:
+            self.get_logger().warn(f"Anzahl FrontCandidates: {len(front_candidates)}")
+            groups = []
+            for c in front_candidates:
+                mean_y = sum(p[2] for p in c) / len(c)
+                self.visualize_cluster_line(c, 20,'blau')
+                # Alles was extrem nah ist, verwerfen
+                if mean_y < 1.40:
+                    continue 
+                
+                placed = False
+                for g in groups:
+                    if abs(g['base_y'] - mean_y) < 0.15:
+                        g['clusters'].append(c)
+                        placed = True
+                        break
+                if not placed:
+                    groups.append({'base_y': mean_y, 'clusters': [c]})
+
+            valid_wall_groups = []
+            for g in groups:
+                all_x = [p[1] for c in g['clusters'] for p in c]
+                total_width = max(all_x) - min(all_x)
+                
+                min_x = min(all_x)
+                max_x = max(all_x)
+                mean_y = g['base_y']  # Distanz zur Wand
+
+                is_far_wall = mean_y > 1.0
+                min_allowed_width = 0.40 if self.is_start_finish_straight else 0.35
+                
+                is_blocking_path = (min_x < -0.15) and (max_x > 0.15)
+                
+                if total_width > min_allowed_width and (is_far_wall or is_blocking_path):
+                    if not is_far_wall and is_blocking_path:
+                        self.get_logger().warn(f"Nahe aber blockierende Wand gefunden. Abstand: {mean_y:.2f}m")
+                    valid_wall_groups.append(g)
+
+            if valid_wall_groups:
+                valid_wall_groups.sort(key=lambda g: g['base_y'])
+                winner_group = valid_wall_groups[0]['clusters']
+                winner_group.sort(key=len, reverse=True)
+                u_profile[1] = winner_group[0]
+            else:
+                u_profile[1] = None
+                if front_candidates:
+                    self.get_logger().debug("Front-Kandidaten vorhanden, aber als Phantomwände abgelehnt.")
+
+        return u_profile
     
     def validate_clusters_straight(self, clusters):
         u_profile = [None, None, None]
@@ -595,10 +739,11 @@ class Obstacle_Run(Node):
 
         # FRONTWAND ZUORDNEN
         if front_candidates:
+            self.get_logger().warn(f"Anzahl FrontCandidates: {len(front_candidates)}")
             groups = []
             for c in front_candidates:
                 mean_y = sum(p[2] for p in c) / len(c)
-                
+                self.visualize_cluster_line(c, 20,'blau')
                 # Alles was extrem nah ist, verwerfen
                 if mean_y < 0.20:
                     continue 
@@ -621,7 +766,7 @@ class Obstacle_Run(Node):
                 max_x = max(all_x)
                 mean_y = g['base_y']  # Distanz zur Wand
 
-                is_far_wall = mean_y > 0.70
+                is_far_wall = mean_y > 0.80
                 min_allowed_width = 0.40 if self.is_start_finish_straight else 0.35
                 
                 is_blocking_path = (min_x < -0.15) and (max_x > 0.15)
@@ -1914,8 +2059,10 @@ class Obstacle_Run(Node):
                 (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
                 (-220.0, 1.4, 0.35),  # Schritt 6: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-                (195.0, -0.8, 2.3),   # Schritt 8: Vorwärts
-                (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
+                (195.0, -0.8, 1.4),   # Schritt 8: Vorwärts
+                (0.0,   0.0, 0.5),   # Schritt 9: Im Stand lenken
+                (195.0, 0.0, 0.7),   # Schritt 10: Vorwärts
+                (0.0,   0.8, 0.5),   # Schritt 11: Im Stand lenken
             ]
 
 
@@ -1956,7 +2103,7 @@ class Obstacle_Run(Node):
         cmd.angular.z = 0.8 * (-1.0 if self.fahrtrichtung == "links" else 1.0)
         self.pub_cmd_vel.publish(cmd)
         
-        duration = 1.6 if self.fahrtrichtung == "links" else 1.1
+        duration = 1.6 if self.fahrtrichtung == "links" else 1.6
 
         self.get_logger().info("Letzten Ausparkschritt erreicht")
 
@@ -1982,7 +2129,27 @@ class Obstacle_Run(Node):
             self.parking_phase = 'ADDRESSING_PARKING_SPACE'
             self.state = 'PARKING'
 
-        self.parking_lidar_pid_steering(point_data)
+        all_clusters = self.get_all_clusters_sorted(point_data)
+
+        counter = 12
+        for c in all_clusters:
+            self.visualize_cluster_line(c, counter, 'gruen', "Cluster")
+            counter += 1
+
+        validated_clusters = self.validate_clusters_far_front_wall(all_clusters)
+        merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
+        self.right_wall = merged_validated_clusters[0]
+        self.front_wall = merged_validated_clusters[1]
+        self.left_wall  = merged_validated_clusters[2]
+        right_wall_hnf = self.cluster_to_hnf(self.right_wall)
+        front_wall_hnf = self.cluster_to_hnf(self.front_wall)
+        left_wall_hnf = self.cluster_to_hnf(self.left_wall)
+
+        self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
+        #self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
+        #self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
+
+        
 
     def check_for_obstacle_color(self, point_data, requested_turn_count, min_distance_to_obstacle=0.0, max_distance_to_obstacle=2.0, front_wall_dist=None):
         current_straight = requested_turn_count % 4
@@ -2051,7 +2218,7 @@ class Obstacle_Run(Node):
 
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
-        max_shift = 0.005 
+        max_shift = 0.015 
     
         actual_dist = front_wall_dist if front_wall_dist is not None else 2.0
 
@@ -2063,14 +2230,18 @@ class Obstacle_Run(Node):
         if is_turn_exit:
             target_ratio = self.standard_lane_ratio_exit
         else:
-            target_ratio = self.standard_lane_ratio_approach
+            if self.turn_count == 0 and not is_left:
+                target_ratio = 0.45
+                is_evading = True
+            else:
+                target_ratio = self.standard_lane_ratio_approach
             
         is_evading = False  # True, wenn im Notfall ohne Glättung ausgewichen werden muss
 
         # HINDERNIS-LOGIK
         if obstacle_cmd is not None and obstacle is not None:
+            obst_is_green = obstacle.color == 'green'
             if self.last_turn_for_parking or self.parking_straight:
-                obst_is_green = obstacle.color == 'green'
                 if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
                     target_ratio = 0.25
                 else:
@@ -2126,11 +2297,15 @@ class Obstacle_Run(Node):
                 
                 if not obst_passed:
                     # Wenn das Hindernis kritisch nah ist, Glättung abschalten
-                    if dist_to_obst < 0.80:
+                    if dist_to_obst < 0.65:
                         is_evading = True
 
                     if is_turn_exit and obst_zone_id >= 20:
-                        target_ratio = 0.50
+                        if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
+                            target_ratio = 0.40
+                        else:
+                            target_ratio = 0.60
+
                     elif actual_dist is None or dist_to_obst < 1.20:
                         obst_is_green = obstacle_cmd == "green"
                         obst_is_outer = obst_zone_id % 10 == 1
@@ -2406,7 +2581,11 @@ class Obstacle_Run(Node):
 
         self.get_logger().info(f"Verfolge die Spur... Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
 
-        validated_clusters = self.validate_clusters_straight(all_clusters)
+        if self.parking_straight:
+            validated_clusters = self.validate_clusters_far_front_wall(all_clusters)
+        else:
+            validated_clusters = self.validate_clusters_straight(all_clusters)
+
         merged_validated_clusters, _ = self.merge_clusters(all_clusters, validated_clusters)
         self.right_wall = merged_validated_clusters[0]
         self.front_wall = merged_validated_clusters[1]
