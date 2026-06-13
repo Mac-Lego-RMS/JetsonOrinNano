@@ -110,8 +110,8 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = True
-        self.mit_ausparken = True
+        self.button_start = False
+        self.mit_ausparken = False
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
@@ -212,11 +212,11 @@ class Obstacle_Run(Node):
 
         # Globale Geschwindigkeiten
         self.SPEED_STRAIGHT_SLOW = 350.0
-        self.SPEED_STRAIGHT_MED = 350.0
-        self.SPEED_STRAIGHT_FAST = 500.0
-        self.SPEED_TURN_STD = 250.0
-        self.SPEED_TURN_MED = 250.0
-        self.SPEED_TURN_FAST = 350.0
+        self.SPEED_STRAIGHT_MED = 450.0
+        self.SPEED_STRAIGHT_FAST = 600.0
+        self.SPEED_TURN_STD = 280.0
+        self.SPEED_TURN_MED = 350.0
+        self.SPEED_TURN_FAST = 450.0
         self.SPEED_STRAIGHT_SLOW_saved = self.SPEED_STRAIGHT_SLOW
         
         self.is_obstacle_passed = False
@@ -373,9 +373,6 @@ class Obstacle_Run(Node):
         if self.turn_count > 4:
             self.IDEAL_RADIUS_M = 0.28
             self.standard_lane_ratio_approach = 0.60
-            self.kp = 2.2
-            self.ki = 0.07
-            self.kd = 0.09
         else:
             if self.turn_count == 0 and self.fahrtrichtung == 'rechts':
                 self.SPEED_STRAIGHT_SLOW = 280.0
@@ -384,9 +381,6 @@ class Obstacle_Run(Node):
 
             self.IDEAL_RADIUS_M = 0.25
             self.standard_lane_ratio_approach = 0.70
-            self.kp = 2.5
-            self.ki = 0.07
-            self.kd = 0.08
         
         if self.turn_count % 4 == 0 and self.state == 'FOLLOW_LANE' or self.turn_count % 4 == 3 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.is_start_finish_straight = True
@@ -417,15 +411,22 @@ class Obstacle_Run(Node):
             if self.is_obstacle_passed:
                 # Wir sind am Hindernis vorbei
                 self.base_speed = self.SPEED_STRAIGHT_FAST
+
             elif obst_current is not None and obst_current.is_localized:
                 # Hindernis erkannt
-                if self.is_narrow_lane(obst_current.color, obst_current.id):
-                    self.base_speed = self.SPEED_STRAIGHT_MED
+                if self.is_narrow_lane(obst_current.color, obst_current.zone_id):
+                    if self.is_start_finish_straight:
+                        self.base_speed = self.SPEED_STRAIGHT_MED
                 else:
-                    self.base_speed = self.SPEED_STRAIGHT_FAST
+                    if self.is_start_finish_straight:
+                        self.base_speed = self.SPEED_STRAIGHT_MED
+                    else:
+                        self.base_speed = self.SPEED_STRAIGHT_FAST
+
             elif obst_current is not None and not obst_current.is_localized and obst_current.prediction:
                 # Hindernis im Predict State
                 self.base_speed = self.SPEED_STRAIGHT_MED
+
             else:
                 # Keine Hindernisse
                 self.base_speed = self.SPEED_STRAIGHT_SLOW
@@ -448,18 +449,41 @@ class Obstacle_Run(Node):
 
         if (self.target_turns - self.turn_count) == 1 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.last_turn_for_parking = True
-            self.turn_speed = 250.0
-            self.base_speed = 250.0
+            self.turn_speed = self.parking_speed
+            self.base_speed = self.parking_speed
         else: 
             self.last_turn_for_parking = False
 
         if self.target_turns == self.turn_count:
             self.parking_straight = True
             self.IDEAL_RADIUS_M = 0.20
-            self.base_speed = 250.0
-            self.turn_speed = 250.0
+            self.base_speed = self.parking_speed
+            self.turn_speed = self.parking_speed
         else:
             self.parking_straight = False
+
+        if self.base_speed == self.SPEED_STRAIGHT_SLOW:
+            self.kp = 2.5
+            self.ki = 0.07
+            self.kd = 0.08
+
+        elif self.base_speed == self.SPEED_STRAIGHT_MED:
+            self.kp = 2.5
+            self.ki = 0.07
+            self.kd = 0.08
+
+        elif self.base_speed == self.SPEED_STRAIGHT_FAST:
+            self.kp = 2.3
+            self.ki = 0.07
+            self.kd = 0.10
+            
+        elif self.base_speed == self.parking_speed:
+            self.kp = 2.5
+            self.ki = 0.07
+            self.kd = 0.08
+
+        
+        self.get_logger().warn(f"BaseSpeed: {self.base_speed} , TurnSpeed: {self.turn_speed}")
 
 
     def imu_callback(self, msg):
@@ -3066,8 +3090,11 @@ class Obstacle_Run(Node):
             self.pub_cmd_vel.publish(cmd)
 
     def parking_lidar_pid_steering(self, point_data):
-        self.lane_ratio = 1.11
-        #self.parking_speed = 0.0
+        if self.park_direction == 'PARKING_RIGHT_NORMAL':
+            self.lane_ratio = 1.15
+        else:
+            self.lane_ratio = 1.11
+
         self.kp = 2.2
         self.ki = 0.0
         self.kd = 0.10
