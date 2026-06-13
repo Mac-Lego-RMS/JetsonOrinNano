@@ -210,6 +210,17 @@ class Obstacle_Run(Node):
         self.turn_speed = 350.0
         self.parking_speed = 250.0
 
+        # Globale Geschwindigkeiten
+        self.SPEED_STRAIGHT_SLOW = 350.0
+        self.SPEED_STRAIGHT_MED = 350.0
+        self.SPEED_STRAIGHT_FAST = 500.0
+        self.SPEED_TURN_STD = 250.0
+        self.SPEED_TURN_MED = 250.0
+        self.SPEED_TURN_FAST = 350.0
+        self.SPEED_STRAIGHT_SLOW_saved = self.SPEED_STRAIGHT_SLOW
+        
+        self.is_obstacle_passed = False
+
         # YOLO Parameter
         self.image_width = 1280
         self.bridge = CvBridge()
@@ -329,10 +340,37 @@ class Obstacle_Run(Node):
         msg.data = state
         self.led_pub.publish(msg)
 
+    def is_narrow_lane(self, color, id):
+        is_left = (self.fahrtrichtung == 'links')
+        
+        # Innenbahn
+        if is_left and color == 'green' or not is_left and color == 'red':
+            if id % 10 == 0:
+                return True
+            else:
+                return False            
+
+        # Außenbahn
+        if is_left and color == 'red' or not is_left and color == 'green':
+            if id % 10 == 1:
+                return True
+            else:
+                return False
+
+    def takes_inside_lane(self, color):
+        is_left_turn = (self.fahrtrichtung == 'links')
+        
+        # Bei Linkskurve: Grün = links vorbei = Innenbahn
+        if is_left_turn and color == 'green': 
+            return True
+        # Bei Rechtskurve: Rot = rechts vorbei = Innenbahn
+        if not is_left_turn and color == 'red': 
+            return True
+            
+        return False
+
     def update_strategy_params(self):
         if self.turn_count > 4:
-            self.base_speed = 500.0
-            self.turn_speed = 375.0
             self.IDEAL_RADIUS_M = 0.28
             self.standard_lane_ratio_approach = 0.60
             self.kp = 2.2
@@ -340,10 +378,10 @@ class Obstacle_Run(Node):
             self.kd = 0.09
         else:
             if self.turn_count == 0 and self.fahrtrichtung == 'rechts':
-                self.base_speed = 280.0
+                self.SPEED_STRAIGHT_SLOW = 280.0
             else:
-                self.base_speed = 400.0
-            self.turn_speed = 320.0
+                self.SPEED_STRAIGHT_SLOW = self.SPEED_STRAIGHT_SLOW_saved
+
             self.IDEAL_RADIUS_M = 0.25
             self.standard_lane_ratio_approach = 0.70
             self.kp = 2.5
@@ -356,6 +394,57 @@ class Obstacle_Run(Node):
         else:
             self.is_start_finish_straight = False
             self.standard_lane_ratio_approach = 0.70
+
+        # variable Speedanpassungen
+        current_straight = self.turn_count % 4
+        next_straight = (self.turn_count + 1) % 4
+        
+        obst_current = self.obstacle_memory[current_straight]
+        obst_next = self.obstacle_memory[next_straight]
+
+        if self.turn_count < 4:
+            # Straights
+            if obst_current is not None and obst_next is not None:
+                self.base_speed = self.SPEED_STRAIGHT_MED
+            else:
+                self.base_speed = self.SPEED_STRAIGHT_SLOW
+                
+            # Turns
+            self.turn_speed = self.SPEED_TURN_STD # Platzhalter für Runde 1
+
+        else:
+            # STRAIGHTS:
+            if self.is_obstacle_passed:
+                # Wir sind am Hindernis vorbei
+                self.base_speed = self.SPEED_STRAIGHT_FAST
+            elif obst_current is not None and obst_current.is_localized:
+                # Hindernis erkannt
+                if self.is_narrow_lane(obst_current.color, obst_current.id):
+                    self.base_speed = self.SPEED_STRAIGHT_MED
+                else:
+                    self.base_speed = self.SPEED_STRAIGHT_FAST
+            elif obst_current is not None and not obst_current.is_localized and obst_current.prediction:
+                # Hindernis im Predict State
+                self.base_speed = self.SPEED_STRAIGHT_MED
+            else:
+                # Keine Hindernisse
+                self.base_speed = self.SPEED_STRAIGHT_SLOW
+                
+            # TURNS:
+            must_drive_slow = False
+            
+            if obst_next is not None and obst_next.is_localized:
+                if obst_next.zone_id < 2 and self.takes_inside_lane(obst_next.color):
+                    must_drive_slow = True
+                    
+            if obst_current is not None and obst_current.is_localized:
+                if obst_current.zone_id >= 20 and self.takes_inside_lane(obst_current.color):
+                    must_drive_slow = True
+                    
+            if must_drive_slow:
+                self.turn_speed = self.SPEED_TURN_MED
+            else:
+                self.turn_speed = self.SPEED_TURN_FAST
 
         if (self.target_turns - self.turn_count) == 1 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.last_turn_for_parking = True
@@ -2260,9 +2349,10 @@ class Obstacle_Run(Node):
             
 
             if not obstacle.is_localized:
-                if obstacle.prediction and actual_dist < 1.65:
+                if obstacle.prediction and actual_dist < 1.70:
                     # Wir haben das vorhergesagte Hindernis passiert
                     target_ratio = self.standard_lane_ratio_approach
+                    self.is_obstacle_passed = True
                 else:
                     # Wir müssen ausweichen
                     is_evading = True
@@ -2292,7 +2382,9 @@ class Obstacle_Run(Node):
                     else:
                         obst_passed = actual_dist < 0.85
                         obst_y = 1.0
-                        
+                    
+                    self.is_obstacle_passed = obst_passed
+
                     dist_to_obst = actual_dist - obst_y
                 
                 if not obst_passed:
