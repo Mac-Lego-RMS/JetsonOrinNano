@@ -2690,7 +2690,7 @@ class Obstacle_Run(Node):
             front_wall_hnf = self.cluster_to_hnf(self.front_wall)
             left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
-            self.current_obstacle_cmd = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
+            self.current_obstacle_cmd, _ = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, 0.8)
 
             if self.fahrtrichtung is None:
                 if (self.left_wall is not None and len(self.left_wall) > 0) and (self.right_wall is not None and len(self.right_wall) > 0):
@@ -2769,10 +2769,21 @@ class Obstacle_Run(Node):
             if current_obstacle is None:
                 if front_wall_hnf is not None:
                     self.current_obstacle_cmd, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, front_wall_hnf[2] - 0.75)
+                else:
+                    self.current_obstacle_cmd = None  # Fix D: kein Kontext → Reset
             else:
                 self.current_obstacle_cmd = current_obstacle.color
 
         front_dist = front_wall_hnf[2] if front_wall_hnf is not None else None
+
+        # Fix C: Ghost-Trigger — Hindernis aus Kamera verloren aber noch im Memory
+        if self.current_obstacle_cmd is None and current_obstacle is None and front_dist is not None:
+            stored = self.obstacle_memory[current_straight]
+            if stored is not None and 1.40 < front_dist < 1.60:
+                stored.prediction = True
+                self.current_obstacle_cmd = stored.color
+                current_obstacle = stored
+                self.get_logger().info("Ghost-Trigger: Hindernis verloren bei 1.5m -> Prediction gesetzt!")
         self.lane_ratio = self.set_lane_ratio_for_obstacle_cmd(self.current_obstacle_cmd, current_obstacle, front_dist)
         self.get_logger().info(f"Current_Obst_Cmd: {self.current_obstacle_cmd}, Current_Obst: {current_obstacle} , Lane_Ratio: {self.lane_ratio}, front_dist: {front_dist}m")
 
@@ -2798,7 +2809,6 @@ class Obstacle_Run(Node):
         cmd.angular.z = float(steering_cmd)
         self.pub_cmd_vel.publish(cmd)
         self.get_logger().info(f"Lenkung: Speed={self.base_speed:.3f}, Steering={steering_cmd:.3f}")
-        self.pub_cmd_vel.publish(cmd)
 
     def handle_turn_maneuver(self, point_data):
         cmd = Twist()
