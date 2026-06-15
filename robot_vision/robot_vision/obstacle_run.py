@@ -121,6 +121,12 @@ class Obstacle_Run(Node):
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pub_markers = self.create_publisher(MarkerArray, '/wall_follower_markers', 10)
 
+        # Passiver Publisher für die MATLAB-Visualisierung
+        self.pub_global_pose = self.create_publisher(PoseStamped, '/global_pose', 10)
+        
+        # Publisher für die Hindernisse im globalen (MATLAB) Koordinatensystem
+        self.pub_global_obstacles = self.create_publisher(MarkerArray, '/global_obstacles', 10)
+
         # IMU Variablen
         self.yaw_offset = 0.0
         self.current_yaw = 0.0
@@ -3550,6 +3556,148 @@ class Obstacle_Run(Node):
         elif self.parking_phase == 'RETIRE_THE_CAR':
             self.parking_imu_pid_steering()
 
+    def calculate_global_position(self, front_hnf, left_hnf, right_hnf):
+        """
+        Berechnet die absolute globale X/Y/Yaw Position auf dem 3x3m Spielfeld.
+        """
+        if self.fahrtrichtung is None or front_hnf is None:
+            return
+
+        L = 3.0 
+        d_f = front_hnf[2]
+        d_l = left_hnf[2] if left_hnf else None
+        d_r = right_hnf[2] if right_hnf else None
+        
+        segment = self.turn_count % 4
+        x_global, y_global = 0.0, 0.0
+
+        # Richtungskompensation für CCW (links)
+        if self.fahrtrichtung == 'links':
+            if segment == 0:
+                y_global = L - d_f
+                x_global = d_l if d_l is not None else (L - d_r if d_r is not None else 0.0)
+            elif segment == 1:
+                x_global = d_f
+                y_global = d_l if d_l is not None else (L - d_r if d_r is not None else 0.0)
+            elif segment == 2:
+                y_global = d_f
+                x_global = (L - d_l) if d_l is not None else (d_r if d_r is not None else 0.0)
+            elif segment == 3:
+                x_global = L - d_f
+                y_global = (L - d_l) if d_l is not None else (d_r if d_r is not None else 0.0)
+
+        # Richtungskompensation für CW (rechts)
+        elif self.fahrtrichtung == 'rechts':
+            if segment == 0:
+                y_global = L - d_f
+                x_global = d_l if d_l is not None else (L - d_r if d_r is not None else 0.0)
+            elif segment == 1:
+                x_global = L - d_f
+                y_global = (L - d_l) if d_l is not None else (d_r if d_r is not None else 0.0)
+            elif segment == 2:
+                y_global = d_f
+                x_global = (L - d_l) if d_l is not None else (d_r if d_r is not None else 0.0)
+            elif segment == 3:
+                x_global = d_f
+                y_global = d_l if d_l is not None else (L - d_r if d_r is not None else 0.0)
+
+        # Globale Orientierung via Gyro (Startrichtung Nord = 90 Grad)
+        global_yaw_rad = math.radians(90.0 + (self.current_yaw - self.yaw_offset))
+
+        # ROS 2 Nachricht befüllen
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp = self.get_clock().now().to_msg()
+        pose_msg.header.frame_id = "map"
+        pose_msg.pose.position.x = float(x_global)
+        pose_msg.pose.position.y = float(y_global)
+        
+        # Umrechnung in 2D-Quaternion für ROS-Standard
+        pose_msg.pose.orientation.z = math.sin(global_yaw_rad / 2.0)
+        pose_msg.pose.orientation.w = math.cos(global_yaw_rad / 2.0)
+
+        self.pub_global_pose.publish(pose_msg)
+
+    def publish_global_obstacles(self):
+        """
+        Übersetzt die verorteten Hindernisse (zone_id) aus dem obstacle_memory
+        in globale X/Y-Koordinaten für MATLAB/RViz.
+        """
+        if self.fahrtrichtung is None:
+            return
+
+        marker_array = MarkerArray()
+
+        for segment_idx, obst in enumerate(self.obstacle_memory):
+            # Nur fest verortete Hindernisse auf dem Feld platzieren
+            if obst is None or not obst.is_localized:
+                continue
+
+            zone_id = obst.zone_id
+            
+            # --- 1. Lokale Koordinaten im aktuellen Segment ---
+            # Y-Achse (Längs zur Fahrtrichtung): 
+            # Zone 2x = 2.0m, Zone 1x = 1.5m, Zone 0x = 1.0m
+            rel_y = 1.0 + (zone_id // 10) * 0.5 
+            
+            # X-Achse (Quer zur Fahrtrichtung):
+            # Endung 1 (Outer) = ca. 0.35m von der Außenbande entfernt
+            # Endung 0 (Inner) = ca. 0.65m von der Außenbande entfernt
+            rel_outer = 0.35 if (zone_id % 10) == 1 else 0.65
+
+            x_glob, y_glob = 0.0, 0.0
+
+            # --- 2. Transformation ins globale 3x3m Raster ---
+            if self.fahrtrichtung == 'links': # Gegen den Uhrzeigersinn
+                if segment_idx == 0:   # Ost-Bande (Fahrt nach Nord)
+                    x_glob, y_glob = 3.0 - rel_outer, rel_y
+                elif segment_idx == 1: # Nord-Bande (Fahrt nach West)
+                    x_glob, y_glob = 3.0 - rel_y, 3.0 - rel_outer
+                elif segment_idx == 2: # West-Bande (Fahrt nach Süd)
+                    x_glob, y_glob = rel_outer, 3.0 - rel_y
+                elif segment_idx == 3: # Süd-Bande (Fahrt nach Ost)
+                    x_glob, y_glob = rel_y, rel_outer
+
+            else: # Im Uhrzeigersinn (RECHTS)
+                if segment_idx == 0:   # West-Bande (Fahrt nach Nord)
+                    x_glob, y_glob = rel_outer, rel_y
+                elif segment_idx == 1: # Nord-Bande (Fahrt nach Ost)
+                    x_glob, y_glob = rel_y, 3.0 - rel_outer
+                elif segment_idx == 2: # Ost-Bande (Fahrt nach Süd)
+                    x_glob, y_glob = 3.0 - rel_outer, 3.0 - rel_y
+                elif segment_idx == 3: # Süd-Bande (Fahrt nach West)
+                    x_glob, y_glob = 3.0 - rel_y, rel_outer
+
+            # --- 3. ROS Marker erstellen ---
+            marker = Marker()
+            marker.header.frame_id = "map"  # Globaler Frame!
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = "global_obstacles"
+            marker.id = segment_idx         # Ein Marker pro Gerade (0 bis 3)
+            marker.type = Marker.CYLINDER
+            marker.action = Marker.ADD
+            
+            marker.pose.position.x = x_glob
+            marker.pose.position.y = y_glob
+            marker.pose.position.z = 0.15   # Mitte des Blocks (30cm hoch)
+            
+            # WRO Block Maße (ca. 15x15x30 cm)
+            marker.scale.x = 0.15
+            marker.scale.y = 0.15
+            marker.scale.z = 0.30
+            marker.color.a = 1.0
+            
+            if obst.color == 'red':
+                marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0
+            else:
+                marker.color.r, marker.color.g, marker.color.b = 0.0, 1.0, 0.0
+
+            marker_array.markers.append(marker)
+
+        # MarkerArray nur publishen, wenn Marker existieren
+        if len(marker_array.markers) > 0:
+            self.pub_global_obstacles.publish(marker_array)
+
+
     def execute_stop(self):
             cmd = Twist()
             cmd.linear.x = 0.0
@@ -3587,6 +3735,14 @@ class Obstacle_Run(Node):
 
         elif self.state == 'PARKING':
             self.decide_park_direction(point_data)
+
+        # --- GLOBALE POSITIONIERUNG FÜR MATLAB ---
+        if self.state in ['FOLLOW_LANE', 'TURN_LINKS', 'TURN_RECHTS', 'PARKING']:
+            f_hnf = self.cluster_to_hnf(self.front_wall) if self.front_wall is not None else None
+            l_hnf = self.cluster_to_hnf(self.left_wall) if self.left_wall is not None else None
+            r_hnf = self.cluster_to_hnf(self.right_wall) if self.right_wall is not None else None
+            self.calculate_global_position(f_hnf, l_hnf, r_hnf)
+            self.publish_global_obstacles()
 
         self.counter += 1
         self.update_timer()
