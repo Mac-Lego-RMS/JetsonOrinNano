@@ -129,6 +129,8 @@ class Obstacle_Run(Node):
         self.start_turn_yaw = None
         self.start_straight_yaw = 0.0
         self.last_turn_aborted = False
+        self.panic_counter_started = False
+        self.panic_counter = 0
         
         
         self.rviz_frame = 'ldlidar_link'
@@ -209,6 +211,7 @@ class Obstacle_Run(Node):
         self.base_speed = 350.0
         self.turn_speed = 350.0
         self.parking_speed = 250.0
+        self.panic_speed = 250.0
 
         # Globale Geschwindigkeiten
         self.SPEED_STRAIGHT_SLOW = 350.0
@@ -379,7 +382,7 @@ class Obstacle_Run(Node):
             else:
                 self.SPEED_STRAIGHT_SLOW = self.SPEED_STRAIGHT_SLOW_saved
 
-            self.IDEAL_RADIUS_M = 0.25
+            self.IDEAL_RADIUS_M = 0.21
             self.standard_lane_ratio_approach = 0.70
         
         if self.turn_count % 4 == 0 and self.state == 'FOLLOW_LANE' or self.turn_count % 4 == 3 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
@@ -388,6 +391,11 @@ class Obstacle_Run(Node):
         else:
             self.is_start_finish_straight = False
             self.standard_lane_ratio_approach = 0.70
+
+        if self.turn_count % 4 == 3 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
+            self.standard_lane_ratio_exit = 0.35
+        else:
+            self.standard_lane_ratio_exit = 0.45
 
         # variable Speedanpassungen
         current_straight = self.turn_count % 4
@@ -398,7 +406,7 @@ class Obstacle_Run(Node):
 
         if self.turn_count < 4:
             # Straights
-            if obst_current is not None and obst_next is not None:
+            if obst_current is not None and obst_next is not None and self.is_obstacle_passed:
                 self.base_speed = self.SPEED_STRAIGHT_MED
             else:
                 self.base_speed = self.SPEED_STRAIGHT_SLOW
@@ -462,6 +470,18 @@ class Obstacle_Run(Node):
         else:
             self.parking_straight = False
 
+        if self.last_turn_aborted:
+            if not self.panic_counter_started:
+                self.panic_counter = 0
+                self.panic_counter_started = True
+            if self.panic_counter < 12:
+                self.panic_counter += 1
+                self.base_speed = self.panic_speed
+                self.turn_speed = self.panic_speed
+                self.kp = 2.5
+                self.ki = 0.07
+                self.kd = 0.08
+
         if self.base_speed == self.SPEED_STRAIGHT_SLOW:
             self.kp = 2.5
             self.ki = 0.07
@@ -483,7 +503,7 @@ class Obstacle_Run(Node):
             self.kd = 0.08
 
         
-        self.get_logger().warn(f"BaseSpeed: {self.base_speed} , TurnSpeed: {self.turn_speed}")
+        #self.get_logger().warn(f"BaseSpeed: {self.base_speed} , TurnSpeed: {self.turn_speed}")
 
 
     def imu_callback(self, msg):
@@ -2331,7 +2351,10 @@ class Obstacle_Run(Node):
 
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
-        max_shift = 0.015 
+        if self.turn_count < 4:
+            max_shift = 0.015
+        else:
+            max_shift = 0.008
     
         actual_dist = front_wall_dist if front_wall_dist is not None else 2.0
 
@@ -2339,6 +2362,8 @@ class Obstacle_Run(Node):
             if obstacle is not None:
                 obstacle.prediction = True
                 self.get_logger().info("Ghost-Trigger: Kein Obstacle bei 1.5m -> Prediction auf True gesetzt!")
+
+        is_evading = False  # True, wenn im Notfall ohne Glättung ausgewichen werden muss
 
         if is_turn_exit:
             target_ratio = self.standard_lane_ratio_exit
@@ -2348,8 +2373,6 @@ class Obstacle_Run(Node):
                 is_evading = True
             else:
                 target_ratio = self.standard_lane_ratio_approach
-            
-        is_evading = False  # True, wenn im Notfall ohne Glättung ausgewichen werden muss
 
         # HINDERNIS-LOGIK
         if obstacle_cmd is not None and obstacle is not None:
@@ -2440,7 +2463,8 @@ class Obstacle_Run(Node):
             # Sofortiges Umstellen ohne Glättung
             dist_to_inner_wall = target_ratio
         else:
-            if actual_dist > 1.40:
+            shift_dist = 1.12 if self.turn_count < 4 else 1.30
+            if actual_dist > shift_dist:
                 diff = target_ratio - self.lane_ratio
                 if diff > max_shift:
                     dist_to_inner_wall = self.lane_ratio + max_shift
@@ -2738,7 +2762,9 @@ class Obstacle_Run(Node):
 
         if self.turn_count != 0 or self.fahrtrichtung == 'rechts':      # Damit wir keine falschen Hindernisse direkt nachdem Ausparken erkennen
             if current_obstacle is None or not current_obstacle.is_localized:
-                current_obstacle = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
+                result = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
+                if result is not None:
+                    current_obstacle = result
 
             if current_obstacle is None:
                 if front_wall_hnf is not None:
@@ -2865,7 +2891,7 @@ class Obstacle_Run(Node):
             yaw_diff = (self.current_yaw - self.start_turn_yaw + 180) % 360 - 180
             progressed_angle = abs(yaw_diff)
             
-            if progressed_angle > 55.0:
+            if 80.0 > progressed_angle > 55.0:
                 
                 # Nur Hindernisse, die unmittelbar auf der neuen Gerade stehen (0.0 bis 0.7m)
                 last_exit_ratio = self.lane_ratio_exit
@@ -2875,8 +2901,13 @@ class Obstacle_Run(Node):
                 if exit_obstacle is not None and exit_obstacle_cmd != "CLEAR":
                     if abs(last_exit_ratio - self.lane_ratio_exit) > 0.15:
                         self.get_logger().warn(f"PANIC EXIT. Kritisches Hindernis ({exit_obstacle_cmd}) erzwingt Abbruch bei {progressed_angle:.1f}°!")
+                        steering_cmd = 0.6 if (last_exit_ratio - self.lane_ratio_exit) < 0.0 else - 0.6
+                        cmd.linear.x = self.panic_speed
+                        cmd.angular.z = float(steering_cmd)
+                        self.pub_cmd_vel.publish(cmd)
                         panic_exit = True
                         self.last_turn_aborted = True
+                        self.panic_counter_started = False
 
             # Kurve beenden
             if turn_completed or panic_exit:
@@ -2905,6 +2936,7 @@ class Obstacle_Run(Node):
                 self.integral_error = 0.0
                 
                 self.start_straight_yaw = self.current_yaw
+                self.is_obstacle_passed = False
 
 
     def update_timer(self):
@@ -3000,7 +3032,7 @@ class Obstacle_Run(Node):
 
     def handle_turn_preparation(self, point_data):
         if self.park_direction == 'PARKING_RIGHT_NORMAL':
-            self.lane_ratio = 0.22
+            self.lane_ratio = 0.20
         else:
             self.lane_ratio = 0.25
 
@@ -3033,7 +3065,7 @@ class Obstacle_Run(Node):
         if self.park_direction == 'PARKING_LEFT':
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.10)
         else:
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.87)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.84)
         intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
         curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
         
@@ -3091,7 +3123,7 @@ class Obstacle_Run(Node):
 
     def parking_lidar_pid_steering(self, point_data):
         if self.park_direction == 'PARKING_RIGHT_NORMAL':
-            self.lane_ratio = 1.15
+            self.lane_ratio = 1.16
         else:
             self.lane_ratio = 1.11
 
