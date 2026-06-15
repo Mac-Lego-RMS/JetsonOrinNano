@@ -127,6 +127,21 @@ class Obstacle_Run(Node):
         # Publisher für die Hindernisse im globalen (MATLAB) Koordinatensystem
         self.pub_global_obstacles = self.create_publisher(MarkerArray, '/global_obstacles', 10)
 
+        # Reset-Signal für die MATLAB-Trajektorie (verhindert Ghost-Lines beim Einparken)
+        self.pub_global_reset = self.create_publisher(Bool, '/global_reset', 10)
+
+        # --- Map-Visualisierungs-Parameter ---
+        # 90°-Drehung der Map-Ausgabe um die Feldmitte, damit Pose und Hindernisse
+        # zur Ausrichtung von fe.jpg passen. +90.0 / -90.0 schaltet die Drehrichtung
+        # um, 0.0 deaktiviert die Drehung komplett.
+        self.MAP_ROT_DEG = -90.0
+        self.MAP_CENTER = 1.5  # Feldmitte des 3x3 m Feldes
+
+        # Hysterese gegen Lidar-"Zacken": Hindernis erst nach N stabilen Zyklen zeigen
+        self.OBSTACLE_STABLE_CYCLES = 3
+        self._obst_zone_last = [None, None, None, None]
+        self._obst_zone_count = [0, 0, 0, 0]
+
         # IMU Variablen
         self.yaw_offset = 0.0
         self.current_yaw = 0.0
@@ -3556,6 +3571,76 @@ class Obstacle_Run(Node):
         elif self.parking_phase == 'RETIRE_THE_CAR':
             self.parking_imu_pid_steering()
 
+    def _apply_map_rotation(self, x, y):
+        """
+        Dreht einen Feldpunkt (x, y) per Rotationsmatrix um die Feldmitte
+        (MAP_CENTER, MAP_CENTER), damit die Map-Ausgabe zur Ausrichtung von
+        fe.jpg passt. Drehwinkel über self.MAP_ROT_DEG einstellbar.
+        """
+        c = self.MAP_CENTER
+        rad = math.radians(self.MAP_ROT_DEG)
+        dx = x - c
+        dy = y - c
+        rx = dx * math.cos(rad) - dy * math.sin(rad)
+        ry = dx * math.sin(rad) + dy * math.cos(rad)
+        return c + rx, c + ry
+
+    def _zone_to_global(self, segment_idx, zone_id):
+        """
+        Übersetzt eine (segment_idx, zone_id)-Kombination in globale, bereits
+        rotierte X/Y-Feldkoordinaten. Geometrie identisch zur bisherigen Logik
+        in publish_global_obstacles, nur zentral und mit Map-Drehung.
+          rel_y     = 1.0 + (zone_id//10)*0.5   -> Zone 0x=1.0, 1x=1.5, 2x=2.0
+          rel_outer = 0.35 (Endung 1) | 0.65 (Endung 0)
+        """
+        rel_y = 1.0 + (zone_id // 10) * 0.5
+        rel_outer = 0.35 if (zone_id % 10) == 1 else 0.65
+
+        if self.fahrtrichtung == 'links':   # CCW
+            if segment_idx == 0:
+                x_glob, y_glob = 3.0 - rel_outer, rel_y
+            elif segment_idx == 1:
+                x_glob, y_glob = 3.0 - rel_y, 3.0 - rel_outer
+            elif segment_idx == 2:
+                x_glob, y_glob = rel_outer, 3.0 - rel_y
+            else:
+                x_glob, y_glob = rel_y, rel_outer
+        else:                               # CW (rechts)
+            if segment_idx == 0:
+                x_glob, y_glob = rel_outer, rel_y
+            elif segment_idx == 1:
+                x_glob, y_glob = rel_y, 3.0 - rel_outer
+            elif segment_idx == 2:
+                x_glob, y_glob = 3.0 - rel_outer, 3.0 - rel_y
+            else:
+                x_glob, y_glob = 3.0 - rel_y, rel_outer
+
+        return self._apply_map_rotation(x_glob, y_glob)
+
+    def _make_obstacle_marker(self, marker_id, x, y, color, alpha):
+        """Baut einen CYLINDER-Marker für ein (ggf. transparentes) Hindernis."""
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "global_obstacles"
+        marker.id = int(marker_id)
+        marker.type = Marker.CYLINDER
+        marker.action = Marker.ADD
+        marker.pose.position.x = float(x)
+        marker.pose.position.y = float(y)
+        marker.pose.position.z = 0.15
+        marker.scale.x = 0.15
+        marker.scale.y = 0.15
+        marker.scale.z = 0.30
+        marker.color.a = float(alpha)   # 1.0 = lokalisiert, 0.25 = Prediction
+        if color == 'red':
+            marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0
+        else:
+            marker.color.r, marker.color.g, marker.color.b = 0.0, 1.0, 0.0
+        # Lifetime, damit verschwundene Marker in RViz/MATLAB auslaufen
+        marker.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
+        return marker
+
     def calculate_global_position(self, front_hnf, left_hnf, right_hnf):
         """
         Berechnet die absolute globale X/Y/Yaw Position auf dem 3x3m Spielfeld.
@@ -3604,23 +3689,33 @@ class Obstacle_Run(Node):
         # Globale Orientierung via Gyro (Startrichtung Nord = 90 Grad)
         global_yaw_rad = math.radians(90.0 + (self.current_yaw - self.yaw_offset))
 
+        # 90°-Map-Drehung KONSISTENT auf Position UND Orientierung anwenden,
+        # damit der Roboter-Vektor sauber im gedrehten map-System liegt.
+        x_map, y_map = self._apply_map_rotation(x_global, y_global)
+        yaw_map = global_yaw_rad + math.radians(self.MAP_ROT_DEG)
+
         # ROS 2 Nachricht befüllen
         pose_msg = PoseStamped()
         pose_msg.header.stamp = self.get_clock().now().to_msg()
         pose_msg.header.frame_id = "map"
-        pose_msg.pose.position.x = float(x_global)
-        pose_msg.pose.position.y = float(y_global)
-        
+        pose_msg.pose.position.x = float(x_map)
+        pose_msg.pose.position.y = float(y_map)
+
         # Umrechnung in 2D-Quaternion für ROS-Standard
-        pose_msg.pose.orientation.z = math.sin(global_yaw_rad / 2.0)
-        pose_msg.pose.orientation.w = math.cos(global_yaw_rad / 2.0)
+        pose_msg.pose.orientation.z = math.sin(yaw_map / 2.0)
+        pose_msg.pose.orientation.w = math.cos(yaw_map / 2.0)
 
         self.pub_global_pose.publish(pose_msg)
 
     def publish_global_obstacles(self):
         """
-        Übersetzt die verorteten Hindernisse (zone_id) aus dem obstacle_memory
-        in globale X/Y-Koordinaten für MATLAB/RViz.
+        Übersetzt Hindernisse aus dem obstacle_memory in globale X/Y-Koordinaten
+        für MATLAB/RViz:
+          - Lokalisierte Hindernisse: volldeckende Blöcke (alpha=1.0), aber erst
+            nach OBSTACLE_STABLE_CYCLES stabilen Zyklen (Hysterese gegen Zacken).
+          - Predictions: halbtransparente Boxen (alpha=0.25) auf allen 4 möglichen
+            Zonen (00, 01, 10, 11) der betroffenen Geraden.
+        Koordinaten werden zentral über _zone_to_global (inkl. Map-Drehung) gebaut.
         """
         if self.fahrtrichtung is None:
             return
@@ -3628,70 +3723,42 @@ class Obstacle_Run(Node):
         marker_array = MarkerArray()
 
         for segment_idx, obst in enumerate(self.obstacle_memory):
-            # Nur fest verortete Hindernisse auf dem Feld platzieren
-            if obst is None or not obst.is_localized:
+            if obst is None:
+                # Kein Hindernis -> Hysterese-Zähler dieses Segments zurücksetzen
+                self._obst_zone_last[segment_idx] = None
+                self._obst_zone_count[segment_idx] = 0
                 continue
 
-            zone_id = obst.zone_id
-            
-            # --- 1. Lokale Koordinaten im aktuellen Segment ---
-            # Y-Achse (Längs zur Fahrtrichtung): 
-            # Zone 2x = 2.0m, Zone 1x = 1.5m, Zone 0x = 1.0m
-            rel_y = 1.0 + (zone_id // 10) * 0.5 
-            
-            # X-Achse (Quer zur Fahrtrichtung):
-            # Endung 1 (Outer) = ca. 0.35m von der Außenbande entfernt
-            # Endung 0 (Inner) = ca. 0.65m von der Außenbande entfernt
-            rel_outer = 0.35 if (zone_id % 10) == 1 else 0.65
+            # --- PREDICTION: 4 transparente Platzhalter (Zonen 00/01/10/11) ---
+            if not obst.is_localized and obst.prediction:
+                self._obst_zone_last[segment_idx] = None
+                self._obst_zone_count[segment_idx] = 0
+                for k, zone in enumerate((0, 1, 10, 11)):
+                    px, py = self._zone_to_global(segment_idx, zone)
+                    # Eindeutige IDs (>=200), damit Predictions die lokalisierten
+                    # Marker (IDs 0..3) nicht überschreiben.
+                    marker_array.markers.append(self._make_obstacle_marker(
+                        marker_id=200 + segment_idx * 10 + k,
+                        x=px, y=py, color=obst.color, alpha=0.25))
+                continue
 
-            x_glob, y_glob = 0.0, 0.0
+            # --- LOKALISIERT: Hysterese gegen Lidar-Zacken ---
+            if obst.is_localized:
+                zone_id = obst.zone_id
+                if zone_id == self._obst_zone_last[segment_idx]:
+                    self._obst_zone_count[segment_idx] += 1
+                else:
+                    self._obst_zone_last[segment_idx] = zone_id
+                    self._obst_zone_count[segment_idx] = 1
 
-            # --- 2. Transformation ins globale 3x3m Raster ---
-            if self.fahrtrichtung == 'links': # Gegen den Uhrzeigersinn
-                if segment_idx == 0:   # Ost-Bande (Fahrt nach Nord)
-                    x_glob, y_glob = 3.0 - rel_outer, rel_y
-                elif segment_idx == 1: # Nord-Bande (Fahrt nach West)
-                    x_glob, y_glob = 3.0 - rel_y, 3.0 - rel_outer
-                elif segment_idx == 2: # West-Bande (Fahrt nach Süd)
-                    x_glob, y_glob = rel_outer, 3.0 - rel_y
-                elif segment_idx == 3: # Süd-Bande (Fahrt nach Ost)
-                    x_glob, y_glob = rel_y, rel_outer
+                # Erst zeigen, wenn die zone_id N Zyklen stabil war
+                if self._obst_zone_count[segment_idx] < self.OBSTACLE_STABLE_CYCLES:
+                    continue
 
-            else: # Im Uhrzeigersinn (RECHTS)
-                if segment_idx == 0:   # West-Bande (Fahrt nach Nord)
-                    x_glob, y_glob = rel_outer, rel_y
-                elif segment_idx == 1: # Nord-Bande (Fahrt nach Ost)
-                    x_glob, y_glob = rel_y, 3.0 - rel_outer
-                elif segment_idx == 2: # Ost-Bande (Fahrt nach Süd)
-                    x_glob, y_glob = 3.0 - rel_outer, 3.0 - rel_y
-                elif segment_idx == 3: # Süd-Bande (Fahrt nach West)
-                    x_glob, y_glob = 3.0 - rel_y, rel_outer
-
-            # --- 3. ROS Marker erstellen ---
-            marker = Marker()
-            marker.header.frame_id = "map"  # Globaler Frame!
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "global_obstacles"
-            marker.id = segment_idx         # Ein Marker pro Gerade (0 bis 3)
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
-            
-            marker.pose.position.x = x_glob
-            marker.pose.position.y = y_glob
-            marker.pose.position.z = 0.15   # Mitte des Blocks (30cm hoch)
-            
-            # WRO Block Maße (ca. 15x15x30 cm)
-            marker.scale.x = 0.15
-            marker.scale.y = 0.15
-            marker.scale.z = 0.30
-            marker.color.a = 1.0
-            
-            if obst.color == 'red':
-                marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0
-            else:
-                marker.color.r, marker.color.g, marker.color.b = 0.0, 1.0, 0.0
-
-            marker_array.markers.append(marker)
+                gx, gy = self._zone_to_global(segment_idx, zone_id)
+                marker_array.markers.append(self._make_obstacle_marker(
+                    marker_id=segment_idx, x=gx, y=gy,
+                    color=obst.color, alpha=1.0))
 
         # MarkerArray nur publishen, wenn Marker existieren
         if len(marker_array.markers) > 0:
@@ -3743,6 +3810,13 @@ class Obstacle_Run(Node):
             r_hnf = self.cluster_to_hnf(self.right_wall) if self.right_wall is not None else None
             self.calculate_global_position(f_hnf, l_hnf, r_hnf)
             self.publish_global_obstacles()
+
+            # Reset-Flag für die MATLAB-Trajektorie: während PARKING True, sonst
+            # False. MATLAB bricht bei der steigenden Flanke die alte Linie ab,
+            # damit beim Einparken keine Ghost-Line quer über das Bild gezogen wird.
+            reset_msg = Bool()
+            reset_msg.data = (self.state == 'PARKING')
+            self.pub_global_reset.publish(reset_msg)
 
         self.counter += 1
         self.update_timer()
