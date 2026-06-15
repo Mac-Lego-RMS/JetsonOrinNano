@@ -207,6 +207,8 @@ class Obstacle_Run(Node):
         self.IDEAL_RADIUS_M = 0.28
         self.MIN_TURN_RADIUS_M = 0.20
 
+        self.turn_exit_toleranz = 10.0
+
         # MOTOR Parameter
         self.base_speed = 350.0
         self.turn_speed = 350.0
@@ -217,7 +219,7 @@ class Obstacle_Run(Node):
         self.SPEED_STRAIGHT_SLOW = 350.0
         self.SPEED_STRAIGHT_MED = 450.0
         self.SPEED_STRAIGHT_FAST = 600.0
-        self.SPEED_TURN_STD = 280.0
+        self.SPEED_TURN_SLOW = 280.0
         self.SPEED_TURN_MED = 350.0
         self.SPEED_TURN_FAST = 450.0
         self.SPEED_STRAIGHT_SLOW_saved = self.SPEED_STRAIGHT_SLOW
@@ -412,7 +414,7 @@ class Obstacle_Run(Node):
                 self.base_speed = self.SPEED_STRAIGHT_SLOW
                 
             # Turns
-            self.turn_speed = self.SPEED_TURN_STD # Platzhalter für Runde 1
+            self.turn_speed = self.SPEED_TURN_SLOW # Platzhalter für Runde 1
 
         else:
             # STRAIGHTS:
@@ -502,8 +504,19 @@ class Obstacle_Run(Node):
             self.ki = 0.07
             self.kd = 0.08
 
-        
-        #self.get_logger().warn(f"BaseSpeed: {self.base_speed} , TurnSpeed: {self.turn_speed}")
+        if self.turn_speed == self.SPEED_TURN_SLOW:
+            self.is_obstacle_passed = 10.0
+
+        elif self.turn_speed == self.SPEED_TURN_MED:
+            self.is_obstacle_passed = 13.0
+
+        elif self.turn_speed == self.SPEED_TURN_FAST:
+            self.is_obstacle_passed = 16.0
+
+        elif self.turn_speed == self.parking_speed:
+            self.is_obstacle_passed = 8.0
+
+        self.get_logger().warn(f"BaseSpeed: {self.base_speed} , TurnSpeed: {self.turn_speed}")
 
 
     def imu_callback(self, msg):
@@ -1889,17 +1902,20 @@ class Obstacle_Run(Node):
         """
         Gibt True zurück wenn die Kurve nach Gyro oder Wandwinkel beendet ist.
         """
+        
+        exit_toleranz_imu = self.turn_exit_toleranz
+        exit_toleranz_lidar = self.turn_exit_toleranz * 1.5
 
         yaw_diff = (self.current_yaw - self.start_turn_yaw + 180) % 360 - 180
         progressed_angle = abs(yaw_diff)
         
         target_angle_abs = abs(turn_angle)
         
-        if progressed_angle >= (target_angle_abs - 10.0):
+        if progressed_angle >= (target_angle_abs - exit_toleranz_imu):
             self.get_logger().info(f"Kurve beendet (Gyro Hard-Exit): {progressed_angle:.1f}° erreicht.")
             return True
             
-        if progressed_angle < (target_angle_abs - 25.0):
+        if progressed_angle < (target_angle_abs - 30.0):
             return False
             
         if front_line_params is not None:
@@ -1909,7 +1925,7 @@ class Obstacle_Run(Node):
             
             wall_error_deg = min(abs(wall_angle_deg % 180), abs(180 - (wall_angle_deg % 180)))
             
-            if wall_error_deg < 15.0:
+            if wall_error_deg < exit_toleranz_lidar:
                 self.get_logger().info(f"Fused Match! Gyro bei {progressed_angle:.1f}°, Wand perfekt parallel (Error: {wall_error_deg:.1f}°).")
                 return True
 
@@ -2352,7 +2368,7 @@ class Obstacle_Run(Node):
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
         if self.turn_count < 4:
-            max_shift = 0.015
+            max_shift = 0.012
         else:
             max_shift = 0.008
     
@@ -2380,8 +2396,7 @@ class Obstacle_Run(Node):
                     if obstacle.is_localized:
                         obst_is_relevant = (obstacle.zone_id < 2) # Hindernis ist nur relevant wenn es direkt zu beginn der Geraden steht
                     else: 
-                        if obstacle.prediction:
-                            obst_is_relevant = True
+                        obst_is_relevant = True
 
                     if obst_is_relevant:
                         target_ratio = 0.65
@@ -2518,6 +2533,11 @@ class Obstacle_Run(Node):
                     if zone_id % 10 == 1:
                         zone_id -= 1  # Zwinge ID auf Innenbahn
                         self.get_logger().info(f"set_obst_pos: Zone auf Innenbahn korrigiert (Neue ID: {zone_id})")
+
+                    if self.fahrtrichtung == 'links' and zone_id == 20:
+                        return current_obstacle
+                    elif self.fahrtrichtung == 'rechts' and zone_id == 10:
+                        return current_obstacle
 
                 if zone_id is not None:
                     # Speichert Zone im Objekt
@@ -3481,7 +3501,7 @@ class Obstacle_Run(Node):
                 self.parking_phase = 'POSITIONING_FOR_STOP'
                 self.park_turn_richtung = 'rechts'
 
-            elif self.obstacle_memory[0] is not None and (self.obstacle_memory[0].prediction or self.obstacle_memory[0].zone_id < 2) and self.obstacle_memory[0].color == 'green':
+            elif self.obstacle_memory[0] is not None and (not self.obstacle_memory[0].is_localized or self.obstacle_memory[0].prediction or self.obstacle_memory[0].zone_id < 2) and self.obstacle_memory[0].color == 'green':
                 self.park_direction = 'PARKING_RIGHT_OBST'
                 self.parking_phase = 'POSITIONING_FOR_STOP'
                 self.park_turn_richtung = 'links'
