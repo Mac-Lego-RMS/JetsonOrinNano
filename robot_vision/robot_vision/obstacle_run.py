@@ -2358,11 +2358,6 @@ class Obstacle_Run(Node):
     
         actual_dist = front_wall_dist if front_wall_dist is not None else 2.0
 
-        if obstacle_cmd is None and 1.40 < actual_dist < 1.60:
-            if obstacle is not None:
-                obstacle.prediction = True
-                self.get_logger().info("Ghost-Trigger: Kein Obstacle bei 1.5m -> Prediction auf True gesetzt!")
-
         is_evading = False  # True, wenn im Notfall ohne Glättung ausgewichen werden muss
 
         if is_turn_exit:
@@ -2765,6 +2760,11 @@ class Obstacle_Run(Node):
                 result = self.set_obstacle_position(point_data, (front_wall_hnf, aussenbande_hnf))
                 if result is not None:
                     current_obstacle = result
+                elif current_obstacle is not None:
+                    self.get_logger().info(
+                        f"Kein front_wall: Obstacle aus Memory erhalten ({current_obstacle.color}, "
+                        f"localized={current_obstacle.is_localized})"
+                    )
 
             if current_obstacle is None:
                 if front_wall_hnf is not None:
