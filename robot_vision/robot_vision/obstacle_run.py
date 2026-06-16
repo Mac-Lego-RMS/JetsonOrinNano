@@ -290,7 +290,7 @@ class Obstacle_Run(Node):
         self.test_is_turning = False
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
-        self.camera_calibration = True
+        self.camera_calibration = False
         self.debug = False
         self.debug_start = self.debug
 
