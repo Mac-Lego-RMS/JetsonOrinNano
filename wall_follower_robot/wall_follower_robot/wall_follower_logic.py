@@ -166,7 +166,7 @@ class WallFollower(Node):
         self.prev_error = 0.0
         self.integral_error = 0.0
 
-        self.strategy = 2
+        self.strategy = 0
 
         self.steering_ctrl = SteeringController(logger=self.get_logger())
         self.lookahead_dist_turn = 0.20
@@ -1877,7 +1877,7 @@ class WallFollower(Node):
                     self.exit_lane_width_avg = self.exit_lane_width_sum / self.exit_lane_width_n
                     self.get_logger().warn(f"current_exit_lane_width: {current_exit_lane_width} m")
             target_line_to_wall = abs(self.exit_lane_width_avg * (1.0 - self.lane_ratio))
-            self.get_logger().warn(f"Exit_lane_ratio_AVG: {self.exit_lane_width_avg} m")
+            self.get_logger().warn(f"Exit_lane_width_AVG: {self.exit_lane_width_avg} m")
             last_target_wall_dist = target_line_to_wall
 
             # IDEAL_RADIUS_M dynamisch an die kommende Spurbreite anpassen,
@@ -1975,13 +1975,26 @@ class WallFollower(Node):
             self.pub_timer.publish(timer_msg)
 
     def execute_stop(self):
+            # Roboter anhalten (in jedem Zyklus, solange wir im STOPPED-State sind)
             cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
             self.pub_cmd_vel.publish(cmd)
-            self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
-            self.destroy_node()
-            rclpy.shutdown()
+
+            # Abschluss-Banner nur einmal ausgeben, danach sauber herunterfahren
+            if not getattr(self, '_goal_reached_logged', False):
+                self._goal_reached_logged = True
+                self.get_logger().info("")
+                self.get_logger().info("  ╔══════════════════════════════════════════════╗")
+                self.get_logger().info("  ║              ✓  ZIEL ERREICHT                ║")
+                self.get_logger().info(f"  ║   {self.turn_count:>3} Kurven sauber gemeistert.            ║")
+                self.get_logger().info("  ║   Roboter wird angehalten.                   ║")
+                self.get_logger().info("  ╚══════════════════════════════════════════════╝")
+                self.get_logger().info("")
+
+                # Shutdown nur einmal anstoßen; main() raeumt den Node auf.
+                if rclpy.ok():
+                    rclpy.shutdown()
             return
 
     def main_logic(self, point_data):
@@ -2025,8 +2038,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Node-Cleanup; rclpy.shutdown() evtl. schon in execute_stop() erfolgt
+        if node.context.ok():
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
