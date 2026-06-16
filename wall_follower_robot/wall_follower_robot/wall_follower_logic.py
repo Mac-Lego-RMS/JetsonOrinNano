@@ -1956,13 +1956,25 @@ class WallFollower(Node):
             self.pub_timer.publish(timer_msg)
 
     def execute_stop(self):
+            # Roboter anhalten (in jedem Zyklus, solange wir im STOPPED-State sind)
             cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
             self.pub_cmd_vel.publish(cmd)
-            self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
-            self.destroy_node()
-            rclpy.shutdown()
+
+            # Abschluss-Banner nur einmal ausgeben, danach sauber herunterfahren
+            if not getattr(self, '_goal_reached_logged', False):
+                self._goal_reached_logged = True
+                self.get_logger().info("")
+                self.get_logger().info("  ╔══════════════════════════════════════════════╗")
+                self.get_logger().info("  ║              ✓  ZIEL ERREICHT                ║")
+                self.get_logger().info(f"  ║   {self.turn_count:>3} Kurven sauber gemeistert.            ║")
+                self.get_logger().info("  ║   Roboter wird angehalten.                   ║")
+                self.get_logger().info("  ╚══════════════════════════════════════════════╝")
+                self.get_logger().info("")
+
+                # Idempotenter Shutdown; main() raeumt den Node auf.
+                rclpy.try_shutdown()
             return
 
     def main_logic(self, point_data):
@@ -2006,8 +2018,12 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Node-Cleanup gegen doppelten Shutdown absichern.
+        # rclpy.try_shutdown() ist idempotent (kein RuntimeError bei bereits
+        # heruntergefahrenem Context, z.B. wenn execute_stop() schon stoppte).
+        if node.context.ok():
+            node.destroy_node()
+        rclpy.try_shutdown()
 
 if __name__ == '__main__':
     main()
