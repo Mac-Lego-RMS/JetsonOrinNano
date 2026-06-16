@@ -158,6 +158,10 @@ class WallFollower(Node):
         self.exit_lane_width_avg = 0.60
         self.exit_lane_width_sum = 0
         self.exit_lane_width_n = 0
+        self.last_exit_lane_width_avg = None
+
+        self.width_wrong_anticipated = False
+        self.current_lane_ratio = None
 
         self.kp = 2.0
         self.ki = 0.07
@@ -166,7 +170,7 @@ class WallFollower(Node):
         self.prev_error = 0.0
         self.integral_error = 0.0
 
-        self.strategy = 1
+        self.strategy = 2
 
         self.steering_ctrl = SteeringController(logger=self.get_logger())
         self.lookahead_dist_turn = 0.20
@@ -183,6 +187,7 @@ class WallFollower(Node):
         self.MIN_TURN_RADIUS_M = 0.20
 
         self.turn_puffer = 0.05
+        self.turn_exit_toleranz = 15.0
 
         self.current_active_speed = 0.0
         self.accel_step = 15.0
@@ -213,6 +218,9 @@ class WallFollower(Node):
         self.camera_calibration = False
 
     def strategy_params(self):
+        last_lane_ratio = self.lane_ratio
+        max_shift = 0.04
+
         match self.strategy:
             case 0:
                 self.lane_ratio = 0.40
@@ -226,6 +234,8 @@ class WallFollower(Node):
 
                 self.IDEAL_RADIUS_M = 0.28
 
+                self.turn_exit_toleranz = 15.0
+
             case 1:
                 self.lane_ratio = 0.35
 
@@ -234,7 +244,7 @@ class WallFollower(Node):
                 self.kd = 1.2
                 
                 self.base_target_speed = 900.0
-                self.turn_target_speed = 700.0
+                self.turn_target_speed = 600.0
 
                 self.IDEAL_RADIUS_M = 0.30
 
@@ -244,6 +254,8 @@ class WallFollower(Node):
                 self.decel_step = 40.0
                 self.brake_start_dist = 1.2
                 self.brake_end_dist = 0.85
+
+                self.turn_exit_toleranz = 17.0
 
             case 2:
                 self.lane_ratio = 0.3
@@ -255,36 +267,52 @@ class WallFollower(Node):
                 self.base_target_speed = 1023.0
                 self.turn_target_speed = 950.0
 
-                self.IDEAL_RADIUS_M = 0.30
+                self.IDEAL_RADIUS_M = 0.32
 
-                self.turn_puffer = 0.20
+                self.turn_puffer = 0.25
 
                 self.accel_step = 50.0
                 self.decel_step = 40.0
                 self.brake_start_dist = 1.2
                 self.brake_end_dist = 0.85
 
+                self.turn_exit_toleranz = 28.0
+        
+        if self.width_wrong_anticipated:
+            if last_lane_ratio == self.lane_ratio:
+                self.stored_lane_ratio = 1.0 - (self.lane_ratio * 0.60)
+            
+            diff = self.lane_ratio - self.stored_lane_ratio
+            
+            if abs(diff) <= max_shift:
+                self.width_wrong_anticipated = False  # Korrektur-Modus beenden
+                self.last_exit_lane_width_avg = None
+            elif diff > 0:
+                self.stored_lane_ratio += max_shift
+                self.lane_ratio = self.stored_lane_ratio
+            else:
+                self.stored_lane_ratio -= max_shift
+                self.lane_ratio = self.stored_lane_ratio
+
+            self.get_logger().info(f"Wir shiften: LaneRatio: {self.lane_ratio}")
+            
+
     def set_speed(self, front_wall_dist, is_braking=False):
         if front_wall_dist is None and is_braking:
             target_speed = self.turn_target_speed
-            self.get_logger().warn(f"0")
 
         elif front_wall_dist is None:
             target_speed = self.base_target_speed
-            self.get_logger().warn(f"1")
 
         elif front_wall_dist >= self.brake_start_dist:
             target_speed = self.base_target_speed
-            self.get_logger().warn(f"2")
 
         elif front_wall_dist <= self.brake_end_dist:
             target_speed = self.turn_target_speed
-            self.get_logger().warn(f"3")
 
         else:
             ratio = (front_wall_dist - self.brake_end_dist) / (self.brake_start_dist - self.brake_end_dist)
             target_speed = self.turn_target_speed + ratio * (self.base_target_speed - self.turn_target_speed)
-            self.get_logger().warn(f"4")
 
         if self.current_active_speed < target_speed:
             # Beschleunigen
@@ -1413,16 +1441,18 @@ class WallFollower(Node):
 
     def check_turn_completion_fused(self, turn_angle, front_line_params):
         """
-        Kombiniert Gyro-Daten mit dem Wandwinkel für maximale Präzision am Kurvenausgang.
+        Gibt True zurück wenn die Kurve nach Gyro oder Wandwinkel beendet ist.
         """
-        # ROBUSTE GYRO-BERECHNUNG (Wrap-Around-sicher)
-        # Differenz berechnen und zwingend auf [-180, 180] normalisieren
+        
+        exit_toleranz_imu = self.turn_exit_toleranz
+        exit_toleranz_lidar = self.turn_exit_toleranz * 1.25
+
         yaw_diff = (self.current_yaw - self.start_turn_yaw + 180) % 360 - 180
         progressed_angle = abs(yaw_diff)
         
         target_angle_abs = abs(turn_angle)
         
-        if progressed_angle >= (target_angle_abs - 15.0):
+        if progressed_angle >= (target_angle_abs - exit_toleranz_imu):
             self.get_logger().info(f"Kurve beendet (Gyro Hard-Exit): {progressed_angle:.1f}° erreicht.")
             return True
             
@@ -1434,10 +1464,9 @@ class WallFollower(Node):
             
             wall_angle_deg = math.degrees(math.atan2(n_y, n_x))
             
-            # Fehler zur perfekten Orthogonalität berechnen (0° oder 180° zur X-Achse)
             wall_error_deg = min(abs(wall_angle_deg % 180), abs(180 - (wall_angle_deg % 180)))
             
-            if wall_error_deg < 20.0:
+            if wall_error_deg < exit_toleranz_lidar:
                 self.get_logger().info(f"Fused Match! Gyro bei {progressed_angle:.1f}°, Wand perfekt parallel (Error: {wall_error_deg:.1f}°).")
                 return True
 
@@ -1787,6 +1816,18 @@ class WallFollower(Node):
                 self.lane_width_n += 1
                 self.lane_width_avg = self.lane_width_sum / self.lane_width_n
 
+        if front_wall_hnf is not None:
+            _, _, front_dist = front_wall_hnf
+            self.get_logger().warn(f"Innenbande ist vorhanden: {(innenbande is not None)} mit Länge: {len(innenbande) if innenbande is not None else None}")
+            if innenbande is not None and len(innenbande) > 0:
+                max_y_innen = max(p[2] for p in innenbande)
+                current_exit_lane_width = front_dist - max_y_innen
+                if 0.45 < current_exit_lane_width < 1.15:
+                    self.exit_lane_width_sum += current_exit_lane_width
+                    self.exit_lane_width_n += 1
+                    self.exit_lane_width_avg = self.exit_lane_width_sum / self.exit_lane_width_n
+                    self.get_logger().warn(f"current_exit_lane_width: {current_exit_lane_width} m")
+
         if front_wall_hnf is not None and self.fahrtrichtung is not None:
             _, _, front_dist = front_wall_hnf
             max_y_innen = 0.0
@@ -1804,6 +1845,9 @@ class WallFollower(Node):
         else:
             front_dist = None
         
+        if self.last_exit_lane_width_avg is not None and (self.lane_width_avg - self.last_exit_lane_width_avg) > 0.20:
+            self.width_wrong_anticipated = True
+
         steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
         
         # BEFEHLE AN ESP SETZEN
@@ -1852,16 +1896,19 @@ class WallFollower(Node):
             steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
             
             # Kurvengeometrie berechnen
-            _, _, front_dist = front_wall_hnf
-            self.get_logger().warn(f"Innenbande ist vorhanden: {(innenbande is not None)} mit Länge: {len(innenbande) if innenbande is not None else None}")
-            if innenbande is not None and len(innenbande) > 0:
-                max_y_innen = max(p[2] for p in innenbande)
-                current_exit_lane_width = front_dist - max_y_innen
-                if 0.45 < current_exit_lane_width < 1.15:
-                    self.exit_lane_width_sum += current_exit_lane_width
-                    self.exit_lane_width_n += 1
-                    self.exit_lane_width_avg = self.exit_lane_width_sum / self.exit_lane_width_n
-                    self.get_logger().warn(f"current_exit_lane_width: {current_exit_lane_width} m")
+            if front_wall_hnf is not None:
+                _, _, front_dist = front_wall_hnf
+                self.get_logger().warn(f"Innenbande ist vorhanden: {(innenbande is not None)} mit Länge: {len(innenbande) if innenbande is not None else None}")
+                if innenbande is not None and len(innenbande) > 0:
+                    max_y_innen = max(p[2] for p in innenbande)
+                    current_exit_lane_width = front_dist - max_y_innen
+                    if 0.45 < current_exit_lane_width < 1.15:
+                        self.exit_lane_width_sum += current_exit_lane_width
+                        self.exit_lane_width_n += 1
+                        self.exit_lane_width_avg = self.exit_lane_width_sum / self.exit_lane_width_n
+                        self.get_logger().warn(f"current_exit_lane_width: {current_exit_lane_width} m")
+            else:
+                front_dist = None
             target_line_to_wall = abs(self.exit_lane_width_avg * (1.0 - self.lane_ratio))
             self.get_logger().warn(f"Exit_lane_width_AVG: {self.exit_lane_width_avg} m (target_line_to_wall: {target_line_to_wall:.3f} m)")
             last_target_wall_dist = target_line_to_wall
@@ -1870,11 +1917,6 @@ class WallFollower(Node):
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, last_target_wall_dist)
             intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
             curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
-
-            if front_wall_hnf is not None:
-                _, _, front_dist = front_wall_hnf
-            else:
-                front_dist = None
             
             # Trigger prüfen
             if self.test_check_turn_trigger(entry_distance_m):
@@ -1923,9 +1965,12 @@ class WallFollower(Node):
                 self.integral_error = 0.0
                 self.start_straight_yaw = self.current_yaw
 
+                self.width_wrong_anticipated = False
+
                 self.lane_width_avg = self.exit_lane_width_avg
                 self.lane_width_n = 0
                 self.lane_width_sum = 0
+                self.last_exit_lane_width_avg = self.exit_lane_width_avg
                 self.exit_lane_width_avg = 0.60
                 self.exit_lane_width_n = 0
                 self.exit_lane_width_sum = 0
@@ -1968,7 +2013,7 @@ class WallFollower(Node):
                 self.get_logger().info("")
                 self.get_logger().info("  ╔══════════════════════════════════════════════╗")
                 self.get_logger().info("  ║              ✓  ZIEL ERREICHT                ║")
-                self.get_logger().info(f"  ║   {self.turn_count:>3} Kurven sauber gemeistert.            ║")
+                self.get_logger().info(f"  ║   {self.turn_count:>3} Kurven sauber gemeistert.              ║")
                 self.get_logger().info("  ║   Roboter wird angehalten.                   ║")
                 self.get_logger().info("  ╚══════════════════════════════════════════════╝")
                 self.get_logger().info("")

@@ -110,8 +110,8 @@ class Obstacle_Run(Node):
             10
         )
 
-        self.button_start = False
-        self.mit_ausparken = False
+        self.button_start = True
+        self.mit_ausparken = True
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
@@ -152,6 +152,7 @@ class Obstacle_Run(Node):
         self.is_start_finish_straight = False
         self.last_turn_for_parking = False
         self.parking_straight = False
+        self.parking_left_with_obstacle = False
 
         self.front_wall = None
         self.left_wall = None
@@ -217,11 +218,11 @@ class Obstacle_Run(Node):
 
         # Globale Geschwindigkeiten
         self.SPEED_STRAIGHT_SLOW = 350.0
-        self.SPEED_STRAIGHT_MED = 450.0
-        self.SPEED_STRAIGHT_FAST = 600.0
+        self.SPEED_STRAIGHT_MED = 500.0
+        self.SPEED_STRAIGHT_FAST = 700.0
         self.SPEED_TURN_SLOW = 280.0
         self.SPEED_TURN_MED = 350.0
-        self.SPEED_TURN_FAST = 450.0
+        self.SPEED_TURN_FAST = 500.0
         self.SPEED_STRAIGHT_SLOW_saved = self.SPEED_STRAIGHT_SLOW
         
         self.is_obstacle_passed = False
@@ -289,7 +290,7 @@ class Obstacle_Run(Node):
         self.test_is_turning = False
         self.curve_radius_m = None
         self.pub_obstacle_markers = self.create_publisher(MarkerArray, 'rviz_obstacles', 10)
-        self.camera_calibration = False
+        self.camera_calibration = True
         self.debug = False
         self.debug_start = self.debug
 
@@ -406,7 +407,7 @@ class Obstacle_Run(Node):
         obst_current = self.obstacle_memory[current_straight]
         obst_next = self.obstacle_memory[next_straight]
 
-        if self.turn_count < 4:
+        if self.turn_count < 5:
             # Straights
             if obst_current is not None and obst_next is not None and self.is_obstacle_passed:
                 self.base_speed = self.SPEED_STRAIGHT_MED
@@ -2188,9 +2189,9 @@ class Obstacle_Run(Node):
             steps = [
                 (0.0,   0.0, 1.0),  # Schritt 0: Warten
                 (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-                (-225.0, 0.8, 0.65),  # Schritt 2: Rückwärts
+                (-225.0, 0.8, 0.50),  # Schritt 2: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-                (195.0, -0.8, 0.60),   # Schritt 4: Vorwärts
+                (195.0, -0.8, 0.55),   # Schritt 4: Vorwärts
                 (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
                 (-225.0, 1.4, 0.4),  # Schritt 6: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
@@ -2202,9 +2203,9 @@ class Obstacle_Run(Node):
             steps = [
                 (0.0,   0.0, 1.0),  # Schritt 0: Warten
                 (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-                (-220.0, 0.8, 0.55),  # Schritt 2: Rückwärts
+                (-220.0, 0.8, 0.45),  # Schritt 2: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-                (195.0, -0.8, 0.60),   # Schritt 4: Vorwärts
+                (195.0, -0.8, 0.50),   # Schritt 4: Vorwärts
                 (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
                 (-220.0, 1.4, 0.35),  # Schritt 6: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
@@ -2295,8 +2296,8 @@ class Obstacle_Run(Node):
         left_wall_hnf = self.cluster_to_hnf(self.left_wall)
 
         self.visualize_hnf_line(front_wall_hnf, m_id=1, farbe_name="rot", label="Front HNF")
-        #self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
-        #self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
+        self.visualize_hnf_line(left_wall_hnf, m_id=0, farbe_name="blau", label="Links HNF")
+        self.visualize_hnf_line(right_wall_hnf, m_id=2, farbe_name="gruen", label="Rechts HNF")
 
         
 
@@ -2656,11 +2657,11 @@ class Obstacle_Run(Node):
         if self.button_start:
             if not self.button_state:
                 return
-            self.button_state = False
+
+            
         else:
             pass
 
-        self.button_state = False  # Flag sofort zurücksetzen
         self.set_led(False)        # LED ausschalten als Bestätigung
         
         self.yaw_offset = self.current_yaw
@@ -2692,6 +2693,7 @@ class Obstacle_Run(Node):
                     self.get_logger().info("Fehler! Keine Wand ist länger als die Andere!")
                     return
             self.state = 'PARKING_OUT'
+            self.button_state = False
 
         else:
             self.get_logger().info("Starte den Roboter... Evaluiere Fahrtrichtung und Kalibriere Gyro.")
@@ -2729,6 +2731,7 @@ class Obstacle_Run(Node):
                     self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                     return
             self.state = 'FOLLOW_LANE'
+            self.button_state = False
 
     def handle_lane_following(self, point_data):
         cmd = Twist()
@@ -2972,12 +2975,7 @@ class Obstacle_Run(Node):
     def update_timer(self):
         now = self.get_clock().now()
 
-        if self.state != 'STARTING' and not self.timer_active:
-            self.start_time_stamp = now
-            self.timer_active = True
-            self.get_logger().info("Timer gestartet!")
-
-        elif self.state == 'STOPPED' and self.timer_active:
+        if self.state == 'PARKING' and self.parking_phase == 'STOP_AFTER_OBST_RUN' and self.timer_active:
             self.timer_active = False
             self.get_logger().info(f"Timer gestoppt! Endzeit: {self.elapsed_time:.2f}s")
 
@@ -3052,7 +3050,11 @@ class Obstacle_Run(Node):
                 if front_dist < 1.60:
                     self.get_logger().info(f"Warte auf Ecke... (Frontwand ist noch {front_dist:.2f}m entfernt)")
         
-        self.lane_ratio = 0.25
+        if self.park_direction == 'PARKING_LEFT' and self.parking_left_with_obstacle:
+            self.lane_ratio = 0.35
+        else:
+            self.lane_ratio = 0.25
+
         steering_cmd = self.evaluate_steering_straight(innenbande_hnf, aussenbande_hnf)
         
         cmd.linear.x = self.parking_speed
@@ -3063,6 +3065,8 @@ class Obstacle_Run(Node):
     def handle_turn_preparation(self, point_data):
         if self.park_direction == 'PARKING_RIGHT_NORMAL':
             self.lane_ratio = 0.20
+        elif self.park_direction == 'PARKING_LEFT' and self.parking_left_with_obstacle:
+            self.lane_ratio = 0.35
         else:
             self.lane_ratio = 0.25
 
@@ -3500,6 +3504,10 @@ class Obstacle_Run(Node):
                 self.park_direction = 'PARKING_LEFT'
                 self.parking_phase = 'POSITIONING_FOR_STOP'
                 self.park_turn_richtung = 'rechts'
+                if self.obstacle_memory[0] is not None and (not self.obstacle_memory[0].is_localized or self.obstacle_memory[0].prediction or self.obstacle_memory[0].zone_id < 2) and self.obstacle_memory[0].color == 'red':
+                    self.parking_left_with_obstacle = True
+                else:
+                    self.parking_left_with_obstacle = False
 
             elif self.obstacle_memory[0] is not None and (not self.obstacle_memory[0].is_localized or self.obstacle_memory[0].prediction or self.obstacle_memory[0].zone_id < 2) and self.obstacle_memory[0].color == 'green':
                 self.park_direction = 'PARKING_RIGHT_OBST'
@@ -3625,7 +3633,7 @@ class Obstacle_Run(Node):
                 self.get_logger().info("")
                 self.get_logger().info("  ╔══════════════════════════════════════════════╗")
                 self.get_logger().info("  ║              ✓  ZIEL ERREICHT                ║")
-                self.get_logger().info(f"  ║   {self.turn_count:>3} Kurven sauber gemeistert.            ║")
+                self.get_logger().info(f"  ║   {self.turn_count:>3} Kurven sauber gemeistert.              ║")
                 self.get_logger().info("  ║   Roboter wird angehalten.                   ║")
                 self.get_logger().info("  ╚══════════════════════════════════════════════╝")
                 self.get_logger().info(f"  Erkannte Hindernisse: {self.obstacle_memory}")
