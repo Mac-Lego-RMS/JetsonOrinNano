@@ -166,7 +166,7 @@ class WallFollower(Node):
         self.prev_error = 0.0
         self.integral_error = 0.0
 
-        self.strategy = 2
+        self.strategy = 1
 
         self.steering_ctrl = SteeringController(logger=self.get_logger())
         self.lookahead_dist_turn = 0.20
@@ -1862,9 +1862,7 @@ class WallFollower(Node):
                     self.exit_lane_width_n += 1
                     self.exit_lane_width_avg = self.exit_lane_width_sum / self.exit_lane_width_n
                     self.get_logger().warn(f"current_exit_lane_width: {current_exit_lane_width} m")
-            # Konsistent zum Geradeaus-Fahren: Ziel sitzt bei lane_ratio (von der Innenbande aus),
-            # nicht bei (1 - lane_ratio). Verhindert das "in die Mitte ziehen" nach der Kurve.
-            target_line_to_wall = abs(self.exit_lane_width_avg * self.lane_ratio)
+            target_line_to_wall = abs(self.exit_lane_width_avg * (1.0 - self.lane_ratio))
             self.get_logger().warn(f"Exit_lane_width_AVG: {self.exit_lane_width_avg} m (target_line_to_wall: {target_line_to_wall:.3f} m)")
             last_target_wall_dist = target_line_to_wall
 
