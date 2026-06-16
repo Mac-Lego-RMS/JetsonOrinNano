@@ -1247,8 +1247,9 @@ class Obstacle_Run(Node):
                     y_max = float(y2)
 
                     yolo_boxes.append({
-                        'y_max': y_max, 
+                        'y_max': y_max,
                         'angle_rad': cam_angle_rad,
+                        'angle_offset_deg': angle_offset_deg,
                         'class_name': class_name,
                         'class_id': class_id
                     })
@@ -1273,15 +1274,24 @@ class Obstacle_Run(Node):
                 
                 # Kamera-Distanz
                 camera_dist = self.analyzer.get_distance_from_bbox(box_data['y_max'])
-                
-                TOLERANZ = 0.40 
-                
-                if abs(camera_dist - lidar_dist) > TOLERANZ:
+
+                # Winkelabhaengige Toleranz: Die Kamera-Distanz wird zum Bildrand hin
+                # zunehmend ungenau (120deg-Weitwinkel-Verzeichnung, das y_max->Distanz-Polynom
+                # gilt nur mittig auf der optischen Achse). Deshalb weiten wir den erlaubten
+                # Abstand proportional zum Off-Axis-Winkel auf. Mittig bleibt alles wie bisher.
+                off_axis_deg = abs(box_data['angle_offset_deg'])
+                BASE_TOLERANZ = 0.40
+                TOL_GAIN_PER_DEG = 0.01
+                MAX_TOLERANZ = 1.00
+                toleranz = min(MAX_TOLERANZ, BASE_TOLERANZ + TOL_GAIN_PER_DEG * off_axis_deg)
+
+                if abs(camera_dist - lidar_dist) > toleranz:
                     self.get_logger().warn(
                         f"Geister-Filter: {box_data['class_name']} abgelehnt! "
-                        f"Kamera: {camera_dist:.2f}m, LiDAR: {lidar_dist:.2f}m."
+                        f"Kamera: {camera_dist:.2f}m, LiDAR: {lidar_dist:.2f}m "
+                        f"(Off-Axis: {off_axis_deg:.0f}°, Toleranz: {toleranz:.2f}m)."
                     )
-                    continue 
+                    continue
 
                 # Marker senden & Objekt speichern
                 self.publish_marker(obj_x, obj_y, box_data['class_name'], box_data['class_id'])
