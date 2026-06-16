@@ -1330,6 +1330,20 @@ class WallFollower(Node):
 
         return intersection_x_m, intersection_y_m, turn_angle_deg
 
+    def update_ideal_radius_from_lane_width(self):
+        """
+        Passt self.IDEAL_RADIUS_M dynamisch an die kommende Spurbreite an.
+        Lineare Interpolation: 0.6m Spurbreite -> 0.30m Radius, 1.0m Spurbreite -> 0.45m Radius.
+        Die Spurbreite wird auf [0.6, 1.0] geclippt, damit Messfehler den Radius nicht verfälschen.
+        """
+        LANE_MIN, LANE_MAX = 0.60, 1.00
+        RADIUS_MIN, RADIUS_MAX = 0.30, 0.45
+
+        clipped_width = max(LANE_MIN, min(self.exit_lane_width_avg, LANE_MAX))
+        ratio = (clipped_width - LANE_MIN) / (LANE_MAX - LANE_MIN)
+        self.IDEAL_RADIUS_M = RADIUS_MIN + ratio * (RADIUS_MAX - RADIUS_MIN)
+        return self.IDEAL_RADIUS_M
+
     def calculate_curve_geometry(self, intersection_y_m, turn_angle_deg, max_allowed_radius_m):
         """
         Berechnet den optimalen Kurvenradius und die Distanz zum Einlenkpunkt auf der y-Achse.
@@ -1865,6 +1879,11 @@ class WallFollower(Node):
             target_line_to_wall = abs(self.exit_lane_width_avg * (1.0 - self.lane_ratio))
             self.get_logger().warn(f"Exit_lane_ratio_AVG: {self.exit_lane_width_avg} m")
             last_target_wall_dist = target_line_to_wall
+
+            # IDEAL_RADIUS_M dynamisch an die kommende Spurbreite anpassen,
+            # bevor die Kurvengeometrie (via test_calculate_curve_geometry) darauf zugreift.
+            self.update_ideal_radius_from_lane_width()
+            self.get_logger().warn(f"Dynamischer IDEAL_RADIUS_M: {self.IDEAL_RADIUS_M:.3f} m")
 
             front_wall_params, side_wall_params = self.extract_wall_lines(validated_clusters)
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, last_target_wall_dist)
