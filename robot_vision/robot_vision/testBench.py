@@ -3249,14 +3249,27 @@ class Obstacle_Run(Node):
             self.parking_pid_steering(point_data)
 
     def execute_stop(self):
+            # Roboter anhalten (in jedem Zyklus, solange wir im STOPPED-State sind)
             cmd = Twist()
             cmd.linear.x = 0.0
             cmd.angular.z = 0.0
             self.pub_cmd_vel.publish(cmd)
-            self.get_logger().warn(f">>> ZIEL ERREICHT: {self.turn_count} Kurven geschafft! Stoppe den Roboter. <<<")
-            self.get_logger().warn(f">>> Erkannte Obst {self.obstacle_memory}")
-            self.destroy_node()
-            rclpy.shutdown()
+
+            # Abschluss-Banner nur einmal ausgeben, danach sauber herunterfahren
+            if not getattr(self, '_goal_reached_logged', False):
+                self._goal_reached_logged = True
+                self.get_logger().info("")
+                self.get_logger().info("  ╔══════════════════════════════════════════════╗")
+                self.get_logger().info("  ║              ✓  ZIEL ERREICHT                ║")
+                self.get_logger().info(f"  ║   {self.turn_count:>3} Kurven sauber gemeistert.            ║")
+                self.get_logger().info("  ║   Roboter wird angehalten.                   ║")
+                self.get_logger().info("  ╚══════════════════════════════════════════════╝")
+                self.get_logger().info(f"  Erkannte Hindernisse: {self.obstacle_memory}")
+                self.get_logger().info("")
+
+                # Shutdown nur einmal anstoßen; main() raeumt den Node auf.
+                if rclpy.ok():
+                    rclpy.shutdown()
             return
 
     def main_logic(self, point_data):
@@ -3303,8 +3316,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Node-Cleanup; rclpy.shutdown() evtl. schon in execute_stop() erfolgt
+        if node.context.ok():
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

@@ -894,8 +894,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Node-Cleanup gegen doppelten Shutdown absichern
+        if node.context.ok():
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
