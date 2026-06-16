@@ -2314,7 +2314,15 @@ class Obstacle_Run(Node):
                 detected_obstacles = list(filter(lambda x: x[1] > min_distance_to_obstacle, detected_obstacles))
                 
                 if requested_turn_count == self.turn_count:
-                    detected_obstacles = list(filter(lambda x: abs(x[0]) <= 0.45, detected_obstacles))
+                    # Yaw-kompensierte Lateral-Ablage: Der rohe obj_x wird verfälscht,
+                    # wenn der Roboter schräg zur Spur steht. Wir rechnen die Schräglage
+                    # (current_yaw - start_straight_yaw) raus und prüfen die Ablage
+                    # relativ zur Spur-Richtung.
+                    yaw_drift = math.radians(self.current_yaw - self.start_straight_yaw)
+                    def lane_lateral(x, y):
+                        rng = math.hypot(x, y)
+                        return rng * math.sin(math.atan2(x, y) - yaw_drift)
+                    detected_obstacles = list(filter(lambda x: abs(lane_lateral(x[0], x[1])) <= 0.45, detected_obstacles))
                 else:
                     prediction = True
                     if self.fahrtrichtung == 'links':
