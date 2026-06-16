@@ -166,7 +166,7 @@ class WallFollower(Node):
         self.prev_error = 0.0
         self.integral_error = 0.0
 
-        self.strategy = 1
+        self.strategy = 2
 
         self.steering_ctrl = SteeringController(logger=self.get_logger())
         self.lookahead_dist_turn = 0.20
@@ -229,9 +229,9 @@ class WallFollower(Node):
             case 1:
                 self.lane_ratio = 0.35
 
-                self.kp = 2.15
+                self.kp = 1.8
                 self.ki = 0.0
-                self.kd = 0.5
+                self.kd = 1.2
                 
                 self.base_target_speed = 900.0
                 self.turn_target_speed = 700.0
@@ -246,18 +246,18 @@ class WallFollower(Node):
                 self.brake_end_dist = 0.85
 
             case 2:
-                self.lane_ratio = 0.35
+                self.lane_ratio = 0.3
 
-                self.kp = 2.15
+                self.kp = 1.5
                 self.ki = 0.0
-                self.kd = 0.5
+                self.kd = 1.2
                 
-                self.base_target_speed = 900.0
-                self.turn_target_speed = 700.0
+                self.base_target_speed = 1023.0
+                self.turn_target_speed = 950.0
 
                 self.IDEAL_RADIUS_M = 0.30
 
-                self.turn_puffer = 0.10
+                self.turn_puffer = 0.20
 
                 self.accel_step = 50.0
                 self.decel_step = 40.0
