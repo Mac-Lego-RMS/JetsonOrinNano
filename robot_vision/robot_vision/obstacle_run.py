@@ -159,7 +159,7 @@ class Obstacle_Run(Node):
         self.right_wall = None
         
         self.standard_lane_ratio_approach = 0.60
-        self.standard_lane_ratio_exit = 0.45
+        self.standard_lane_ratio_exit = 0.50
         self.lane_ratio = self.standard_lane_ratio_approach       # Verhältnis des Bandenabstands innen zu außen
         self.lane_ratio_approach = self.standard_lane_ratio_approach
         self.lane_ratio_exit = self.standard_lane_ratio_exit
@@ -220,9 +220,9 @@ class Obstacle_Run(Node):
         self.SPEED_STRAIGHT_SLOW = 350.0
         self.SPEED_STRAIGHT_MED = 500.0
         self.SPEED_STRAIGHT_FAST = 700.0
-        self.SPEED_TURN_SLOW = 280.0
-        self.SPEED_TURN_MED = 350.0
-        self.SPEED_TURN_FAST = 500.0
+        self.SPEED_TURN_SLOW = 250.0
+        self.SPEED_TURN_MED = 280.0
+        self.SPEED_TURN_FAST = 450.0
         self.SPEED_STRAIGHT_SLOW_saved = self.SPEED_STRAIGHT_SLOW
         
         self.is_obstacle_passed = False
@@ -383,7 +383,7 @@ class Obstacle_Run(Node):
                 self.SPEED_STRAIGHT_SLOW = 280.0
             else:
                 self.SPEED_STRAIGHT_SLOW = self.SPEED_STRAIGHT_SLOW_saved
-            self.IDEAL_RADIUS_M = 0.21
+            self.IDEAL_RADIUS_M = 0.20
         
         if self.turn_count % 4 == 0 and self.state == 'FOLLOW_LANE' or self.turn_count % 4 == 3 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.is_start_finish_straight = True
@@ -444,7 +444,10 @@ class Obstacle_Run(Node):
             if obst_next is not None and obst_next.is_localized:
                 if obst_next.zone_id < 2 and self.takes_inside_lane(obst_next.color):
                     must_drive_slow = True
-                    
+
+            elif obst_next is not None and not obst_next.is_localized:
+                must_drive_slow = True
+
             if obst_current is not None and obst_current.is_localized:
                 if obst_current.zone_id >= 20 and self.takes_inside_lane(obst_current.color):
                     must_drive_slow = True
@@ -453,6 +456,10 @@ class Obstacle_Run(Node):
                 self.turn_speed = self.SPEED_TURN_MED
             else:
                 self.turn_speed = self.SPEED_TURN_FAST
+
+        if self.turn_count == self.target_turns - 1 and self.state == 'FOLLOW_LANE':
+            if self.base_speed > self.SPEED_STRAIGHT_MED:
+                self.base_speed = self.SPEED_STRAIGHT_MED
 
         if (self.target_turns - self.turn_count) == 1 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.last_turn_for_parking = True
@@ -1465,13 +1472,13 @@ class Obstacle_Run(Node):
         min_angle = np.min(last_fw_array[:, 0])
         max_angle = np.max(last_fw_array[:, 0])
 
-        # Dynamisches Suchfenster
+        # Engeres Suchfenster, um Parkwand nicht zu erfassen
         if richtung == 'links':
-            roi_min = min_angle - 30.0
-            roi_max = max_angle + 5.0
+            roi_min = min_angle - 18.0
+            roi_max = max_angle + 8.0
         else:
-            roi_min = min_angle - 5.0
-            roi_max = max_angle + 30.0
+            roi_min = min_angle - 8.0
+            roi_max = max_angle + 18.0
 
         mask = (point_data[:, 0] >= roi_min) & (point_data[:, 0] <= roi_max)
         roi_points = point_data[mask]
@@ -1482,7 +1489,23 @@ class Obstacle_Run(Node):
             self.get_logger().warn("ACHTUNG: Getrackte Wand im ROI verloren!")
             return last_front_wall
 
-        return roi_clusters[0]
+        # Wandorientierung (Wandwinkel relativ zum Roboter) pro Iteration begrenzen
+        MAX_WALL_ANGLE_SHIFT_DEG = 15.0
+        candidate = roi_clusters[0]
+        last_wall_angle = self.get_cluster_angle(last_front_wall)
+        new_wall_angle = self.get_cluster_angle(candidate)
+
+        if last_wall_angle is not None and new_wall_angle is not None:
+            diff = abs(new_wall_angle - last_wall_angle) % 180.0
+            if diff > 90.0:
+                diff = 180.0 - diff
+            if diff > MAX_WALL_ANGLE_SHIFT_DEG:
+                self.get_logger().warn(
+                    f"FW-Tracker: Wandwinkeländerung zu groß ({diff:.1f}°). Behalte letzte Frontwand."
+                )
+                return last_front_wall
+
+        return candidate
 
     def get_closest_measure(self, point_data, target_angle):
         if len(point_data) == 0:
@@ -1519,7 +1542,7 @@ class Obstacle_Run(Node):
 
         for r in results:
             for box in r.boxes:
-                if float(box.conf[0]) > 0.75:
+                if float(box.conf[0]) > 0.85:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     
                     # Winkelberechnung
@@ -1613,7 +1636,7 @@ class Obstacle_Run(Node):
             c_start = cluster[0]   
             c_end = cluster[-1]    
             width = math.hypot(c_start[1] - c_end[1], c_start[2] - c_end[2])
-            if width > 0.35:
+            if width > 0.25:
                 continue
 
             angle_deg = self.middle_of_cluster(cluster)
@@ -2374,7 +2397,7 @@ class Obstacle_Run(Node):
     def set_lane_ratio_for_obstacle_cmd(self, obstacle_cmd, obstacle, front_wall_dist, is_turn_exit=False, apply_state=True):
         is_left = (self.fahrtrichtung == "links")
         if self.turn_count < 4:
-            max_shift = 0.012
+            max_shift = 0.007
         else:
             max_shift = 0.008
     
@@ -2391,12 +2414,12 @@ class Obstacle_Run(Node):
             else:
                 target_ratio = self.standard_lane_ratio_approach
 
-        # HINDERNIS-LOGIK
+        # PARK HINDERNIS-LOGIK
         if obstacle_cmd is not None and obstacle is not None:
             obst_is_green = obstacle.color == 'green'
             if self.last_turn_for_parking or self.parking_straight:
                 if (obst_is_green and is_left) or ((not obst_is_green) and (not is_left)):
-                    target_ratio = 0.25
+                    target_ratio = 0.22
                 else:
                     obst_is_relevant = False
                     if obstacle.is_localized:
@@ -2407,7 +2430,7 @@ class Obstacle_Run(Node):
                     if obst_is_relevant:
                         target_ratio = 0.65
                     else:
-                        target_ratio = 0.25
+                        target_ratio = 0.22
                 return target_ratio
             
 
@@ -2427,9 +2450,9 @@ class Obstacle_Run(Node):
                             target_ratio = 0.60 if is_left else 0.25
                     else:
                         if obstacle_cmd == "green":
-                            target_ratio = 0.25 if is_left else 0.75
+                            target_ratio = 0.25 if is_left else 0.80
                         else:
-                            target_ratio = 0.75 if is_left else 0.25
+                            target_ratio = 0.80 if is_left else 0.25
             else:
                 obst_zone_id = obstacle.zone_id
                 obst_passed = False
