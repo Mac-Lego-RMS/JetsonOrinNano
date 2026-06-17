@@ -1542,6 +1542,11 @@ class Obstacle_Run(Node):
                     cam_angle_deg = 180.0 - angle_offset_deg + self.angle_calibration
                     cam_angle_rad = math.radians(cam_angle_deg)
                     
+                    self.get_logger().warn(
+                        f"DBG-ANG cx={center_x:.0f} img_w_used={IMAGE_WIDTH:.0f} orig_shape={r.orig_shape} "
+                        f"x1={x1:.0f} x2={x2:.0f} -> cam_angle={cam_angle_deg:.1f}°"
+                    )
+
                     class_id = int(box.cls[0])
                     class_name = class_mapping.get(class_id, f"unknown_{class_id}")
 
@@ -1615,8 +1620,17 @@ class Obstacle_Run(Node):
         wall_ids = [id(w) for w in walls if w is not None]
         clusters_without_walls = [c for c in clusters if id(c) not in wall_ids and c is not None]
         
-        if not clusters_without_walls: 
+        if not clusters_without_walls:
             return None
+
+        _angs = [f"{self.middle_of_cluster(c):.0f}°(n={len(c)})" for c in clusters_without_walls if self.middle_of_cluster(c) is not None]
+        _walls = []
+        for _n, _w in zip(['front', 'left', 'right'], [self.front_wall, self.left_wall, self.right_wall]):
+            _wm = self.middle_of_cluster(_w) if _w is not None else None
+            _walls.append(f"{_n}={_wm:.0f}°(n={len(_w)})" if _wm is not None else f"{_n}=None")
+        self.get_logger().warn(
+            f"DBG-LID Kamera={math.degrees(camera_angle_rad):.1f}° | Cluster: {_angs} | Walls(excl): {_walls}"
+        )
             
         best_cluster = None
         best_closest_point = None
@@ -2225,7 +2239,7 @@ class Obstacle_Run(Node):
                 (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
                 (-225.0, 1.4, 0.4),  # Schritt 6: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-                (195.0, -0.8, 2.3),   # Schritt 8: Vorwärts
+                (195.0, -0.8, 2.0),   # Schritt 8: Vorwärts
                 (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
             ]
 
@@ -2283,7 +2297,7 @@ class Obstacle_Run(Node):
         cmd.angular.z = 0.8 * (-1.0 if self.fahrtrichtung == "links" else 1.0)
         self.pub_cmd_vel.publish(cmd)
         
-        duration = 1.6 if self.fahrtrichtung == "links" else 1.6
+        duration = 1.2 if self.fahrtrichtung == "links" else 1.6
 
         self.get_logger().info("Letzten Ausparkschritt erreicht")
 
