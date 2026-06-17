@@ -131,6 +131,9 @@ class Obstacle_Run(Node):
         self.last_turn_aborted = False
         self.panic_counter_started = False
         self.panic_counter = 0
+        self.panic_phase = None
+        self.panic_timer = None
+        self.panic_straight_yaw_est = None
         
         
         self.rviz_frame = 'ldlidar_link'
@@ -215,6 +218,8 @@ class Obstacle_Run(Node):
         self.turn_speed = 350.0
         self.parking_speed = 250.0
         self.panic_speed = 250.0
+        self.panic_stop_duration = 1.0      # s, Motoren-Stopp nach Panic-Exit
+        self.panic_reverse_duration = 2.0   # s, Rückwärtsfahrt zur Distanzgewinnung
 
         # Globale Geschwindigkeiten
         self.SPEED_STRAIGHT_SLOW = 350.0
@@ -2947,58 +2952,181 @@ class Obstacle_Run(Node):
             turn_completed = self.test_check_turn_completion_fused(self.saved_intersection_angle, front_wall_params)
             
             # Panic-Exit
-            panic_exit = False
-            
             yaw_diff = (self.current_yaw - self.start_turn_yaw + 180) % 360 - 180
             progressed_angle = abs(yaw_diff)
-            
+
             if 80.0 > progressed_angle > 55.0:
-                
+
                 # Nur Hindernisse, die unmittelbar auf der neuen Gerade stehen (0.0 bis 0.7m)
                 last_exit_ratio = self.lane_ratio_exit
                 exit_obstacle_cmd, exit_obstacle = self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.0, 0.7)
                 self.lane_ratio_exit = self.set_lane_ratio_for_obstacle_cmd(exit_obstacle_cmd, exit_obstacle, 2.0, is_turn_exit=True, apply_state=False)
-                
+
                 if exit_obstacle is not None and exit_obstacle_cmd != "CLEAR":
                     if abs(last_exit_ratio - self.lane_ratio_exit) > 0.15:
                         self.get_logger().warn(f"PANIC EXIT. Kritisches Hindernis ({exit_obstacle_cmd}) erzwingt Abbruch bei {progressed_angle:.1f}°!")
-                        steering_cmd = 0.6 if (last_exit_ratio - self.lane_ratio_exit) < 0.0 else - 0.6
-                        cmd.linear.x = self.panic_speed
-                        cmd.angular.z = float(steering_cmd)
+                        # Motoren sofort stoppen und Recovery-Sequenz starten
+                        cmd.linear.x = 0.0
+                        cmd.angular.z = 0.0
                         self.pub_cmd_vel.publish(cmd)
-                        panic_exit = True
-                        self.last_turn_aborted = True
-                        self.panic_counter_started = False
+                        self.state = 'PANIC_RECOVERY'
+                        self.panic_phase = 'STOP'
+                        self.panic_timer = None
+                        return
 
-            # Kurve beenden
-            if turn_completed or panic_exit:
-                if panic_exit:
-                    self.get_logger().info("Notabbruch! Übergebe an Lane-Follower zur Kollisionsvermeidung.")
-                else:
-                    self.get_logger().info("Kurve regulär beendet. Übergebe an Lane-Follower.")
-                
+            # Kurve regulär beenden
+            if turn_completed:
+                self.get_logger().info("Kurve regulär beendet. Übergebe an Lane-Follower.")
+
                 cmd.linear.x = self.base_speed
                 cmd.angular.z = 0.0
                 self.pub_cmd_vel.publish(cmd)
 
                 self.lane_ratio = self.lane_ratio_exit
-                    
+
                 self.turn_phase = 'APPROACH' # Reset für die nächste Kurve
-                
+
                 self.turn_count += 1
 
                 if self.turn_count == self.target_turns:
                     self.state = 'PARKING'
                 else:
                     self.state = 'FOLLOW_LANE'
-                
+
                 # PID - Werte für nächste Gerade nullen
                 self.prev_error = 0.0
                 self.integral_error = 0.0
-                
+
                 self.start_straight_yaw = self.current_yaw
                 self.is_obstacle_passed = False
 
+
+    def estimate_new_straight_yaw(self, point_data):
+        """
+        Sucht zwei annähernd parallele Wände mit unterschiedlichem x-Vorzeichen
+        (linke + rechte Bande der NEUEN Gerade) und leitet daraus den Soll-Yaw ab.
+
+        Geometrie: validate_clusters_straight ordnet Seitenwände über
+        local_angle ≈ delta_yaw (= current_yaw - start_straight_yaw) zu.
+        Der gemessene Seitenwand-Winkel IST also das gewünschte delta_yaw
+        -> start_straight_yaw = current_yaw - wall_angle.
+
+        Gibt den Referenz-Yaw zurück oder None wenn keine zwei Banden gefunden.
+        """
+        clusters = self.get_all_clusters_sorted(point_data)
+        if not clusters:
+            return None
+
+        left = []   # mean_x < 0  (links)
+        right = []  # mean_x > 0  (rechts)
+        for c in clusters:
+            if len(c) < 15:
+                continue
+            angle = self.get_cluster_angle(c)
+            if angle is None:
+                continue
+            # Seitenwände liegen längs zur Fahrtrichtung -> |angle| klein
+            if abs(angle) > 45.0:
+                continue
+            mean_x = sum(p[1] for p in c) / len(c)
+            if abs(mean_x) > 1.0:
+                continue
+            if mean_x < 0:
+                left.append((angle, mean_x))
+            else:
+                right.append((angle, mean_x))
+
+        if not left or not right:
+            return None
+
+        # clusters sind nach physischer Länge sortiert -> [0] = längste Bande
+        left_angle = left[0][0]
+        right_angle = right[0][0]
+
+        # Parallelität prüfen
+        if abs(left_angle - right_angle) > 15.0:
+            self.get_logger().warn(
+                f"PANIC-RECOVERY: Banden nicht parallel (L={left_angle:.1f}°, R={right_angle:.1f}°)."
+            )
+            return None
+
+        wall_angle = (left_angle + right_angle) / 2.0
+        return self.current_yaw - wall_angle
+
+    def handle_panic_recovery(self, point_data):
+        cmd = Twist()
+        now = time.monotonic()
+
+        if self.panic_phase == 'STOP':
+            if self.panic_timer is None:
+                self.panic_timer = now + self.panic_stop_duration
+
+            cmd.linear.x = 0.0
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+
+            # Während des Stops kontinuierlich nach den Banden suchen, beste behalten
+            est = self.estimate_new_straight_yaw(point_data)
+            if est is not None:
+                self.panic_straight_yaw_est = est
+
+            if now >= self.panic_timer:
+                if self.panic_straight_yaw_est is not None:
+                    self.start_straight_yaw = self.panic_straight_yaw_est
+                    self.get_logger().warn(
+                        f"PANIC-RECOVERY: Neue Gerade aus Banden -> yaw_ref={self.start_straight_yaw:.1f}° (current={self.current_yaw:.1f}°)"
+                    )
+                else:
+                    # Fallback: geplanter Kurvenwinkel + tatsächliche Drehrichtung
+                    yaw_diff = (self.current_yaw - self.start_turn_yaw + 180) % 360 - 180
+                    turn_sign = 1.0 if yaw_diff >= 0 else -1.0
+                    target = abs(self.saved_intersection_angle) if self.saved_intersection_angle is not None else 90.0
+                    self.start_straight_yaw = self.start_turn_yaw + turn_sign * target
+                    self.get_logger().warn(
+                        f"PANIC-RECOVERY: Keine Banden gefunden -> Fallback Turn-Angle yaw_ref={self.start_straight_yaw:.1f}°"
+                    )
+
+                # Gyro-Shift in den validate_clusters_* wieder aktivieren
+                self.last_turn_aborted = False
+                # PID für neue Gerade nullen
+                self.prev_error = 0.0
+                self.integral_error = 0.0
+
+                self.panic_phase = 'REVERSE'
+                self.panic_timer = None
+                self.panic_straight_yaw_est = None
+            return
+
+        if self.panic_phase == 'REVERSE':
+            if self.panic_timer is None:
+                self.panic_timer = now + self.panic_reverse_duration
+
+            # Stumpf gerade rückwärts
+            cmd.linear.x = -abs(self.panic_speed)
+            cmd.angular.z = 0.0
+            self.pub_cmd_vel.publish(cmd)
+
+            if now >= self.panic_timer:
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0
+                self.pub_cmd_vel.publish(cmd)
+
+                self.lane_ratio = self.lane_ratio_exit
+                self.turn_phase = 'APPROACH'
+                self.turn_count += 1
+                self.is_obstacle_passed = False
+                self.panic_phase = None
+                self.panic_timer = None
+
+                if self.turn_count == self.target_turns:
+                    self.state = 'PARKING'
+                else:
+                    self.state = 'FOLLOW_LANE'
+
+                self.get_logger().warn(
+                    f"PANIC-RECOVERY beendet. State={self.state}, TurnCount={self.turn_count}"
+                )
+            return
 
     def update_timer(self):
         now = self.get_clock().now()
@@ -3692,7 +3820,10 @@ class Obstacle_Run(Node):
             
         elif self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.handle_turn_maneuver(point_data)
-            
+
+        elif self.state == 'PANIC_RECOVERY':
+            self.handle_panic_recovery(point_data)
+
         elif self.state == 'STOPPED':
             self.execute_stop()
 
