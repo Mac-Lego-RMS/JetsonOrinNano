@@ -131,6 +131,8 @@ class Obstacle_Run(Node):
         self.panic_phase = None
         self.panic_timer = None
         self.panic_straight_yaw_est = None
+        self.panic_increment_turn = False
+        self.panic_close_obstacle = False
         
         
         self.rviz_frame = 'ldlidar_link'
@@ -215,8 +217,9 @@ class Obstacle_Run(Node):
         self.turn_speed = 350.0
         self.parking_speed = 250.0
         self.panic_speed = 250.0
-        self.panic_stop_duration = 1.0      # s, Motoren-Stopp nach Panic-Exit
-        self.panic_reverse_duration = 1.0   # s, gyro-geregelte Rückwärtsfahrt zur Distanzgewinnung
+        self.panic_stop_duration = 1.0
+        self.panic_reverse_duration = 1.0
+        self.panic_obstacle_dist = 0.25
 
         # Globale Geschwindigkeiten
         self.SPEED_STRAIGHT_SLOW = 350.0
@@ -2319,9 +2322,6 @@ class Obstacle_Run(Node):
                 detected_obstacles = list(filter(lambda x: x[1] > min_distance_to_obstacle, detected_obstacles))
                 
                 if requested_turn_count == self.turn_count:
-                    # Yaw-kompensierte Lateral-Ablage: Der rohe obj_x wird verfälscht,
-                    # wenn der Roboter schräg zur Spur steht. Wir rechnen die Schräglage
-                    # (current_yaw - start_straight_yaw) raus und prüfen die Ablage
                     # relativ zur Spur-Richtung.
                     yaw_drift = math.radians(self.current_yaw - self.start_straight_yaw)
                     def lane_lateral(x, y):
@@ -2341,6 +2341,12 @@ class Obstacle_Run(Node):
                 if detected_obstacles:
                     closest_x, closest_y, closest_color = detected_obstacles[0]
                     closest_dist = math.hypot(closest_x, closest_y)
+
+                    if self.state == 'FOLLOW_LANE' and closest_dist < self.panic_obstacle_dist:
+                        self.panic_close_obstacle = True
+                        self.get_logger().error(
+                            f"!!! NAH-HINDERNIS {closest_dist:.2f}m < {self.panic_obstacle_dist:.2f}m -> PANIC"
+                        )
                     
                     if min_distance_to_obstacle < closest_dist < max_distance_to_obstacle:
                         new_obstacle = Obstacle(closest_color, None, prediction)
@@ -2748,6 +2754,12 @@ class Obstacle_Run(Node):
 
     def handle_lane_following(self, point_data):
         cmd = Twist()
+
+        if self.panic_close_obstacle:
+            self.get_logger().error("Nah-Hindernis -> starte Panic-Recovery (Gerade).")
+            self.trigger_panic_recovery(increment_turn=False)
+            return
+
         all_clusters = self.get_all_clusters_sorted(point_data)
 
         self.get_logger().info(f"Verfolge die Spur... Aktuelle Yaw: {self.current_yaw:.1f}°, Start-Yaw: {self.start_straight_yaw:.1f}°, Gedreht seit Start: {abs(self.current_yaw - self.start_straight_yaw):.1f}°")
@@ -2847,6 +2859,10 @@ class Obstacle_Run(Node):
 
     def handle_turn_maneuver(self, point_data):
         cmd = Twist()
+
+        # Nah-Hindernis-Panic gilt nur auf Geraden (FOLLOW_LANE). In der Kurve
+        # bleibt der ursprüngliche Panic (55°-80° in EXECUTE) allein zuständig.
+        self.panic_close_obstacle = False
         
         if self.turn_phase == 'APPROACH':
             self.front_wall = self.track_front_wall(point_data, self.front_wall)
@@ -2944,13 +2960,7 @@ class Obstacle_Run(Node):
                 if exit_obstacle is not None and exit_obstacle_cmd != "CLEAR":
                     if abs(last_exit_ratio - self.lane_ratio_exit) > 0.15:
                         self.get_logger().warn(f"PANIC EXIT. Kritisches Hindernis ({exit_obstacle_cmd}) erzwingt Abbruch bei {progressed_angle:.1f}°!")
-                        # Motoren sofort stoppen und Recovery-Sequenz starten
-                        cmd.linear.x = 0.0
-                        cmd.angular.z = 0.0
-                        self.pub_cmd_vel.publish(cmd)
-                        self.state = 'PANIC_RECOVERY'
-                        self.panic_phase = 'STOP'
-                        self.panic_timer = None
+                        self.trigger_panic_recovery(increment_turn=True)
                         return
 
             # Kurve regulär beenden
@@ -3032,6 +3042,22 @@ class Obstacle_Run(Node):
         wall_angle = (left_angle + right_angle) / 2.0
         return self.current_yaw - wall_angle
 
+    def trigger_panic_recovery(self, increment_turn):
+        """
+        Stoppt die Motoren sofort und startet die Panic-Recovery-Sequenz.
+        increment_turn=True  : Kurven-Abbruch -> turn_count wird nach Recovery erhöht.
+        increment_turn=False : Nah-Hindernis -> gleiche Gerade fortsetzen (kein Increment).
+        """
+        cmd = Twist()
+        cmd.linear.x = 0.0
+        cmd.angular.z = 0.0
+        self.pub_cmd_vel.publish(cmd)
+        self.state = 'PANIC_RECOVERY'
+        self.panic_phase = 'STOP'
+        self.panic_timer = None
+        self.panic_increment_turn = increment_turn
+        self.panic_close_obstacle = False
+
     def handle_panic_recovery(self, point_data):
         cmd = Twist()
         now = time.monotonic()
@@ -3055,14 +3081,19 @@ class Obstacle_Run(Node):
                     self.get_logger().warn(
                         f"PANIC-RECOVERY: Neue Gerade aus Banden -> yaw_ref={self.start_straight_yaw:.1f}° (current={self.current_yaw:.1f}°)"
                     )
-                else:
-                    # Fallback: geplanter Kurvenwinkel + tatsächliche Drehrichtung
+                elif self.panic_increment_turn:
+                    # Kurven-Abbruch ohne Banden: geplanter Kurvenwinkel + Drehrichtung
                     yaw_diff = (self.current_yaw - self.start_turn_yaw + 180) % 360 - 180
                     turn_sign = 1.0 if yaw_diff >= 0 else -1.0
                     target = abs(self.saved_intersection_angle) if self.saved_intersection_angle is not None else 90.0
                     self.start_straight_yaw = self.start_turn_yaw + turn_sign * target
                     self.get_logger().warn(
                         f"PANIC-RECOVERY: Keine Banden gefunden -> Fallback Turn-Angle yaw_ref={self.start_straight_yaw:.1f}°"
+                    )
+                else:
+                    # Nah-Hindernis auf Gerade: bereits ausgerichtetes start_straight_yaw behalten
+                    self.get_logger().warn(
+                        f"PANIC-RECOVERY: Keine Banden -> behalte start_straight_yaw={self.start_straight_yaw:.1f}°"
                     )
 
                 # PID für neue Gerade nullen
@@ -3105,7 +3136,8 @@ class Obstacle_Run(Node):
 
                 self.lane_ratio = self.lane_ratio_exit
                 self.turn_phase = 'APPROACH'
-                self.turn_count += 1
+                if self.panic_increment_turn:
+                    self.turn_count += 1
                 self.is_obstacle_passed = False
                 self.panic_phase = None
                 self.panic_timer = None
