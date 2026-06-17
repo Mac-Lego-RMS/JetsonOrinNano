@@ -178,7 +178,7 @@ class Obstacle_Run(Node):
 
         # PID-REGLER Parameter
         self.kp = 2.0
-        self.ki = 0.07
+        self.ki = 0.0
         self.kd = 0.05
 
         self.kp_gyro = 0.07
@@ -218,7 +218,7 @@ class Obstacle_Run(Node):
         self.parking_speed = 250.0
         self.panic_speed = 250.0
         self.panic_stop_duration = 1.0
-        self.panic_reverse_duration = 1.0
+        self.panic_reverse_duration = 1.5
         self.panic_obstacle_dist = 0.25
 
         # Globale Geschwindigkeiten
@@ -483,22 +483,22 @@ class Obstacle_Run(Node):
 
         if self.base_speed == self.SPEED_STRAIGHT_SLOW:
             self.kp = 2.5
-            self.ki = 0.07
+            self.ki = 0.0
             self.kd = 0.08
 
         elif self.base_speed == self.SPEED_STRAIGHT_MED:
             self.kp = 2.5
-            self.ki = 0.07
+            self.ki = 0.0
             self.kd = 0.08
 
         elif self.base_speed == self.SPEED_STRAIGHT_FAST:
             self.kp = 2.3
-            self.ki = 0.07
+            self.ki = 0.0
             self.kd = 0.10
             
         elif self.base_speed == self.parking_speed:
             self.kp = 2.5
-            self.ki = 0.07
+            self.ki = 0.0
             self.kd = 0.08
 
         if self.turn_speed == self.SPEED_TURN_SLOW:
@@ -3341,7 +3341,7 @@ class Obstacle_Run(Node):
         else:
             self.lane_ratio = 1.11
 
-        self.kp = 2.2
+        self.kp = 2.6
         self.ki = 0.0
         self.kd = 0.10
         cmd = Twist()
