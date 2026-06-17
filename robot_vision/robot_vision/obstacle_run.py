@@ -378,15 +378,12 @@ class Obstacle_Run(Node):
     def update_strategy_params(self):
         if self.turn_count > 4:
             self.IDEAL_RADIUS_M = 0.28
-            self.standard_lane_ratio_approach = 0.60
         else:
             if self.turn_count == 0 and self.fahrtrichtung == 'rechts':
                 self.SPEED_STRAIGHT_SLOW = 280.0
             else:
                 self.SPEED_STRAIGHT_SLOW = self.SPEED_STRAIGHT_SLOW_saved
-
             self.IDEAL_RADIUS_M = 0.21
-            self.standard_lane_ratio_approach = 0.70
         
         if self.turn_count % 4 == 0 and self.state == 'FOLLOW_LANE' or self.turn_count % 4 == 3 and self.state in ['TURN_LINKS', 'TURN_RECHTS']:
             self.is_start_finish_straight = True
@@ -426,8 +423,7 @@ class Obstacle_Run(Node):
             elif obst_current is not None and obst_current.is_localized:
                 # Hindernis erkannt
                 if self.is_narrow_lane(obst_current.color, obst_current.zone_id):
-                    if self.is_start_finish_straight:
-                        self.base_speed = self.SPEED_STRAIGHT_MED
+                    self.base_speed = self.SPEED_STRAIGHT_MED
                 else:
                     if self.is_start_finish_straight:
                         self.base_speed = self.SPEED_STRAIGHT_MED
@@ -477,13 +473,14 @@ class Obstacle_Run(Node):
             if not self.panic_counter_started:
                 self.panic_counter = 0
                 self.panic_counter_started = True
-            if self.panic_counter < 12:
+            if self.panic_counter < 12 and self.state == 'FOLLOW_LANE':
                 self.panic_counter += 1
                 self.base_speed = self.panic_speed
                 self.turn_speed = self.panic_speed
                 self.kp = 2.5
                 self.ki = 0.07
                 self.kd = 0.08
+                return
 
         if self.base_speed == self.SPEED_STRAIGHT_SLOW:
             self.kp = 2.5
@@ -506,16 +503,16 @@ class Obstacle_Run(Node):
             self.kd = 0.08
 
         if self.turn_speed == self.SPEED_TURN_SLOW:
-            self.is_obstacle_passed = 10.0
+            self.turn_exit_toleranz = 10.0
 
         elif self.turn_speed == self.SPEED_TURN_MED:
-            self.is_obstacle_passed = 13.0
+            self.turn_exit_toleranz = 13.0
 
         elif self.turn_speed == self.SPEED_TURN_FAST:
-            self.is_obstacle_passed = 16.0
+            self.turn_exit_toleranz = 16.0
 
         elif self.turn_speed == self.parking_speed:
-            self.is_obstacle_passed = 8.0
+            self.turn_exit_toleranz = 8.0
 
         self.get_logger().warn(f"BaseSpeed: {self.base_speed} , TurnSpeed: {self.turn_speed}")
 
