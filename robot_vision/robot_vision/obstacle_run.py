@@ -128,9 +128,6 @@ class Obstacle_Run(Node):
         self.last_raw_yaw = None
         self.start_turn_yaw = None
         self.start_straight_yaw = 0.0
-        self.last_turn_aborted = False
-        self.panic_counter_started = False
-        self.panic_counter = 0
         self.panic_phase = None
         self.panic_timer = None
         self.panic_straight_yaw_est = None
@@ -219,7 +216,7 @@ class Obstacle_Run(Node):
         self.parking_speed = 250.0
         self.panic_speed = 250.0
         self.panic_stop_duration = 1.0      # s, Motoren-Stopp nach Panic-Exit
-        self.panic_reverse_duration = 2.0   # s, Rückwärtsfahrt zur Distanzgewinnung
+        self.panic_reverse_duration = 1.0   # s, gyro-geregelte Rückwärtsfahrt zur Distanzgewinnung
 
         # Globale Geschwindigkeiten
         self.SPEED_STRAIGHT_SLOW = 350.0
@@ -481,19 +478,6 @@ class Obstacle_Run(Node):
         else:
             self.parking_straight = False
 
-        if self.last_turn_aborted:
-            if not self.panic_counter_started:
-                self.panic_counter = 0
-                self.panic_counter_started = True
-            if self.panic_counter < 12 and self.state == 'FOLLOW_LANE':
-                self.panic_counter += 1
-                self.base_speed = self.panic_speed
-                self.turn_speed = self.panic_speed
-                self.kp = 2.5
-                self.ki = 0.07
-                self.kd = 0.08
-                return
-
         if self.base_speed == self.SPEED_STRAIGHT_SLOW:
             self.kp = 2.5
             self.ki = 0.07
@@ -665,13 +649,11 @@ class Obstacle_Run(Node):
         if not clusters:
             return u_profile
 
-        delta_yaw = 0.0
-        if not self.last_turn_aborted:
-            delta_yaw = self.current_yaw - self.start_straight_yaw
-            
-            # Normierung auf -180 bis 180
-            while delta_yaw > 180: delta_yaw -= 360
-            while delta_yaw < -180: delta_yaw += 360
+        delta_yaw = self.current_yaw - self.start_straight_yaw
+
+        # Normierung auf -180 bis 180
+        while delta_yaw > 180: delta_yaw -= 360
+        while delta_yaw < -180: delta_yaw += 360
 
         right_candidates = []
         left_candidates = []
@@ -807,13 +789,11 @@ class Obstacle_Run(Node):
         if not clusters:
             return u_profile
 
-        delta_yaw = 0.0
-        if not self.last_turn_aborted:
-            delta_yaw = self.current_yaw - self.start_straight_yaw
-            
-            # Normierung auf -180 bis 180
-            while delta_yaw > 180: delta_yaw -= 360
-            while delta_yaw < -180: delta_yaw += 360
+        delta_yaw = self.current_yaw - self.start_straight_yaw
+
+        # Normierung auf -180 bis 180
+        while delta_yaw > 180: delta_yaw -= 360
+        while delta_yaw < -180: delta_yaw += 360
 
         right_candidates = []
         left_candidates = []
@@ -2853,7 +2833,6 @@ class Obstacle_Run(Node):
                 self.state = f"TURN_{self.fahrtrichtung.upper()}"
                 self.get_logger().warn(f">>> {self.state} EINGELEITET<<<")
                 self.get_logger().info(f"Abstand zur Frontwall: {front_dist:.2f}m")
-                self.last_turn_aborted = False
                 return
             else:
                 if front_dist < 1.40:
@@ -3086,8 +3065,6 @@ class Obstacle_Run(Node):
                         f"PANIC-RECOVERY: Keine Banden gefunden -> Fallback Turn-Angle yaw_ref={self.start_straight_yaw:.1f}°"
                     )
 
-                # Gyro-Shift in den validate_clusters_* wieder aktivieren
-                self.last_turn_aborted = False
                 # PID für neue Gerade nullen
                 self.prev_error = 0.0
                 self.integral_error = 0.0
@@ -3100,11 +3077,26 @@ class Obstacle_Run(Node):
         if self.panic_phase == 'REVERSE':
             if self.panic_timer is None:
                 self.panic_timer = now + self.panic_reverse_duration
+                self.integral_gyro_error = 0.0
+                self.prev_gyro_error = 0.0
 
-            # Stumpf gerade rückwärts
+            # Gyro-geregelt rückwärts auf start_straight_yaw ziehen.
+            # Rückwärtsfahrt invertiert die Lenkwirkung -> Vorzeichen drehen.
+            yaw_error = (self.start_straight_yaw - self.current_yaw + 180) % 360 - 180
+            steering_cmd = -self.evaluate_steering_gyro()
+
             cmd.linear.x = -abs(self.panic_speed)
-            cmd.angular.z = 0.0
+            cmd.angular.z = float(steering_cmd)
             self.pub_cmd_vel.publish(cmd)
+
+            # DEBUG: berechnetes Straight-Yaw gegen Live-Bandenmessung prüfen.
+            # live_banden_yaw sollte ~= ziel sein, wenn die Berechnung stimmt.
+            live_est = self.estimate_new_straight_yaw(point_data)
+            live_str = f"{live_est:.1f}" if live_est is not None else "n/a"
+            self.get_logger().warn(
+                f"PANIC-REVERSE: ziel={self.start_straight_yaw:.1f}° ist={self.current_yaw:.1f}° "
+                f"yaw_err={yaw_error:.1f}° steer={steering_cmd:.2f} | live_banden_yaw={live_str}"
+            )
 
             if now >= self.panic_timer:
                 cmd.linear.x = 0.0
@@ -3463,12 +3455,10 @@ class Obstacle_Run(Node):
         if not clusters:
             return u_profile
 
-        delta_yaw = 0.0
-        if not self.last_turn_aborted:
-            delta_yaw = self.current_yaw - self.start_straight_yaw
-            
-            while delta_yaw > 180: delta_yaw -= 360
-            while delta_yaw < -180: delta_yaw += 360
+        delta_yaw = self.current_yaw - self.start_straight_yaw
+
+        while delta_yaw > 180: delta_yaw -= 360
+        while delta_yaw < -180: delta_yaw += 360
 
         right_candidates = []
         left_candidates = []
