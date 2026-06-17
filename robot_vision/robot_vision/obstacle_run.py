@@ -409,7 +409,7 @@ class Obstacle_Run(Node):
         obst_current = self.obstacle_memory[current_straight]
         obst_next = self.obstacle_memory[next_straight]
 
-        if self.turn_count < 5:
+        if self.turn_count < 4 or (self.turn_count == 4 and self.state == 'FOLLOW_LANE'):
             # Straights
             if obst_current is not None and obst_next is not None and self.is_obstacle_passed:
                 self.base_speed = self.SPEED_STRAIGHT_MED
@@ -2560,6 +2560,10 @@ class Obstacle_Run(Node):
                         return current_obstacle
 
                 if zone_id is not None:
+                    if current_obstacle is not None and current_obstacle.prediction and closest_color != current_obstacle.color:
+                        self.get_logger().error(f"!!! FARB-MISMATCH: Vorhersage {current_obstacle.color.upper()} != erkannt {closest_color.upper()} -> PANIC")
+                        self.panic_close_obstacle = True
+
                     # Speichert Zone im Objekt
                     current_obstacle = Obstacle(closest_color, zone_id, False)
                     # Im Gedächtnis des Roboters speichern
@@ -3043,11 +3047,6 @@ class Obstacle_Run(Node):
         return self.current_yaw - wall_angle
 
     def trigger_panic_recovery(self, increment_turn):
-        """
-        Stoppt die Motoren sofort und startet die Panic-Recovery-Sequenz.
-        increment_turn=True  : Kurven-Abbruch -> turn_count wird nach Recovery erhöht.
-        increment_turn=False : Nah-Hindernis -> gleiche Gerade fortsetzen (kein Increment).
-        """
         cmd = Twist()
         cmd.linear.x = 0.0
         cmd.angular.z = 0.0
@@ -3279,7 +3278,7 @@ class Obstacle_Run(Node):
         if self.park_direction == 'PARKING_LEFT':
             target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.10)
         else:
-            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.84)
+            target_line_params, max_allowed_radius = self.test_calculate_target_line(validated_clusters, -0.87)
         intersection_x, intersection_y, intersection_angle = self.test_get_intersection_point(target_line_params)
         curve_radius_m, entry_distance_m = self.test_calculate_curve_geometry(intersection_y, intersection_angle, max_allowed_radius)
         
@@ -3337,7 +3336,7 @@ class Obstacle_Run(Node):
 
     def parking_lidar_pid_steering(self, point_data):
         if self.park_direction == 'PARKING_RIGHT_NORMAL':
-            self.lane_ratio = 1.16
+            self.lane_ratio = 1.13
         else:
             self.lane_ratio = 1.11
 
