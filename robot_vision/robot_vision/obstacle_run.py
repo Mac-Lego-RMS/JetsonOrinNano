@@ -1541,11 +1541,6 @@ class Obstacle_Run(Node):
                     # Berechnung des Winkels relativ zum Roboter
                     cam_angle_deg = 180.0 - angle_offset_deg + self.angle_calibration
                     cam_angle_rad = math.radians(cam_angle_deg)
-                    
-                    self.get_logger().warn(
-                        f"DBG-ANG cx={center_x:.0f} img_w_used={IMAGE_WIDTH:.0f} orig_shape={r.orig_shape} "
-                        f"x1={x1:.0f} x2={x2:.0f} -> cam_angle={cam_angle_deg:.1f}°"
-                    )
 
                     class_id = int(box.cls[0])
                     class_name = class_mapping.get(class_id, f"unknown_{class_id}")
@@ -1568,16 +1563,9 @@ class Obstacle_Run(Node):
         detected_obstacles = []
         available_clusters = self.get_all_clusters_sorted(point_data)
 
-        self.get_logger().warn(f"DBG-CAM yolo_boxes={len(yolo_boxes)} clusters={len(available_clusters)}")
-
         for box_data in yolo_boxes:
             # Cluster finden
             obstacle_cluster = self.get_lidar_distance(box_data['angle_rad'], available_clusters)
-
-            if obstacle_cluster is None:
-                self.get_logger().warn(
-                    f"DBG-CAM kein Lidar-Match: {box_data['class_name']} @ {math.degrees(box_data['angle_rad']):.1f}°"
-                )
 
             if obstacle_cluster is not None:
                 obj_x, obj_y = self.get_weight_point_for_cluster(obstacle_cluster) 
@@ -1602,7 +1590,6 @@ class Obstacle_Run(Node):
                 
                 available_clusters = [c for c in available_clusters if not np.array_equal(c, obstacle_cluster)]
 
-        self.get_logger().warn(f"DBG-CAM detected_obstacles={len(detected_obstacles)}")
         return detected_obstacles
     
     def get_weight_point_for_cluster(self, cluster):
@@ -1623,29 +1610,14 @@ class Obstacle_Run(Node):
         if not clusters_without_walls:
             return None
 
-        _angs = [f"{self.middle_of_cluster(c):.0f}°(n={len(c)})" for c in clusters_without_walls if self.middle_of_cluster(c) is not None]
-        _walls = []
-        for _n, _w in zip(['front', 'left', 'right'], [self.front_wall, self.left_wall, self.right_wall]):
-            _wm = self.middle_of_cluster(_w) if _w is not None else None
-            _walls.append(f"{_n}={_wm:.0f}°(n={len(_w)})" if _wm is not None else f"{_n}=None")
-        self.get_logger().warn(
-            f"DBG-LID Kamera={math.degrees(camera_angle_rad):.1f}° | Cluster: {_angs} | Walls(excl): {_walls}"
-        )
-            
         best_cluster = None
         best_closest_point = None
         min_dist = 4.0
         best_angle_deg = 0.0
         
         for cluster in clusters_without_walls:
-            # DBG: ist dieser Cluster winkelmäßig nah an der Kamera-Erkennung?
-            _a = self.middle_of_cluster(cluster)
-            _ang_close = _a is not None and abs(self.angle_diff(math.radians(_a), camera_angle_rad)) < math.radians(20.0)
-
             # Filtern nach Punkte-Anzahl (Mindestens 2, max 60 für nahe Hindernisse)
             if len(cluster) < 2 or len(cluster) > 60:
-                if _ang_close:
-                    self.get_logger().warn(f"DBG-LID reject PUNKTE len={len(cluster)} @ {_a:.1f}°")
                 continue
 
             # Breiten-Filter
@@ -1653,8 +1625,6 @@ class Obstacle_Run(Node):
             c_end = cluster[-1]
             width = math.hypot(c_start[1] - c_end[1], c_start[2] - c_end[2])
             if width > 0.25:
-                if _ang_close:
-                    self.get_logger().warn(f"DBG-LID reject BREITE w={width:.2f}m @ {_a:.1f}°")
                 continue
 
             angle_deg = self.middle_of_cluster(cluster)
@@ -1662,8 +1632,6 @@ class Obstacle_Run(Node):
             angle_rad = math.radians(angle_deg)
 
             diff = abs(self.angle_diff(angle_rad, camera_angle_rad))
-            if _ang_close and diff >= math.radians(12.0):
-                self.get_logger().warn(f"DBG-LID reject WINKEL diff={math.degrees(diff):.1f}° @ {_a:.1f}°")
             if diff < math.radians(12.0):
                 
                 closest_point = self.get_closest_point_in_cluster(cluster)
@@ -1680,10 +1648,6 @@ class Obstacle_Run(Node):
             self.get_logger().info(f"MATCH: Kamera {math.degrees(camera_angle_rad):.1f}° -> Lidar {best_angle_deg:.1f}° (Distanz: {min_dist:.2f}m), yAchsenAbstand: {closest_point[2]:.2f}m")
             return best_cluster
 
-        self.get_logger().warn(
-            f"DBG-LID kein Match für Kamera {math.degrees(camera_angle_rad):.1f}° "
-            f"(geprüfte Cluster: {len(clusters_without_walls)})"
-        )
         return None
 
     def middle_of_cluster(self, cluster):
@@ -2555,19 +2519,16 @@ class Obstacle_Run(Node):
         nx_f, ny_f, dist_to_front = front_hnf
         
         color, current_obstacle = self.check_for_obstacle_color(point_data, self.turn_count, 0.0, dist_to_front - 0.85)
-        self.get_logger().warn(f"DBG-SOP color={color} obst={current_obstacle} front_dist={dist_to_front:.2f} is_sf={self.is_start_finish_straight}")
 
         if color is None and current_obstacle is None:
             self.get_logger().warn("Kein Hindernis erkannt.")
             return None
 
         elif current_obstacle is not None and current_obstacle.is_localized:
-            self.get_logger().warn(f"DBG-SOP bereits localized (zone={current_obstacle.zone_id}) -> keine Neu-Detektion")
             return current_obstacle
             
         else:
             detected_obstacles = self.get_obstacles_from_camera(point_data)
-            self.get_logger().warn(f"DBG-SOP detected={len(detected_obstacles) if detected_obstacles else 0}")
 
             if detected_obstacles:
                 # Sortieren nach euklidische Distanz zum LiDAR
@@ -2575,7 +2536,6 @@ class Obstacle_Run(Node):
                 closest_x, closest_y, closest_color = detected_obstacles[0]
 
                 if side_hnf is None:
-                    self.get_logger().warn("DBG-SOP side_hnf None -> return ohne Verortung")
                     return current_obstacle
                     
                 obst_to_front_wall_dist = abs(closest_x * nx_f + closest_y * ny_f - dist_to_front)
@@ -2588,12 +2548,6 @@ class Obstacle_Run(Node):
                 
                 current_segment = self.turn_count % 4
                 zone_id = self.calculate_zone_id(obst_to_front_wall_dist, obst_to_outer_wall_dist)
-
-                _outer = f"{obst_to_outer_wall_dist:.2f}" if obst_to_outer_wall_dist is not None else "None"
-                self.get_logger().warn(
-                    f"DBG-SOP front_to_obst={obst_to_front_wall_dist:.2f} outer_to_obst={_outer} -> zone={zone_id} "
-                    f"(cx={closest_x:.2f} cy={closest_y:.2f} color={closest_color})"
-                )
 
                 if self.is_start_finish_straight and zone_id is not None:
                     if zone_id % 10 == 1:
@@ -2854,12 +2808,6 @@ class Obstacle_Run(Node):
 
         current_straight = self.turn_count % 4
         current_obstacle = self.obstacle_memory[current_straight]
-
-        self.get_logger().warn(
-            f"DBG-DET tc={self.turn_count} str={current_straight} dir={self.fahrtrichtung} "
-            f"is_sf={self.is_start_finish_straight} mem={self.obstacle_memory[current_straight]} "
-            f"guard={'RUN' if (self.turn_count != 0 or self.fahrtrichtung == 'rechts') else 'SKIP'}"
-        )
 
         if self.turn_count != 0 or self.fahrtrichtung == 'rechts':      # Damit wir keine falschen Hindernisse direkt nachdem Ausparken erkennen
             if current_obstacle is None or not current_obstacle.is_localized:
