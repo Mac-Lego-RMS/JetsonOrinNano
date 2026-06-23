@@ -805,7 +805,7 @@
         "uuid": "7151ca28-a9e5-4f38-89bc-823cda88dfa4"
       }
     ],
-    "used_designators": "Reset1,Boot1",
+    "used_designators": "U2,U7,Reset1,R19-20,J5,J10,Boot1,#PWR11,#PWR14,#PWR16,#PWR21,#PWR59-60,C6,C26",
     "variants": []
   },
   "sheets": [
