@@ -42,6 +42,10 @@ def read_bag(path):
         yield topic, msg
 
 def main():
+    zupt_count = 0
+    last_gyro_z = 0.0
+    v_thresh, w_thresh = 0.03, 3e-3
+
     bag = sys.argv[1] if len(sys.argv) > 1 else 'stillstand'
     bag = os.path.abspath(os.path.expanduser(bag))
     name = os.path.basename(os.path.normpath(bag))   # nur der Bag-Name, ohne Pfad
@@ -77,8 +81,13 @@ def main():
         last = t
         if kind == 'gyro':
             ekf.update_gyro(z)
+            last_gyro_z = z                  # fuer Stillstands-Pruefung merken
         else:
             ekf.update_encoder(z)
+            if abs(z) < v_thresh and abs(last_gyro_z) < w_thresh:
+                ekf.update_zero_motion()     # <-- der neue Teil
+                zupt_count += 1
+
         hist['t'].append(t - t0)
         hist['x'].append(ekf.x[0]);  hist['y'].append(ekf.x[1])
         hist['th'].append(ekf.x[2]); hist['v'].append(ekf.x[3])
@@ -92,6 +101,7 @@ def main():
     print(f'End-Position:     {pos_err*1000:.1f} mm  (soll ~0)')
     print(f'Heading-Drift:    {th_drift:+.2f} grad  ->  {th_drift/dur:+.3f} grad/s')
     print(f'Bias-Schaetzung:  {np.degrees(hist["bg"][-1]):+.4f} grad/s (final)')
+    print(f'Zero-Motion feuerte: {zupt_count} / {sum(1 for m in meas if m[1]=="enc")} Encoder-Messungen')
 
     # 4) Plots
     fig, ax = plt.subplots(4, 1, figsize=(10, 11), sharex=True)

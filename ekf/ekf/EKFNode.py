@@ -71,6 +71,11 @@ class EKFNode(Node):
         self.ekf.r_enc  = 9.3e-4
         self.r_eff      = 0.0150
 
+        self.last_gyro_z = 0.0
+        self.last_v = 0.0
+        self.v_thresh = 0.03
+        self.w_thresh = 3e-3
+
         self.queue = []          # Min-Heap, sortiert nach stamp
         self.counter = 0         # Tie-Breaker, gleich stamp -> stabile Ordnung
         self.window = 0.015      # 15 ms Warte-Fenster
@@ -107,8 +112,13 @@ class EKFNode(Node):
                 self.last_processed = t
                 if kind == 'gyro':
                     self.ekf.update_gyro(z)
+                    self.last_gyro_z = z
                 elif kind == 'enc':
                     self.ekf.update_encoder(z)
+                    self.last_v = z                    # v merken (schon in m/s)
+                    # Stillstand? -> Zero-Motion-Pseudo-Update
+                    if abs(z) < self.v_thresh and abs(self.last_gyro_z) < self.w_thresh:
+                        self.ekf.update_zero_motion()
                 continue
 
             dt = t - self.last_processed
