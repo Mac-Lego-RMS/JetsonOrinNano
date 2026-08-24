@@ -112,7 +112,6 @@ class EKFNode(Node):
                 continue
 
             dt = t - self.last_processed
-
             if dt > 0:
                 self.ekf.predict(dt)
                 if kind == 'gyro':
@@ -125,8 +124,6 @@ class EKFNode(Node):
                 self.get_logger().warn(
                     f'stale measurement verworfen: dt={dt*1e3:.2f} ms, kind={kind}', 
                     throttle_duration_sec=1.0)
-
-                continue
 
     def _publish(self, t):
         msg = Odometry()
