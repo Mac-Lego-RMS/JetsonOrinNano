@@ -222,12 +222,12 @@ class Obstacle_Run(Node):
         self.panic_obstacle_dist = 0.25
 
         # Globale Geschwindigkeiten
-        self.SPEED_STRAIGHT_SLOW = 350.0
-        self.SPEED_STRAIGHT_MED = 500.0
-        self.SPEED_STRAIGHT_FAST = 700.0
-        self.SPEED_TURN_SLOW = 250.0
-        self.SPEED_TURN_MED = 280.0
-        self.SPEED_TURN_FAST = 450.0
+        self.SPEED_STRAIGHT_SLOW = 430.0
+        self.SPEED_STRAIGHT_MED = 750.0
+        self.SPEED_STRAIGHT_FAST = 900.0
+        self.SPEED_TURN_SLOW = 350.0
+        self.SPEED_TURN_MED = 450.0
+        self.SPEED_TURN_FAST = 750.0
         self.SPEED_STRAIGHT_SLOW_saved = self.SPEED_STRAIGHT_SLOW
         
         self.is_obstacle_passed = False
@@ -489,12 +489,12 @@ class Obstacle_Run(Node):
         elif self.base_speed == self.SPEED_STRAIGHT_MED:
             self.kp = 2.5
             self.ki = 0.0
-            self.kd = 0.08
+            self.kd = 0.11
 
         elif self.base_speed == self.SPEED_STRAIGHT_FAST:
             self.kp = 2.3
             self.ki = 0.0
-            self.kd = 0.10
+            self.kd = 0.15
             
         elif self.base_speed == self.parking_speed:
             self.kp = 2.5
@@ -2197,13 +2197,13 @@ class Obstacle_Run(Node):
             steps = [
                 (0.0,   0.0, 1.0),  # Schritt 0: Warten
                 (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-                (-225.0, 0.8, 0.50),  # Schritt 2: Rückwärts
+                (-257.0, 0.8, 0.63),  # Schritt 2: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-                (195.0, -0.8, 0.55),   # Schritt 4: Vorwärts
+                (205.0, -0.8, 0.48),   # Schritt 4: Vorwärts
                 (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-                (-225.0, 1.4, 0.4),  # Schritt 6: Rückwärts
+                (-257.0, 1.4, 0.45),  # Schritt 6: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-                (195.0, -0.8, 2.0),   # Schritt 8: Vorwärts
+                (205.0, -0.8, 2.0),   # Schritt 8: Vorwärts
                 (0.0,   0.8, 0.5),   # Schritt 9: Im Stand lenken
             ]
 
@@ -2211,15 +2211,15 @@ class Obstacle_Run(Node):
             steps = [
                 (0.0,   0.0, 1.0),  # Schritt 0: Warten
                 (0.0,   0.8, 2.0),   # Schritt 1: Im Stand lenken
-                (-220.0, 0.8, 0.45),  # Schritt 2: Rückwärts
+                (-225.0, 0.8, 0.45),  # Schritt 2: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 3: Im Stand gegenlenken
-                (195.0, -0.8, 0.50),   # Schritt 4: Vorwärts
+                (200.0, -0.8, 0.55),   # Schritt 4: Vorwärts
                 (0.0,   0.8, 1.5),   # Schritt 5: Im Stand lenkengi
-                (-220.0, 1.4, 0.35),  # Schritt 6: Rückwärts
+                (-225.0, 1.4, 0.35),  # Schritt 6: Rückwärts
                 (0.0,  -0.8, 1.5),   # Schritt 7: Im Stand gegenlenken
-                (195.0, -0.8, 1.4),   # Schritt 8: Vorwärts
-                (0.0,   0.0, 0.5),   # Schritt 9: Im Stand lenken
-                (195.0, 0.0, 0.7),   # Schritt 10: Vorwärts
+                (230.0, -0.8, 1.4),   # Schritt 8: Vorwärts
+                (0.0,   0.0, 0.5),   # Schritt 9: Im Stand lenkenc
+                (250.0, 0.0, 0.7),   # Schritt 10: Vorwärts
                 (0.0,   0.8, 0.5),   # Schritt 11: Im Stand lenken
             ]
 
@@ -2253,9 +2253,9 @@ class Obstacle_Run(Node):
         cmd = Twist()
         if self.fahrtrichtung == "links":
             self.check_for_obstacle_color(point_data, (self.turn_count + 1), 0.25, 2.0)
-            cmd.linear.x = 230.0
+            cmd.linear.x = 270.0
         else:
-            cmd.linear.x = 230.0
+            cmd.linear.x = 270.0
 
         
         cmd.angular.z = 0.8 * (-1.0 if self.fahrtrichtung == "links" else 1.0)

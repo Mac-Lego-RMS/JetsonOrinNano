@@ -6,6 +6,7 @@ durch die reine Filter-Klasse, plottet den State-Verlauf.
 
 Aufruf:  python3 eval_ekf.py <bag_ordner>     z.B. python3 eval_ekf.py stillstand
 """
+import os
 import sys
 import numpy as np
 import matplotlib
@@ -16,7 +17,7 @@ import rosbag2_py
 from rclpy.serialization import deserialize_message
 from rosidl_runtime_py.utilities import get_message
 
-from ekf import DeadReckoningEKF   # deine ROS-freie Klasse
+from ekf.ekf import DeadReckoningEKF   # deine ROS-freie Klasse
 
 # ---- Konfiguration ----
 IMU_TOPIC = '/bno055/imu'
@@ -42,6 +43,8 @@ def read_bag(path):
 
 def main():
     bag = sys.argv[1] if len(sys.argv) > 1 else 'stillstand'
+    bag = os.path.abspath(os.path.expanduser(bag))
+    name = os.path.basename(os.path.normpath(bag))   # nur der Bag-Name, ohne Pfad
 
     # 1) Messungen einsammeln, MIT header.stamp (nicht Bag-Zeit!)
     meas = []
@@ -103,11 +106,11 @@ def main():
     ax[3].plot(hist['t'], np.degrees(hist['bg']), color='teal')
     ax[3].set_ylabel('Bias b_g [grad/s]'); ax[3].set_xlabel('Zeit [s]')
     ax[3].grid(alpha=.3)
-    fig.suptitle(f'Dead-Reckoning EKF - {bag}')
+    fig.suptitle(f'Dead-Reckoning EKF - {name}')
     fig.tight_layout()
-    out = f'ekf_eval_{bag}.png'
+    out = f'ekf_eval_{name}.png'
     fig.savefig(out, dpi=110)
-    print(f'Plot: {out}')
+    print(f'Plot: {os.path.abspath(out)}')
 
 if __name__ == '__main__':
     main()

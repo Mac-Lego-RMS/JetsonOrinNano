@@ -101,7 +101,7 @@ class WallFollower(Node):
             10
         )
 
-        self.button_start = False
+        self.button_start = True
 
         self.led_pub = self.create_publisher(Bool, '/led_cmd', 10)
 
@@ -167,6 +167,10 @@ class WallFollower(Node):
         self.ki = 0.07
         self.kd = 0.05
         
+        self.left_start_sum = 0
+        self.right_start_sum = 0
+        self.start_counter = 0
+
         self.prev_error = 0.0
         self.integral_error = 0.0
 
@@ -258,7 +262,7 @@ class WallFollower(Node):
                 self.turn_exit_toleranz = 17.0
 
             case 2:
-                self.lane_ratio = 0.3
+                self.lane_ratio = 0.37
 
                 self.kp = 1.5
                 self.ki = 0.0
@@ -1734,7 +1738,6 @@ class WallFollower(Node):
             if not self.button_state:
                 return
 
-        self.button_state = False  # Flag sofort zurücksetzen
         self.set_led(False)        # LED ausschalten als Bestätigung
         
         self.yaw_offset = self.current_yaw
@@ -1753,22 +1756,31 @@ class WallFollower(Node):
 
         if self.fahrtrichtung is None:
             # Es werden zwingend beide Seitenwände für den Längenvergleich gebraucht
-            if (self.left_wall is not None and len(self.left_wall) > 0) and (self.right_wall is not None and len(self.right_wall) > 0):
+            if left_wall_hnf is not None and right_wall_hnf is not None:
                     # Echte physikalische Länge in Metern berechnen (Satz des Pythagoras)
-                    left_len = math.hypot(self.left_wall[0][1] - self.left_wall[-1][1], self.left_wall[0][2] - self.left_wall[-1][2])
-                    right_len = math.hypot(self.right_wall[0][1] - self.right_wall[-1][1], self.right_wall[0][2] - self.right_wall[-1][2])
+                    _, _, left_dist = left_wall_hnf
+                    _, _, right_dist = right_wall_hnf
+
+                    self.left_start_sum += left_dist
+                    self.right_start_sum += right_dist
                     
-                    self.get_logger().info(f"Scanne Strecke... Länge Links: {left_len:.2f}m, Länge Rechts: {right_len:.2f}m")
+                    self.get_logger().info(f"Scanne Strecke... Länge Links: {left_dist:.2f}m, Länge Rechts: {right_dist:.2f}m")
                     
-                    if left_len > right_len + 0.30:
-                        self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Fahrtrichtung rechts
-                        self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
-                    elif right_len > left_len + 0.30:
-                        self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Fahrtrichtung links
-                        self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
-                    else:    
-                        self.get_logger().info("Fehler! Keine Wand ist länger als die")
-                        return
+                    if self.start_counter >= 10:
+                        left_avg = self.left_start_sum / self.start_counter
+                        right_avg = self.right_start_sum / self.start_counter
+                        if left_avg > right_avg:
+                            self.fahrtrichtung = 'rechts' # Rechte Wand ist kürzer = Innenbande = Fahrtrichtung rechts
+                            self.get_logger().info(">>> LOCK: FAHRTRICHTUNG RECHTS (Uhrzeigersinn) <<<")
+                        elif right_avg > left_avg:
+                            self.fahrtrichtung = 'links'  # Linke Wand ist kürzer = Innenbande = Fahrtrichtung links
+                            self.get_logger().info(">>> LOCK: FAHRTRICHTUNG LINKS (Gegen den Uhrzeigersinn) <<<")
+                        else:    
+                            self.get_logger().info("Messe noch!")
+                            return
+
+                    self.start_counter += 1
+                    return
             else:
                 self.get_logger().info("Fahrtrichtung noch nicht erkannt... Warte auf beide Seitenwände für die Analyse.")
                 return
@@ -1853,8 +1865,6 @@ class WallFollower(Node):
         # BEFEHLE AN ESP SETZEN
         cmd.linear.x = self.set_speed(front_dist)
         cmd.angular.z = float(steering_cmd)
-        self.pub_cmd_vel.publish(cmd)
-        #self.get_logger().info(f"Lenkung: Speed={self.current_active_speed:.3f}, Steering={steering_cmd:.3f}")
         self.pub_cmd_vel.publish(cmd)
 
     def handle_turn_maneuver(self, point_data):

@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'wall_follower_robot'
+package_name = 'ekf'
 
 setup(
     name=package_name,
@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',
-    description='TODO: Package description',
+    description='Dead-Reckoning EKF (Gyro + Encoder) fuer den WRO-Roboter',
     license='TODO: License declaration',
     extras_require={
         'test': [
@@ -24,10 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'esp_serial_bridge = wall_follower_robot.esp_serial_bridge:main',
-            'wall_follower_logic = wall_follower_robot.wall_follower_logic:main',
-            'drive_speed_test = wall_follower_robot.drive_speed_test:main',
-            'yolo_vision = wall_follower_robot.yolo_vision_node:main',
+            'ekf_node = ekf.EKFNode:main',
+            'ekf_test = ekf.ekfTest:main',
         ],
     },
 )

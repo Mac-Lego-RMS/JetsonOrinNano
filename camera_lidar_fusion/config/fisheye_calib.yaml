@@ -1,0 +1,32 @@
+# Kalibrierung der liegenden 360-Grad-Kamera (Raspberry-Pi-Fisheye am USB-Port).
+#
+# Bildkreis: am 12.08.2026 aus einem Livebild von /video_source/raw (1280x960)
+# vermessen -- der Kreis liegt komplett im Bild, Durchmesser ca. 903 px.
+# Lage: yaw/pitch/roll sind noch Platzhalter, die kommen aus
+#       ros2 run camera_lidar_fusion rotation_calibration.
+#
+# Diese Datei ist die mitgelieferte Vorgabe im Package-Share. Die Nodes lesen
+# und schreiben standardmaessig /workspace/config/fisheye_calib.yaml und fallen
+# nur hierauf zurueck, solange die noch nicht existiert.
+
+# --- Bildkreis / Intrinsik ---
+cx: 678.5           # Mittelpunkt des Fisheye-Kreises [px]
+cy: 451.0
+radius_px: 452.0    # Radius des Fisheye-Kreises [px]
+fov_deg: 270.0      # voller Oeffnungswinkel des Objektivs
+f_px: 0.0           # 0 = aus radius_px/(fov/2) ableiten, sonst feste Brennweite
+poly_coeffs: []     # optional r = theta*(k0 + k1*theta^2 + ...) statt equidistant
+mirror: false       # true, falls das Bild seitenverkehrt ankommt
+
+# --- Lage im Roboter-Frame (X vorne, Y links, Z oben) ---
+yaw_deg: 0.0        # Drehung um die optische Achse -- das kalibriert die Node
+pitch_deg: 0.0      # Verkippung der optischen Achse aus der Senkrechten
+roll_deg: 0.0
+cam_x: 0.0          # Kameraposition relativ zum Lidar-Ursprung [m]
+cam_y: 0.0
+cam_z: 0.05         # Hoehe der Kamera ueber der Lidar-Ebene [m] -- nachmessen!
+
+# --- Metadaten ---
+image_width: 1280
+image_height: 960
+note: 'Vorgabe: Bildkreis vermessen, Verdrehung noch unkalibriert.'
