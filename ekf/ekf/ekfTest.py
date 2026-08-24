@@ -44,7 +44,8 @@ def read_bag(path):
 def main():
     zupt_count = 0
     last_gyro_z = 0.0
-    v_thresh, w_thresh = 0.03, 3e-3
+    v_thresh, w_thresh = 0.03, 5e-3
+    GYRO_SCALE = 0.9674   # 5x360deg bei renn-typischer Drehrate: 1800/1860.6
 
     bag = sys.argv[1] if len(sys.argv) > 1 else 'stillstand'
     bag = os.path.abspath(os.path.expanduser(bag))
@@ -55,7 +56,7 @@ def main():
     for topic, msg in read_bag(bag):
         if topic == IMU_TOPIC:
             meas.append((stamp_to_sec(msg.header.stamp), 'gyro',
-                         msg.angular_velocity.z))
+                         msg.angular_velocity.z * GYRO_SCALE))
         elif topic == ENC_TOPIC:
             v = msg.velocity[0] if len(msg.velocity) else 0.0
             meas.append((stamp_to_sec(msg.header.stamp), 'enc', v * R_EFF))
@@ -96,10 +97,11 @@ def main():
     # 3) Kennzahlen
     dur = hist['t'][-1]
     pos_err = np.hypot(hist['x'][-1], hist['y'][-1])
-    th_drift = np.degrees(hist['th'][-1] - hist['th'][0])
+    th_unwrapped = np.unwrap(hist['th'])          # macht die ±180°-Spruenge rueckgaengig
+    total_rotation = np.degrees(th_unwrapped[-1] - th_unwrapped[0])
     print(f'Dauer:            {dur:.1f} s   ({len(meas)} Messungen)')
-    print(f'End-Position:     {pos_err*1000:.1f} mm  (soll ~0)')
-    print(f'Heading-Drift:    {th_drift:+.2f} grad  ->  {th_drift/dur:+.3f} grad/s')
+    print(f"End-Position:     x: {hist['x'][-1]*1000:.1f} mm  y: {hist['y'][-1]*1000:.1f} mm")
+    print(f'Gesamtdrehung (entwrappt): {total_rotation:+.1f} grad')
     print(f'Bias-Schaetzung:  {np.degrees(hist["bg"][-1]):+.4f} grad/s (final)')
     print(f'Zero-Motion feuerte: {zupt_count} / {sum(1 for m in meas if m[1]=="enc")} Encoder-Messungen')
 

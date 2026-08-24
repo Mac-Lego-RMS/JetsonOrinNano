@@ -698,7 +698,7 @@ def _build_node_class():
             # Takt, in dem der ESP Position und Geschwindigkeit von sich aus
             # schickt. Zur Laufzeit aenderbar:
             #   ros2 param set /esp_serial_bridge telemetry_period 0.1
-            self.declare_parameter("telemetry_period", 0.01)
+            self.declare_parameter("telemetry_period", 0.01)  # 0 = aus
             # cmd_vel ist offene Steuerung: der ESP regelt die Drehzahl nicht.
             # Diese beiden Werte sind die Umrechnung und muessen am Fahrzeug
             # ausgemessen werden.
