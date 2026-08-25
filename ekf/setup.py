@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'ekf_node = ekf.EKFNode:main',
             'ekf_test = ekf.ekfTest:main',
+            'scan_node = ekf.scanNode:main',
         ],
     },
 )

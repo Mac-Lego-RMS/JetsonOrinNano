@@ -13,6 +13,8 @@ class DeadReckoningEKF:
         self.r_gyro = 2.83e-7     # Yaw-Varianz (rad/s)² — Stillstand-Test
         self.r_enc  = 9.3e-4      # (m/s)² — eingeschwungene Varianz · r_eff², × 3 Kurvenfaktor
         self.r_eff  = 0.0150      # m — Strecken-Kalibrierung (2,41 m / 10431 Ticks)
+        self.r_wall_alpha = 1.0e-5    # rad^2  (~0.19 deg std)
+        self.r_wall_d     = 3.6e-6    # m^2    (~1.9 mm std)
         self.last_stamp = None
 
     def predict(self, dt):
@@ -42,6 +44,47 @@ class DeadReckoningEKF:
         self.x = self.x + K * (z - h)
         self.x[2] = wrap(self.x[2])
         self.P = (np.eye(6) - np.outer(K, H)) @ self.P
+
+    def _update_multi(self, z, h, H, R):
+        """Generic vector measurement update (Kalman correction).
+
+        z, h : (m,) measurement and predicted measurement
+        H    : (m, 6) measurement Jacobian
+        R    : (m, m) measurement noise covariance
+        Handles m-dimensional measurements in one matrix update.
+        """
+        y = z - h                                    # innovation (m,)
+        S = H @ self.P @ H.T + R                      # innovation covariance (m,m)
+        K = self.P @ H.T @ np.linalg.inv(S)           # Kalman gain (6,m)
+        self.x = self.x + K @ y
+        self.x[2] = wrap(self.x[2])
+        self.P = (np.eye(6) - K @ H) @ self.P
+
+    def update_wall(self, alpha_meas, d_meas, alpha_map, d_map):
+        """2D wall correction from one matched wall (HNF).
+
+        Measurement model h(x) (map wall seen in robot frame):
+            alpha_pred = alpha_map - theta
+            d_pred     = d_map - (x*cos(alpha_map) + y*sin(alpha_map))
+        """
+        x, y, theta = self.x[0], self.x[1], self.x[2]
+
+        alpha_pred = wrap(alpha_map - theta)
+        d_pred     = d_map - (x * np.cos(alpha_map) + y * np.sin(alpha_map))
+
+        # innovation; alpha component MUST be wrapped (+-pi jump)
+        z = np.array([wrap(alpha_meas - alpha_pred),
+                    d_meas - d_pred])
+        h = np.zeros(2)                               # innovation already computed as z
+
+        # Jacobian H (2x6): rows = [d alpha_pred / dstate], [d d_pred / dstate]
+        H = np.zeros((2, 6))
+        H[0, 2] = -1.0                                # d(alpha_pred)/d(theta)
+        H[1, 0] = -np.cos(alpha_map)                  # d(d_pred)/dx
+        H[1, 1] = -np.sin(alpha_map)                  # d(d_pred)/dy
+
+        R = np.diag([self.r_wall_alpha, self.r_wall_d])
+        self._update_multi(z, h, H, R)
 
     def update_gyro(self, omega_meas):        # z = omega + b_g
         H = np.array([0,0,0,0,1,1.0])

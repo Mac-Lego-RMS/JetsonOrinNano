@@ -18,6 +18,9 @@ class DeadReckoningEKF:
         self.r_gyro = 2.83e-7     # Yaw-Varianz (rad/s)² — Stillstand-Test
         self.r_enc  = 9.3e-4      # (m/s)² — eingeschwungene Varianz · r_eff², × 3 Kurvenfaktor
         self.r_eff  = 0.0150      # m — Strecken-Kalibrierung (2,41 m / 10431 Ticks)
+        # measurement noise, wall update (from static multi-frame fit, clean walls x3)
+        self.r_wall_alpha = 1.0e-5    # rad^2  (~0.19 deg std)
+        self.r_wall_d     = 3.6e-6    # m^2    (~1.9 mm std)
         self.last_stamp = None
 
     def predict(self, dt):
