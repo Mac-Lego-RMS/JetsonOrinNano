@@ -24,9 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'ekf_node = ekf.EKFNode:main',
+            'ekf_node = ekf.ekf_node:main',
+            'scan_processor = ekf.scan_processor_node:main',
             'ekf_test = ekf.ekfTest:main',
-            'scan_node = ekf.scanNode:main',
         ],
     },
 )
