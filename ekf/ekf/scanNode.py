@@ -48,7 +48,7 @@ def scan_to_points(msg):
 
     # Mirror LiDAR(CW) -> REP-103(CCW): x stays, y is negated.
     x = -r * np.cos(a)          # cos negated by the 180 deg rotation
-    y =  r * np.sin(a)          # -sin (mirror) then negated again (rotation) = +sin
+    y =  -r * np.sin(a)          # -sin (mirror) then negated again (rotation) = +sin
     return np.column_stack((x, y))
 
 def cluster_points(points, gap_threshold=0.15, min_cluster_size=45):
@@ -66,6 +66,7 @@ def cluster_points(points, gap_threshold=0.15, min_cluster_size=45):
     diffs = np.abs(np.diff(points, axis=0))
     dist = diffs[:, 0] + diffs[:, 1]                # Manhattan
     split_idx = np.where(dist >= gap_threshold)[0] + 1
+    
 
     clusters = np.split(points, split_idx)
     return [c for c in clusters if len(c) >= min_cluster_size]
@@ -290,6 +291,16 @@ def main():
 
     clusters = cluster_points(pts)
     clusters = merge_wraparound(clusters)
+
+    for c in clusters:
+        hnf = fit_wall_hnf(c)
+        if hnf is None:
+            continue
+        alpha, d = lidar_to_base_link(*hnf)
+        centroid_y = c[:, 1].mean()
+        side = 'LEFT (+y)' if centroid_y > 0 else 'RIGHT (-y)'
+        print(f'alpha={np.degrees(alpha):+7.1f} deg  d={d:+.3f}  '
+              f'centroid_y={centroid_y:+.3f}  -> physically {side}')
 
     for i, c in enumerate(clusters):
         hnf = fit_wall_hnf(c)

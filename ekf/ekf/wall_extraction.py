@@ -27,6 +27,7 @@ from ekf.ekf import wrap   # single source of truth for angle wrapping
 # dropped. Measured PCB span was -33..+59 deg (asymmetric); symmetric 60 deg cut
 # is safe for now. RE-MEASURE after the next chassis rebuild.
 BLOCK_ANGLE = np.radians(60.0)
+MAX_RANGE = 4.0
 
 # LiDAR rotation centre sits this far ahead of the rear axle on +x (measured).
 LIDAR_OFFSET_X = 0.1101
@@ -49,13 +50,14 @@ def scan_to_points(msg):
         np.isfinite(ranges)
         & (ranges >= msg.range_min)
         & (ranges <= msg.range_max)
+        & (ranges <= MAX_RANGE)               # drop points beyond the field
         & (np.abs(angles) > BLOCK_ANGLE)      # drop rear PCB blocked zone
     )
     r = ranges[valid]
     a = angles[valid]
 
     x = -r * np.cos(a)          # cos negated by the 180 deg mount rotation
-    y = r * np.sin(a)           # -sin (CW->CCW mirror) negated again (rotation) = +sin
+    y = -r * np.sin(a)           # -sin (CW->CCW mirror) negated again (rotation) = +sin
     return np.column_stack((x, y))
 
 
@@ -94,6 +96,64 @@ def merge_wraparound(clusters, gap_threshold=0.15):
         clusters[0] = np.vstack((last, first))
         clusters.pop()
     return clusters
+
+def split_at_corners(cluster, max_dev=0.04, min_segment_size=45):
+    """Split a cluster at corners using iterative split-and-merge.
+
+    A straight wall's points lie within a few mm of the line through its first
+    and last point. An L-shaped cluster (two walls meeting at a corner without a
+    gap) has a point far from that line -- the corner. Split there and repeat on
+    both halves.
+
+    Uses an explicit stack (no recursion). Segments are kept in scan order.
+
+    Args:
+        cluster: (N, 2) points in scan order.
+        max_dev: max perpendicular distance (m) of a point from the first-last
+                 line before the segment is considered bent (a corner). Above
+                 the wall-fit noise (~2 mm), below a real corner (>0.1 m).
+        min_segment_size: segments shorter than this are not split further and
+                 are dropped if produced by a split (matches cluster_points).
+
+    Returns:
+        list of (M, 2) arrays, one per straight wall segment.
+    """
+    if cluster is None or len(cluster) < min_segment_size:
+        return [cluster] if cluster is not None and len(cluster) >= 3 else []
+
+    segments = []
+    stack = [cluster]                      # segments still to check
+
+    while stack:
+        seg = stack.pop()
+        if len(seg) < min_segment_size:
+            continue                       # too short to be a reliable wall
+
+        p_first = seg[0]
+        p_last = seg[-1]
+        line = p_last - p_first
+        line_len = np.hypot(line[0], line[1])
+
+        if line_len < 1e-6:
+            # first and last coincide (degenerate) -> keep as-is
+            segments.append(seg)
+            continue
+
+        # perpendicular distance of every point to the first-last line.
+        # normal to the line direction, normalised:
+        normal = np.array([-line[1], line[0]]) / line_len
+        dev = np.abs((seg - p_first) @ normal)   # (M,) distances
+
+        idx = np.argmax(dev)
+        if dev[idx] > max_dev:
+            # corner at idx -> split into [0..idx] and [idx..end].
+            # include idx in both so neither segment loses the corner point.
+            stack.append(seg[:idx + 1])
+            stack.append(seg[idx:])
+        else:
+            segments.append(seg)           # straight enough -> a wall
+
+    return segments
 
 
 # --- stage 3 ---------------------------------------------------------------

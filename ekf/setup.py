@@ -27,6 +27,7 @@ setup(
             'ekf_node = ekf.ekf_node:main',
             'scan_processor = ekf.scan_processor_node:main',
             'ekf_test = ekf.ekfTest:main',
+            'scan_test = ekf.scanNode:main',
         ],
     },
 )

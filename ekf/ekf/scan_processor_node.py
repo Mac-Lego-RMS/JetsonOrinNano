@@ -25,7 +25,7 @@ from nav_msgs.msg import Odometry
 from robot_msgs.msg import WallMatch, WallMatchArray
 
 from ekf.wall_extraction import (
-    scan_to_points, cluster_points, merge_wraparound,
+    scan_to_points, cluster_points, merge_wraparound, split_at_corners,
     fit_wall_hnf, lidar_to_base_link, match_walls,
 )
 
@@ -65,6 +65,11 @@ class ScanProcessor(Node):
     def scan_cb(self, msg):
         pts = scan_to_points(msg)
         clusters = merge_wraparound(cluster_points(pts))
+        # split any cluster that contains a corner (L-shape) into straight walls
+        split = []
+        for c in clusters:
+            split.extend(split_at_corners(c))
+        clusters = split
 
         measured = []
         for c in clusters:
@@ -72,7 +77,7 @@ class ScanProcessor(Node):
             if hnf is not None:
                 measured.append(lidar_to_base_link(*hnf))
 
-        matches = match_walls(measured, MAP_WALLS, self.pose)
+        matches = match_walls(measured, MAP_WALLS, self.pose, d_tol=0.12)
 
         out = WallMatchArray()
         out.header = msg.header          # carry the scan stamp + frame_id

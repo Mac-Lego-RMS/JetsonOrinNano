@@ -10,6 +10,8 @@ class DeadReckoningEKF:
         self.x = np.zeros(6)
         self.P = np.diag([1e-3, 1e-3, 1e-3, 1e-2, 1e-2, 1e-4])
         self.q_v, self.q_w, self.q_bg = 1.0, 1.0, 1e-6   # random-walk PSD, Tuning spaeter
+        self.q_v, self.q_w, self.q_bg = 1.0, 1.0, 1e-6
+        self.q_pos, self.q_theta = 1e-4, 1e-5   # position/heading process noise: keeps P from collapsing at standstill
         self.r_gyro = 2.83e-7     # Yaw-Varianz (rad/s)² — Stillstand-Test
         self.r_enc  = 9.3e-4      # (m/s)² — eingeschwungene Varianz · r_eff², × 3 Kurvenfaktor
         self.r_eff  = 0.0150      # m — Strecken-Kalibrierung (2,41 m / 10431 Ticks)
@@ -33,9 +35,12 @@ class DeadReckoningEKF:
         # -----------------------------------------------
 
         Q = np.zeros((6,6))
-        Q[3,3] = self.q_v  * dt
-        Q[4,4] = self.q_w  * dt
-        Q[5,5] = self.q_bg * dt
+        Q[0,0] = self.q_pos   * dt    # x
+        Q[1,1] = self.q_pos   * dt    # y
+        Q[2,2] = self.q_theta * dt    # theta
+        Q[3,3] = self.q_v     * dt
+        Q[4,4] = self.q_w     * dt
+        Q[5,5] = self.q_bg    * dt
         self.P = F @ self.P @ F.T + Q
 
     def _update(self, z, h, H, r):

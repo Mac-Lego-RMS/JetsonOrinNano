@@ -27,6 +27,10 @@ from robot_msgs.msg import WallMatchArray
 
 from ekf.ekf import DeadReckoningEKF, wrap
 
+# Gyro sign + scale correction, applied at the source in gyro_cb.
+# Negative: the BNO055 yaw axis reads CW as positive; REP-103 wants CCW positive.
+# Magnitude 0.9674: scale factor from the 5x360deg calibration.
+GYRO_SCALE = -0.9674
 
 def stamp_to_sec(stamp):
     return stamp.sec + stamp.nanosec * 1e-9
@@ -58,7 +62,7 @@ class EKFNode(Node):
     # --- gyro / encoder: stamp-ordered queue ------------------------------
     def gyro_cb(self, msg):
         t = stamp_to_sec(msg.header.stamp)
-        self._push(t, 'gyro', msg.angular_velocity.z)
+        self._push(t, 'gyro', msg.angular_velocity.z * GYRO_SCALE)
         self._drain(t)
 
     def enc_cb(self, msg):
