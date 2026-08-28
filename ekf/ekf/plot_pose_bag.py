@@ -139,7 +139,7 @@ def plot_frame(bag_path, t_target):
         ax.scatter(c[:, 0], c[:, 1], s=5, label=f'cluster {i} (n={len(c)})')
         hnf = fit_wall_hnf(c)
         if hnf is not None:
-            alpha, d = lidar_to_base_link(*hnf)
+            alpha, d, p_start, p_end = lidar_to_base_link(*hnf)
             print(f'  cluster {i}: alpha={np.degrees(alpha):+7.1f} deg  '
                   f'd={d:+.3f} m  n={len(c)}')
     ax.plot(0, 0, 'r^', markersize=12, label='robot')

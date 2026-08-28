@@ -97,7 +97,7 @@ def merge_wraparound(clusters, gap_threshold=0.15):
         clusters.pop()
     return clusters
 
-def split_at_corners(cluster, max_dev=0.04, min_segment_size=45):
+def split_at_corners(cluster, max_dev=0.04, min_segment_size=65):
     """Split a cluster at corners using iterative split-and-merge.
 
     A straight wall's points lie within a few mm of the line through its first
@@ -158,11 +158,18 @@ def split_at_corners(cluster, max_dev=0.04, min_segment_size=45):
 
 # --- stage 3 ---------------------------------------------------------------
 def fit_wall_hnf(cluster):
-    """Fit a line to a cluster, return Hesse normal form (alpha, d), robot frame.
+    """Fit a line to a cluster and return HNF (alpha, d) plus its endpoints.
 
-    Normal is oriented toward the field interior (= toward the origin, since the
-    robot sits inside). d is signed and negative under this convention. Returns
-    (alpha, d) or None if the cluster is too small.
+    Convention: normal points toward the field interior (toward the origin,
+    since the robot sits inside). d is signed, negative under this convention.
+
+    Endpoints are the first and last cluster points PROJECTED onto the fitted
+    line -- the clean extent of the wall along its own direction, free of
+    cross-noise. They let match_walls check that a measured wall overlaps the
+    map segment it is matched to.
+
+    Returns (alpha, d, p_start, p_end) or None if the cluster is too small.
+    p_start, p_end are (2,) arrays in the robot/base_link frame.
     """
     if cluster is None or len(cluster) < 3:
         return None
@@ -170,22 +177,34 @@ def fit_wall_hnf(cluster):
     centroid = cluster.mean(axis=0)
     centered = cluster - centroid
     _, _, Vh = np.linalg.svd(centered, full_matrices=False)
-    normal = Vh[-1]                          # arbitrary orientation from SVD
+    normal = Vh[-1]
+    direction = Vh[0]                        # first singular vector = along the wall
 
     if np.dot(normal, -centroid) < 0:        # orient toward origin (field interior)
         normal = -normal
 
     alpha = np.arctan2(normal[1], normal[0])
-    d = np.dot(centroid, normal)             # signed; negative under this convention
-    return alpha, d
+    d = np.dot(centroid, normal)
+
+    # project first and last point onto the fitted line to get clean endpoints
+    t_first = np.dot(cluster[0] - centroid, direction)
+    t_last = np.dot(cluster[-1] - centroid, direction)
+    p_start = centroid + t_first * direction
+    p_end = centroid + t_last * direction
+
+    return alpha, d, p_start, p_end
 
 
-def lidar_to_base_link(alpha, d, offset_x=LIDAR_OFFSET_X):
-    """Shift a wall (alpha, d) from LiDAR frame to rear-axle (base_link) frame.
-    Observing from the rear axle shifts the origin by (-offset_x, 0), so d
-    changes by +offset_x*cos(alpha). Alpha is translation-invariant.
+def lidar_to_base_link(alpha, d, p_start, p_end, offset_x=LIDAR_OFFSET_X):
+    """Shift a wall from LiDAR frame to rear-axle (base_link) frame.
+
+    Observing from the rear axle shifts the origin by (-offset_x, 0), so:
+      - d changes by +offset_x*cos(alpha); alpha is translation-invariant
+      - endpoints shift by +offset_x in x (LiDAR sits offset_x ahead on +x)
     """
-    return alpha, d + offset_x * np.cos(alpha)
+    d_bl = d + offset_x * np.cos(alpha)
+    shift = np.array([offset_x, 0.0])
+    return alpha, d_bl, p_start + shift, p_end + shift
 
 
 # --- stage 4 ---------------------------------------------------------------
@@ -203,28 +222,78 @@ def predict_wall_in_robot_frame(alpha_map, d_map, pose):
     return alpha_robot, d_robot
 
 
-def match_walls(measured, map_walls, pose, alpha_tol=np.radians(20.0), d_tol=0.30):
-    """Match each measured wall to the nearest map wall via the measurement model.
+def _overlap_along_direction(a1, a2, b1, b2, tol=0.05):
+    """Do segments [a1,a2] and [b1,b2] overlap when projected onto the line
+    through a1->a2? Returns True if the projected intervals overlap (with a
+    small tolerance tol in metres at the ends).
+
+    a1,a2 = measured endpoints; b1,b2 = map segment endpoints (all (2,) arrays).
+    """
+    d = a2 - a1
+    length = np.hypot(d[0], d[1])
+    if length < 1e-6:
+        return True                      # degenerate measured wall: don't gate
+    u = d / length                       # unit direction along the measured wall
+
+    # project all four points onto u
+    ta = np.array([np.dot(a1, u), np.dot(a2, u)])
+    tb = np.array([np.dot(b1, u), np.dot(b2, u)])
+    a_lo, a_hi = ta.min(), ta.max()
+    b_lo, b_hi = tb.min(), tb.max()
+
+    # intervals overlap if each starts before the other ends (with tolerance)
+    return (a_lo <= b_hi + tol) and (b_lo <= a_hi + tol)
+
+
+def match_walls(measured, map_walls, pose,
+                alpha_tol=np.radians(20.0), d_tol=0.30, overlap_tol=0.05):
+    """Match each measured wall to the nearest map wall, with overlap gating.
 
     Args:
-        measured:  list of (alpha, d), robot frame (from fit_wall_hnf).
-        map_walls: list of (alpha, d), map frame.
+        measured:  list of (alpha, d, p_start, p_end), robot frame.
+        map_walls: list of dicts {'alpha','d','p1','p2'} in the map frame
+                   (from generate_map), OR list of (alpha, d) tuples (legacy;
+                   then overlap gating is skipped for that wall).
         pose:      (x, y, theta) current estimate.
-        alpha_tol, d_tol: gates rejecting implausible matches.
+        alpha_tol, d_tol: innovation gates.
+        overlap_tol: end tolerance (m) for the overlap check.
 
     Returns list of dicts: {measured, map, map_index, innov_alpha, innov_d}.
     """
     matches = []
-    for (a_meas, d_meas) in measured:
+    for meas in measured:
+        a_meas, d_meas = meas[0], meas[1]
+        has_endpoints = len(meas) >= 4
+        if has_endpoints:
+            m_start, m_end = meas[2], meas[3]
+
         best = None
         best_cost = np.inf
-        for j, (a_map, d_map) in enumerate(map_walls):
+        for j, mw in enumerate(map_walls):
+            # support both dict map walls (with endpoints) and legacy tuples
+            if isinstance(mw, dict):
+                a_map, d_map = mw['alpha'], mw['d']
+                map_p1, map_p2 = mw['p1'], mw['p2']
+            else:
+                a_map, d_map = mw[0], mw[1]
+                map_p1 = map_p2 = None
+
             a_pred, d_pred = predict_wall_in_robot_frame(a_map, d_map, pose)
             innov_a = wrap(a_meas - a_pred)
             innov_d = d_meas - d_pred
 
             if abs(innov_a) > alpha_tol or abs(innov_d) > d_tol:
                 continue
+
+            # overlap gate: only if both sides carry endpoints. Map endpoints
+            # are in the MAP frame, measured endpoints in the robot frame, so
+            # project the map segment into the robot frame first via the pose.
+            if has_endpoints and map_p1 is not None:
+                mp1 = _map_point_to_robot(map_p1, pose)
+                mp2 = _map_point_to_robot(map_p2, pose)
+                if not _overlap_along_direction(m_start, m_end, mp1, mp2,
+                                                tol=overlap_tol):
+                    continue
 
             cost = (innov_a / alpha_tol) ** 2 + (innov_d / d_tol) ** 2
             if cost < best_cost:
@@ -237,3 +306,11 @@ def match_walls(measured, map_walls, pose, alpha_tol=np.radians(20.0), d_tol=0.3
         if best is not None:
             matches.append(best)
     return matches
+
+
+def _map_point_to_robot(p_map, pose):
+    """Transform a point from the map frame into the robot/base_link frame."""
+    x, y, th = pose
+    dx, dy = p_map[0] - x, p_map[1] - y
+    c, s = np.cos(th), np.sin(th)
+    return np.array([c * dx + s * dy, -s * dx + c * dy])
