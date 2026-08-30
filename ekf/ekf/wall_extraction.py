@@ -157,36 +157,47 @@ def split_at_corners(cluster, max_dev=0.04, min_segment_size=65):
 
 
 # --- stage 3 ---------------------------------------------------------------
-def fit_wall_hnf(cluster):
-    """Fit a line to a cluster and return HNF (alpha, d) plus its endpoints.
+def fit_wall_hnf(cluster, min_pts_bent=150, max_rms_bent=0.006):
+    """Fit a line to a cluster; return HNF (alpha, d) plus endpoints, or None.
 
-    Convention: normal points toward the field interior (toward the origin,
-    since the robot sits inside). d is signed, negative under this convention.
+    Rejects a fit only if the cluster is BOTH short AND bent -- i.e. a corner
+    fragment (e.g. an inner-band corner caught as one cluster). The combined
+    test is used because, on a MOVING scan, a straight wall's points are smeared
+    by robot motion during the ~66 ms sweep and can scatter 4-7 mm, overlapping
+    a bent fragment's scatter. Length disambiguates: a long wall averages the
+    smear out and stays a reliable reference; a short bent fragment does not.
 
-    Endpoints are the first and last cluster points PROJECTED onto the fitted
-    line -- the clean extent of the wall along its own direction, free of
-    cross-noise. They let match_walls check that a measured wall overlaps the
-    map segment it is matched to.
+    Thresholds from real moving-scan data:
+      straight walls:  n>=200, perp_rms 2.6-7.1 mm
+      corner fragment: n=85,   perp_rms 8.5 mm
+    -> reject when n < min_pts_bent AND perp_rms > max_rms_bent.
 
-    Returns (alpha, d, p_start, p_end) or None if the cluster is too small.
-    p_start, p_end are (2,) arrays in the robot/base_link frame.
+    Args:
+        cluster: (N, 2) points in scan order.
+        min_pts_bent: below this point count a bent cluster is suspect.
+        max_rms_bent: above this perpendicular RMS (m) a short cluster is bent.
+
+    Returns (alpha, d, p_start, p_end) or None.
     """
     if cluster is None or len(cluster) < 3:
         return None
 
     centroid = cluster.mean(axis=0)
     centered = cluster - centroid
-    _, _, Vh = np.linalg.svd(centered, full_matrices=False)
+    _, S, Vh = np.linalg.svd(centered, full_matrices=False)
     normal = Vh[-1]
-    direction = Vh[0]                        # first singular vector = along the wall
+    direction = Vh[0]
 
-    if np.dot(normal, -centroid) < 0:        # orient toward origin (field interior)
+    perp_rms = S[-1] / np.sqrt(len(cluster))
+    if len(cluster) < min_pts_bent and perp_rms > max_rms_bent:
+        return None                          # short AND bent -> corner fragment
+
+    if np.dot(normal, -centroid) < 0:        # orient toward origin
         normal = -normal
 
     alpha = np.arctan2(normal[1], normal[0])
     d = np.dot(centroid, normal)
 
-    # project first and last point onto the fitted line to get clean endpoints
     t_first = np.dot(cluster[0] - centroid, direction)
     t_last = np.dot(cluster[-1] - centroid, direction)
     p_start = centroid + t_first * direction
