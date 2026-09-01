@@ -33,6 +33,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Deque, Dict, List, Optional, Tuple
+from nav_msgs.msg import Odometry
 
 # ==========================================================================
 # timesync_jetson.py einbinden
@@ -702,12 +703,28 @@ def _build_node_class():
             # cmd_vel ist offene Steuerung: der ESP regelt die Drehzahl nicht.
             # Diese beiden Werte sind die Umrechnung und muessen am Fahrzeug
             # ausgemessen werden.
-            self.declare_parameter("max_linear", 1.0)     # m/s bei Volldampf
-            self.declare_parameter("max_angular", 1.0)    # rad/s bei Vollausschlag
+            self.declare_parameter("v_max", 1.648)         # m/s bei PWM 1.0
+            self.declare_parameter("pwm_deadband", 0.076)  # PWM-Fraktion, ab der er losbricht
+            self.declare_parameter("v_eps", 0.01)          # darunter gilt: Stillstand
+            self.declare_parameter("max_angular", 1.0)     # rad/s bei Vollausschlag
+            self.declare_parameter("vel_accel", 0.8)
+
+            self.declare_parameter("vel_kp", 200.0)      # duty pro (m/s) Fehler
+            self.declare_parameter("vel_ki", 800.0)      # duty pro (m/s * s)
+            self.declare_parameter("vel_i_limit", 600.0) # Anti-Windup-Grenze (duty)
+            self.declare_parameter("vel_control_rate", 50.0)
+            self.declare_parameter("odom_stale_s", 0.15) # danach: nur Feedforward
+            self.declare_parameter("odom_stop_s", 0.50)  # danach: Motor stoppen
 
             self._p = lambda name: self.get_parameter(name).value
             self._cmd_vel_timeout = float(self._p("cmd_vel_timeout"))
             self._last_cmd_vel = 0.0
+            self._v_soll = 0.0
+            self._v_ist = 0.0
+            self._v_ramp = 0.0
+            self._last_odom = 0.0
+            self._vel_integral = 0.0
+            self._ctrl_dt = 1.0 / (float(self._p("vel_control_rate")) or 50.0)
 
             # --- Verbindung ---
             port = self._p("port")
@@ -748,6 +765,7 @@ def _build_node_class():
             self.create_timer(float(self._p("progress_period")),
                               self._poll_progress, callback_group=group)
             self.create_timer(1.0, self._publish_link_status, callback_group=group)
+            self.create_timer(self._ctrl_dt, self._velocity_control, callback_group=group)
 
             self.get_logger().info("Bridge bereit")
 
@@ -785,8 +803,8 @@ def _build_node_class():
 
         def _make_subscribers(self, group) -> None:
             def sub(msg_type, name, handler):
-                return self.create_subscription(msg_type, name, handler, 10,
-                                                callback_group=group)
+                return self.create_subscription(msg_type, name, handler, 10, callback_group=group)
+            self.create_subscription(Odometry, "/ekf/odom", self._odom_cb, 10, callback_group=group)    
 
             sub(Twist, "/cmd_vel", self._on_cmd_vel)
             sub(Int32, "~/motor", lambda m: self._drive(m.data))
@@ -951,23 +969,88 @@ def _build_node_class():
         def _drive(self, duty: int) -> None:
             self.link.motor(int(duty))
             self._last_cmd_vel = monotonic()
+        
+        @staticmethod
+        def _speed_to_duty(v: float, v_max: float, pwm_deadband: float,
+                           v_eps: float) -> int:
+            """m/s -> signierter duty, mit Deadband-Sprung ueber die
+            Losbrech-Schwelle. Stillstand bleibt Stillstand."""
+            if abs(v) < v_eps:
+                return 0
+            frac = min(abs(v) / v_max, 1.0)                      # 0..1 der nutzbaren Spanne
+            pwm_frac = pwm_deadband + frac * (1.0 - pwm_deadband)
+            duty = int(round(pwm_frac * DUTY_MAX))
+            return duty if v > 0 else -duty
 
         def _on_cmd_vel(self, msg: Twist) -> None:
-            """Twist auf offene Steuerung abbilden.
-
-            Der ESP hat keine Drehzahlregelung - ``linear.x`` wird direkt auf
-            PWM umgerechnet. Die Zuordnung ist so gut wie ``max_linear``
-            ausgemessen ist.
-            """
-            max_linear = float(self._p("max_linear")) or 1.0
+            """Twist zwischenspeichern. Der Motor wird vom Regel-Timer gesetzt;
+            hier nur Soll-Geschwindigkeit cachen und die Lenkung direkt senden
+            (die ist ungeregelt, offene Steuerung)."""
             max_angular = float(self._p("max_angular")) or 1.0
-
-            duty = int(round(_clamp(msg.linear.x / max_linear, -1.0, 1.0) * DUTY_MAX))
+            self._v_soll = float(msg.linear.x)
             steer = _clamp(msg.angular.z / max_angular, -1.0, 1.0) * 100.0
-
-            self.link.motor(duty)
             self.link.steer(steer)
             self._last_cmd_vel = monotonic()
+
+        def _odom_cb(self, msg) -> None:
+            """Ist-Geschwindigkeit (skalar, vorwaerts) aus dem EKF."""
+            self._v_ist = float(msg.twist.twist.linear.x)
+            self._last_odom = monotonic()
+
+        def _velocity_control(self) -> None:
+            """Fester Takt: Feedforward + PI auf v_soll - v_ist -> duty.
+            Alleiniger Schreiber des Motorbefehls."""
+            now = monotonic()
+
+            # kein aktuelles /cmd_vel -> anhalten, Integrator zuruecksetzen
+            if (self._cmd_vel_timeout > 0 and
+                    (self._last_cmd_vel == 0.0 or
+                     now - self._last_cmd_vel > self._cmd_vel_timeout)):
+                self._vel_integral = 0.0
+                self.link.motor(0)
+                return
+
+            a_max = float(self._p("vel_accel"))          # m/s^2, neuer Parameter
+            dv = a_max * self._ctrl_dt
+            target = self._v_soll
+            if target > self._v_ramp:
+                self._v_ramp = min(target, self._v_ramp + dv)
+            else:
+                self._v_ramp = max(target, self._v_ramp - dv)
+            v_soll = self._v_ramp
+
+            # Stillstand: Integrator halten, duty 0 (nicht gegen Rauschen regeln)
+            if abs(v_soll) < float(self._p("v_eps")):
+                self.link.motor(0)
+                return
+
+            v_max = float(self._p("v_max")) or 1.0
+            pwm_deadband = float(self._p("pwm_deadband"))
+            v_eps = float(self._p("v_eps"))
+            duty_ff = self._speed_to_duty(v_soll, v_max, pwm_deadband, v_eps)
+
+            odom_age = now - self._last_odom if self._last_odom else 1e9
+
+            # kein Feedback zu lange -> stoppen
+            if odom_age > float(self._p("odom_stop_s")):
+                self._vel_integral = 0.0
+                self.link.motor(0)
+                self.get_logger().warn(
+                    "kein /ekf/odom - Geschwindigkeitsregler stoppt",
+                    throttle_duration_sec=2.0)
+                return
+
+            # Feedback kurz weg -> nur Feedforward, Integrator einfrieren
+            if odom_age > float(self._p("odom_stale_s")):
+                duty = duty_ff + self._vel_integral
+            else:
+                error = v_soll - self._v_ist
+                self._vel_integral += float(self._p("vel_ki")) * error * self._ctrl_dt
+                i_limit = float(self._p("vel_i_limit"))
+                self._vel_integral = _clamp(self._vel_integral, -i_limit, i_limit)
+                duty = duty_ff + float(self._p("vel_kp")) * error + self._vel_integral
+
+            self.link.motor(int(round(_clamp(duty, -DUTY_MAX, DUTY_MAX))))
 
         def _on_move(self, msg: Float32) -> None:
             move_id = self.link.move(float(msg.data))

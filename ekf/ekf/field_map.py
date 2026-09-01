@@ -127,6 +127,76 @@ def generate_map(start_pose, segments=FIELD_SEGMENTS):
             'p2': _transform_point(p2, start_pose),
         })
     return walls
+
+def start_map_3wall(front_dist, left_d, right_d):
+    """Reduced start-straight map: the three visible walls as (alpha, d).
+
+    For the open challenge the full field geometry is unknown at the start
+    (inner band is variable), so the map is just the three walls the robot
+    actually sees, in the map frame (robot start pose = origin, facing +x):
+
+        front wall : alpha = 180 deg, d = -front_dist
+        left  wall : alpha = -90 deg, d = -left_d
+        right wall : alpha = +90 deg, d = -right_d
+
+    Returned as plain (alpha, d) tuples (no endpoints): match_walls handles
+    these via its legacy path (innovation gating only, no overlap check).
+    Left/right are just the two sides in the robot frame; inner vs outer is
+    not resolved here (direction is unknown until the first corner).
+
+    Args:
+        front_dist, left_d, right_d: positive distances (m) from detect_start.
+
+    Returns list of (alpha, d) tuples.
+    """
+    return [
+        (np.pi, -abs(front_dist)),           # front
+        (np.radians(-90.0), -abs(left_d)),   # left  (+y side)
+        (np.radians(90.0), -abs(right_d)),   # right (-y side)
+    ]
+
+def outer_box_map(start_pose):
+    """Outer track box (fixed 3x3 rim) in the start-anchored map frame.
+
+    Returns (corners, walls, edge_length):
+      corners: list of 4 (x, y) np arrays, CCW winding, index 0 = largest x
+               (furthest ahead in driving direction).
+      walls:   list of 4 (nx, ny, d) tuples, HNF in the map frame, ordered to
+               match the edge starting at corners[i] -> corners[i+1].
+      edge_length: 3.0 (nominal).
+
+    Direction-agnostic: the winding/index rule is purely geometric; the caller
+    uses the separate latched direction to traverse the indices.
+    """
+    # transform the 4 outer corners (field frame) into the map frame
+    corners_field = [p1 for (p1, p2) in OUTER_SEGMENTS]  # the 4 corners
+    corners_map = [_transform_point(np.array(c), start_pose) for c in corners_field]
+
+    # sort CCW about the box centre, then rotate so index 0 = largest x
+    centre = np.mean(corners_map, axis=0)
+    order = sorted(range(4),
+                   key=lambda i: np.arctan2(corners_map[i][1] - centre[1],
+                                            corners_map[i][0] - centre[0]))
+    ccw = [corners_map[i] for i in order]
+    start = int(np.argmax([c[0] for c in ccw]))          # largest x
+    ccw = ccw[start:] + ccw[:start]
+
+    # build the wall HNF for each edge corners[i] -> corners[i+1], normal
+    # pointing inward (toward the box centre)
+    walls = []
+    for i in range(4):
+        p1 = ccw[i]
+        p2 = ccw[(i + 1) % 4]
+        edge = p2 - p1
+        n = np.array([-edge[1], edge[0]])
+        n = n / np.hypot(n[0], n[1])
+        # orient inward: normal should point toward the centre
+        if np.dot(n, centre - p1) < 0:
+            n = -n
+        d = np.dot(n, p1)
+        walls.append((float(n[0]), float(n[1]), float(d)))
+
+    return ccw, walls, 3.0
  
  
 if __name__ == '__main__':

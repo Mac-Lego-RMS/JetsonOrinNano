@@ -120,11 +120,13 @@ class EKFNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'odom'
         msg.child_frame_id = 'base_link'
-        x, y, th = self.ekf.x[0], self.ekf.x[1], self.ekf.x[2]
+        x, y, th, v, omega = self.ekf.x[0], self.ekf.x[1], self.ekf.x[2], self.ekf.x[3], self.ekf.x[4]
         msg.pose.pose.position.x = x
         msg.pose.pose.position.y = y
         msg.pose.pose.orientation.z = np.sin(th / 2)     # yaw -> quaternion
         msg.pose.pose.orientation.w = np.cos(th / 2)
+        msg.twist.twist.linear.x = float(v)      # forward speed estimate
+        msg.twist.twist.angular.z = float(omega)  # yaw rate estimate
         self.pub.publish(msg)
 
 

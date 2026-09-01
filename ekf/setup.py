@@ -28,6 +28,11 @@ setup(
             'scan_processor = ekf.scan_processor_node:main',
             'ekf_test = ekf.ekfTest:main',
             'scan_test = ekf.scanNode:main',
+            'straight_controller = ekf.straight_controller_node:main',
+            'approach_corner = ekf.approach_corner_node:main',
+            'round1_controller = ekf.round1_controller_node:main',
+            'speed_calib = ekf.speed_calib_node:main',
+            'speed_verify = ekf.speed_varify:main',
         ],
     },
 )
