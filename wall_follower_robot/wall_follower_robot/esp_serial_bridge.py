@@ -709,6 +709,16 @@ def _build_node_class():
             self.declare_parameter("max_angular", 1.0)     # rad/s bei Vollausschlag
             self.declare_parameter("vel_accel", 0.8)
 
+            # Ackermann-Lenkung: angular.z (rad/s) -> Lenkwinkel -> Servo-Prozent.
+            # delta = atan(L*omega/v); Kennlinie servo = (delta - b)/a, seitengetrennt.
+            self.declare_parameter("wheelbase", 0.10)         # L [m]
+            self.declare_parameter("steer_a_left", 0.4109)    # rad pro servo-Einheit (CCW)
+            self.declare_parameter("steer_b_left", -0.01795)   # rad Offset (CCW)
+            self.declare_parameter("steer_a_right", 0.4426)   # rad pro servo-Einheit (CW)
+            self.declare_parameter("steer_b_right", 0.04189)  # rad Offset (CW)
+            self.declare_parameter("steer_v_min", 0.05)       # darunter: delta bei v_min clampen
+            self.declare_parameter("steer_raw_bypass", False)
+
             self.declare_parameter("vel_kp", 200.0)      # duty pro (m/s) Fehler
             self.declare_parameter("vel_ki", 800.0)      # duty pro (m/s * s)
             self.declare_parameter("vel_i_limit", 600.0) # Anti-Windup-Grenze (duty)
@@ -986,11 +996,47 @@ def _build_node_class():
             """Twist zwischenspeichern. Der Motor wird vom Regel-Timer gesetzt;
             hier nur Soll-Geschwindigkeit cachen und die Lenkung direkt senden
             (die ist ungeregelt, offene Steuerung)."""
-            max_angular = float(self._p("max_angular")) or 1.0
             self._v_soll = float(msg.linear.x)
-            steer = _clamp(msg.angular.z / max_angular, -1.0, 1.0) * 100.0
+            steer = self._omega_to_servo(float(msg.angular.z))
             self.link.steer(steer)
             self._last_cmd_vel = monotonic()
+
+        def _omega_to_servo(self, omega: float) -> float:
+            """Kommandierte Gierrate (rad/s) -> Servo-Prozent (-100..100) ueber
+            die Ackermann-Inverse mit seitengetrennter, kalibrierter Kennlinie.
+
+            delta = atan(L*omega/v_ist); servo = (delta - b)/a je nach Richtung.
+            Bei sehr kleiner Geschwindigkeit wuerde delta explodieren -> v auf
+            v_min klemmen (Option a): der Lenkwinkel bleibt der, der bei v_min
+            gaelte, statt unendlich zu werden.
+            """
+            if bool(self._p("steer_raw_bypass")):
+                return float(_clamp(omega, -1.0, 1.0) * 100.0)
+
+            if abs(omega) < 1e-6:
+                # Geradeaus. Trotzdem die Trim-Korrektur anwenden: servo bei
+                # delta=0, damit "geradeaus" wirklich geradeaus ist.
+                a = float(self._p("steer_a_left"))
+                b = float(self._p("steer_b_left"))
+                return float(_clamp((0.0 - b) / a, -1.0, 1.0) * 100.0)
+
+            # gemessene Vorwaertsgeschwindigkeit, nach unten geklemmt
+            v = self._v_ist
+            v_min = float(self._p("steer_v_min"))
+            v_eff = v if abs(v) >= v_min else math.copysign(v_min, 1.0)
+
+            L = float(self._p("wheelbase"))
+            delta = math.atan(L * omega / v_eff)          # Vorzeichen folgt omega
+
+            if delta >= 0.0:   # links / CCW
+                a = float(self._p("steer_a_left"))
+                b = float(self._p("steer_b_left"))
+            else:              # rechts / CW
+                a = float(self._p("steer_a_right"))
+                b = float(self._p("steer_b_right"))
+
+            servo = (delta - b) / a
+            return float(_clamp(servo, -1.0, 1.0) * 100.0)
 
         def _odom_cb(self, msg) -> None:
             """Ist-Geschwindigkeit (skalar, vorwaerts) aus dem EKF."""

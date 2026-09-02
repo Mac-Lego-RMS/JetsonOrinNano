@@ -96,14 +96,14 @@ class Round1Controller(Node):
 
         # --- Longitudinal (m/s) ---
         self.declare_parameter('v_cruise', 0.5)
-        self.declare_parameter('v_turn', 0.32)          # constant speed through the arc
+        self.declare_parameter('v_turn', 0.45)          # constant speed through the arc
         self.declare_parameter('v_approach', 0.25)      # brake target near corner (= turn entry speed)
         self.declare_parameter('brake_start', 1.0)
         self.declare_parameter('accel', 0.6)
         self.declare_parameter('decel', 1.0)
 
         # --- Sequencing / safety ---
-        self.declare_parameter('require_button', True)
+        self.declare_parameter('require_button', False)
         self.declare_parameter('control_rate', 30.0)
         self.declare_parameter('odom_timeout', 0.3)
 

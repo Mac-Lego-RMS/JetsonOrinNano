@@ -197,6 +197,28 @@ def outer_box_map(start_pose):
         walls.append((float(n[0]), float(n[1]), float(d)))
 
     return ccw, walls, 3.0
+
+def outer_walls_map(start_pose):
+    """The 4 outer-band walls (3x3 rim) as match-ready walls in the map frame.
+
+    Same dict format as generate_map ({'alpha','d','p1','p2'} with endpoints),
+    so match_walls applies overlap gating. Inner band is omitted (unknown in the
+    open challenge until round-1 learning). Used as the EKF matching map after
+    the direction latch on the open challenge.
+    """
+    walls = []
+    for (p1, p2) in OUTER_SEGMENTS:
+        alpha_f, d_f = segment_to_hnf(p1, p2)
+        xs, ys, th = start_pose
+        alpha_m = wrap(alpha_f - th)
+        d_m = d_f - (xs * np.cos(alpha_f) + ys * np.sin(alpha_f))
+        walls.append({
+            'alpha': alpha_m,
+            'd': d_m,
+            'p1': _transform_point(np.array(p1), start_pose),
+            'p2': _transform_point(np.array(p2), start_pose),
+        })
+    return walls
  
  
 if __name__ == '__main__':

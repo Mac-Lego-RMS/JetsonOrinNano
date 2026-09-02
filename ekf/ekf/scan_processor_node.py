@@ -33,7 +33,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from ekf.direction_detection import detect_direction
 
 from ekf.wall_extraction import scan_to_points, cluster_points, merge_wraparound, split_at_corners, fit_wall_hnf, lidar_to_base_link, match_walls
-from ekf.field_map import generate_map, start_map_3wall, outer_box_map, START_POSES_CW, START_POSES_CCW
+from ekf.field_map import generate_map, start_map_3wall, outer_box_map, START_POSES_CW, START_POSES_CCW, outer_walls_map
 from ekf.start_detection import detect_start_obstacle, detect_start_open
 
 from geometry_msgs.msg import Point
@@ -41,6 +41,7 @@ from robot_msgs.msg import CornerGeometry, WallHNF
 
 START_VOTES = 5             # scans to vote over before committing the map
 DIRECTION_VOTES = 5        # confident, agreeing scans before latching direction
+MAP_SWITCH_MAX_X = 0.30
 
 def yaw_from_quaternion(q):
     siny = 2.0 * (q.w * q.z + q.x * q.y)
@@ -85,6 +86,29 @@ class ScanProcessor(Node):
             if abs(abs(alpha) - np.pi) < np.radians(30.0):
                 return abs(d)
         return None
+
+    def _switch_map_to_direction(self):
+        """Switch the EKF matching map to the latched direction. Safe only near
+        the start (straight); guarded against a late latch that would jump."""
+        if abs(self.pose[0]) > MAP_SWITCH_MAX_X:
+            self.get_logger().warn(
+                f'direction latched late (x={self.pose[0]:.2f} m) -- NOT '
+                f'switching map to avoid a pose jump; check latch timing')
+            return
+ 
+        poses = START_POSES_CW if self.direction == 'CW' else START_POSES_CCW
+        start_pose = (poses[f'pos{self.position}'] if self.race_mode != 'open'
+                      else self._open_start_pose())
+ 
+        if self.race_mode == 'open':
+            self.map_walls = outer_walls_map(start_pose)   # outer rim only
+            n = len(self.map_walls)
+        else:
+            self.map_walls = generate_map(start_pose)       # full field map
+            n = len(self.map_walls)
+        self.front_wall_x = self._front_wall_x_from_map(self.map_walls)
+        self.get_logger().info(
+            f'matching map switched to {self.direction} ({n} walls)')
 
     def pose_cb(self, msg):
         x = msg.pose.pose.position.x
@@ -190,7 +214,7 @@ class ScanProcessor(Node):
         the whole run) -- no reset."""
         if self.direction is not None:
             return                                    # already latched -> frozen
- 
+
         res = detect_direction(measured, lane_width=self.lane_width)
         if not res['confident']:
             return
@@ -202,8 +226,12 @@ class ScanProcessor(Node):
         if len(self.dir_votes) == DIRECTION_VOTES and len(set(self.dir_votes)) == 1:
             self.direction = self.dir_votes[0]
             self.direction_pub.publish(String(data=self.direction))
-            self.direction_pub.publish(String(data=self.direction))
             self.get_logger().info(f'race direction latched: {self.direction}')
+
+            # switch the EKF matching map to the latched direction (jump-guarded)
+            self._switch_map_to_direction()
+
+            # publish the outer box for the controller (both modes)
             if self.race_mode == 'open':
                 self._publish_corner_geometry(self._open_start_pose())
             else:
