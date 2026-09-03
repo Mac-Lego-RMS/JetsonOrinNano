@@ -712,10 +712,10 @@ def _build_node_class():
             # Ackermann-Lenkung: angular.z (rad/s) -> Lenkwinkel -> Servo-Prozent.
             # delta = atan(L*omega/v); Kennlinie servo = (delta - b)/a, seitengetrennt.
             self.declare_parameter("wheelbase", 0.10)         # L [m]
-            self.declare_parameter("steer_a_left", 0.4109)    # rad pro servo-Einheit (CCW)
-            self.declare_parameter("steer_b_left", -0.01795)   # rad Offset (CCW)
-            self.declare_parameter("steer_a_right", 0.4426)   # rad pro servo-Einheit (CW)
-            self.declare_parameter("steer_b_right", 0.04189)  # rad Offset (CW)
+            self.declare_parameter("steer_a_left", 0.3487)    # rad pro servo-Einheit (CCW)
+            self.declare_parameter("steer_b_left", 0.05324)   # rad Offset (CCW)
+            self.declare_parameter("steer_a_right", 0.4494)   # rad pro servo-Einheit (CW)
+            self.declare_parameter("steer_b_right", 0.08855)  # rad Offset (CW)
             self.declare_parameter("steer_v_min", 0.05)       # darunter: delta bei v_min clampen
             self.declare_parameter("steer_raw_bypass", False)
 
