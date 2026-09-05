@@ -232,7 +232,7 @@ def predict_wall_in_robot_frame(alpha_map, d_map, pose):
     d_robot = d_map - (x * np.cos(alpha_map) + y * np.sin(alpha_map))
     return alpha_robot, d_robot
 
-
+# unused: overlap gating removed, d-gate suffices
 def _overlap_along_direction(a1, a2, b1, b2, tol=0.05):
     """Do segments [a1,a2] and [b1,b2] overlap when projected onto the line
     through a1->a2? Returns True if the projected intervals overlap (with a
@@ -296,16 +296,6 @@ def match_walls(measured, map_walls, pose,
             if abs(innov_a) > alpha_tol or abs(innov_d) > d_tol:
                 continue
 
-            # overlap gate: only if both sides carry endpoints. Map endpoints
-            # are in the MAP frame, measured endpoints in the robot frame, so
-            # project the map segment into the robot frame first via the pose.
-            if has_endpoints and map_p1 is not None:
-                mp1 = _map_point_to_robot(map_p1, pose)
-                mp2 = _map_point_to_robot(map_p2, pose)
-                if not _overlap_along_direction(m_start, m_end, mp1, mp2,
-                                                tol=overlap_tol):
-                    continue
-
             cost = (innov_a / alpha_tol) ** 2 + (innov_d / d_tol) ** 2
             if cost < best_cost:
                 best_cost = cost
@@ -318,7 +308,7 @@ def match_walls(measured, map_walls, pose,
             matches.append(best)
     return matches
 
-
+# unused: overlap gating removed, d-gate suffices
 def _map_point_to_robot(p_map, pose):
     """Transform a point from the map frame into the robot/base_link frame."""
     x, y, th = pose

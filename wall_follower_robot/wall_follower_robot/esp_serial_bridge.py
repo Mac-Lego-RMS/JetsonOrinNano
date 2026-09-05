@@ -712,10 +712,10 @@ def _build_node_class():
             # Ackermann-Lenkung: angular.z (rad/s) -> Lenkwinkel -> Servo-Prozent.
             # delta = atan(L*omega/v); Kennlinie servo = (delta - b)/a, seitengetrennt.
             self.declare_parameter("wheelbase", 0.10)         # L [m]
-            self.declare_parameter("steer_a_left", 0.3487)    # rad pro servo-Einheit (CCW)
-            self.declare_parameter("steer_b_left", 0.05324)   # rad Offset (CCW)
-            self.declare_parameter("steer_a_right", 0.4494)   # rad pro servo-Einheit (CW)
-            self.declare_parameter("steer_b_right", 0.08855)  # rad Offset (CW)
+            self.declare_parameter("steer_a_left", 0.3643)    # rad pro servo-Einheit (CCW)
+            self.declare_parameter("steer_b_left", -0.01985)   # rad Offset (CCW)
+            self.declare_parameter("steer_a_right", 0.2962)   # rad pro servo-Einheit (CW)
+            self.declare_parameter("steer_b_right", 0.00377)  # rad Offset (CW)
             self.declare_parameter("steer_v_min", 0.05)       # darunter: delta bei v_min clampen
             self.declare_parameter("steer_raw_bypass", False)
 
@@ -725,6 +725,8 @@ def _build_node_class():
             self.declare_parameter("vel_control_rate", 50.0)
             self.declare_parameter("odom_stale_s", 0.15) # danach: nur Feedforward
             self.declare_parameter("odom_stop_s", 0.50)  # danach: Motor stoppen
+
+            self.declare_parameter("steer_center_servo", -0.04)
 
             self._p = lambda name: self.get_parameter(name).value
             self._cmd_vel_timeout = float(self._p("cmd_vel_timeout"))
@@ -1014,11 +1016,10 @@ def _build_node_class():
                 return float(_clamp(omega, -1.0, 1.0) * 100.0)
 
             if abs(omega) < 1e-6:
-                # Geradeaus. Trotzdem die Trim-Korrektur anwenden: servo bei
-                # delta=0, damit "geradeaus" wirklich geradeaus ist.
-                a = float(self._p("steer_a_left"))
-                b = float(self._p("steer_b_left"))
-                return float(_clamp((0.0 - b) / a, -1.0, 1.0) * 100.0)
+                # Geradeaus: dedizierter Trim-Servo, empirisch getunt, sodass
+                # omega=0 wirklich geradeaus faehrt (nicht aus dem Kurven-Ast
+                # extrapoliert -- der Geradeaus-Nullpunkt ist eine eigene Groesse).
+                return float(_clamp(self._p("steer_center_servo"), -1.0, 1.0) * 100.0)
 
             # gemessene Vorwaertsgeschwindigkeit, nach unten geklemmt
             v = self._v_ist
