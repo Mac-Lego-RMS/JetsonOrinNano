@@ -86,6 +86,7 @@ class Round1Controller(Node):
         'k_th':          ('k_th',          1.0,   float),
         'k_stanley':     ('k_stanley',     1.5,   float),
         'k_stanley_i':   ('k_stanley_i',   0.4,   float),   # cross-track integral gain
+        'k_heading':     ('k_heading',     1.0,   float),   # Stanley heading-term weight (damping)
         'i_ct_limit':    ('i_ct_limit',    math.radians(15.0), lambda v: math.radians(float(v))),  # anti-windup [deg->rad]
         'max_steer_deg': ('max_steer',     25.0,  lambda v: math.radians(float(v))),
         'wheelbase':     ('wheelbase',     0.10,  float),
@@ -99,7 +100,7 @@ class Round1Controller(Node):
         'n_corners':     ('n_corners',     4,     int),
         'finish_front_dist': ('finish_front_dist', 1.5, float),
         'finish_decel':  ('finish_decel',  0.8,   float),   # look-ahead brake decel [m/s^2]
-        'finish_lead_time': ('finish_lead_time', 0.10, float),  # reaction lead [s] -> stops on point
+        'finish_lead_time': ('finish_lead_time', 0.15, float),  # reaction lead [s] -> stops on point
         'v_finish_min':  ('v_finish_min',  0.15,  float),   # DRIVABLE crawl, just above deadband
         'finish_tol':    ('finish_tol',    0.04,  float),   # stop tolerance on front_dist
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
@@ -114,6 +115,16 @@ class Round1Controller(Node):
         self.declare_parameter('require_button', False)
         self.declare_parameter('control_rate', 30.0)
         self.declare_parameter('odom_timeout', 0.5)   # bridge past short EKF gaps
+
+        # per-corner overrides (index = corner_idx). Empty -> use the global scalar
+        # (o_in / o_out / turn_radius). Set a 4-element list to override per corner,
+        # e.g. o_in_list:=[0.5,0.3,0.5,0.3]. o_out[N] and o_in[N+1] need NOT match
+        # (asymmetric racing line is allowed; Stanley drives the transition smoothly).
+        from rcl_interfaces.msg import ParameterDescriptor, ParameterType
+        arr = ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE_ARRAY)
+        self.declare_parameter('o_in_list', [0.5, 0.5, 0.5, 0.5], arr)
+        self.declare_parameter('o_out_list', [0.5, 0.5, 0.5, 0.5], arr)
+        self.declare_parameter('turn_radius_list', [0.5, 0.5, 0.5, 0.5], arr)        
 
         self._load_params()
         self.require_button = bool(self.get_parameter('require_button').value)
@@ -162,13 +173,34 @@ class Round1Controller(Node):
     def _load_params(self):
         for name, (attr, _default, conv) in self._PARAMS.items():
             setattr(self, attr, conv(self.get_parameter(name).value))
+        self._load_lists()
+
+    def _load_lists(self):
+        self.o_in_list = [float(v) for v in self.get_parameter('o_in_list').value]
+        self.o_out_list = [float(v) for v in self.get_parameter('o_out_list').value]
+        self.R_list = [float(v) for v in self.get_parameter('turn_radius_list').value]
 
     def _on_params(self, params):
         for p in params:
             if p.name in self._PARAMS:
                 attr, _default, conv = self._PARAMS[p.name]
                 setattr(self, attr, conv(p.value))
+            elif p.name == 'o_in_list':
+                self.o_in_list = [float(v) for v in p.value]
+            elif p.name == 'o_out_list':
+                self.o_out_list = [float(v) for v in p.value]
+            elif p.name == 'turn_radius_list':
+                self.R_list = [float(v) for v in p.value]
         return SetParametersResult(successful=True)
+
+    def corner_o_in(self, idx):
+        return self.o_in_list[idx] if idx < len(self.o_in_list) else self.o_in
+
+    def corner_o_out(self, idx):
+        return self.o_out_list[idx] if idx < len(self.o_out_list) else self.o_out
+
+    def corner_R(self, idx):
+        return self.R_list[idx] if idx < len(self.R_list) else self.R
 
     # ------------------------------------------------------------- callbacks
     def odom_cb(self, msg):
@@ -295,14 +327,17 @@ class Round1Controller(Node):
         if abs(A[0] * tx + A[1] * ty) > abs(B[0] * tx + B[1] * ty):
             A, B = B, A   # ensure A = entry (normal perp to travel), B = exit (normal along -travel)
 
-        LA = (A[0], A[1], A[2] + self.o_in)
-        LB = (B[0], B[1], B[2] + self.o_out)
+        o_in = self.corner_o_in(idx)
+        o_out = self.corner_o_out(idx)
+        R = self.corner_R(idx)
+
+        LA = (A[0], A[1], A[2] + o_in)
+        LB = (B[0], B[1], B[2] + o_out)
         P = line_intersect(LA, LB)
         if P is None:
             self.get_logger().error("Eintritts-/Austrittslinie parallel -- kann Bogen nicht planen.")
             return False
 
-        R = self.R
         C = (P[0] + R * (A[0] + B[0]), P[1] + R * (A[1] + B[1]))
         T_A = (C[0] - R * A[0], C[1] - R * A[1])
         T_B = (C[0] - R * B[0], C[1] - R * B[1])
@@ -325,12 +360,12 @@ class Round1Controller(Node):
         u_B = u_exit   # keep exit travel consistent with theta_target
 
         tx, ty = travel
-        self.arc = dict(C=C, s=s, T_A=T_A, T_B=T_B, a0=a0, travel=travel,
+        self.arc = dict(C=C, s=s, R=R, T_A=T_A, T_B=T_B, a0=a0, travel=travel,
                         LA=LA, LB=LB, u_B=u_B, theta_target=theta_target)
         corner = self.corners[idx]
         self.get_logger().info(
             f"DECIDE Ecke {self.corner_count+1}/{self.n_corners} (idx {idx}, {self.race_direction}): "
-            f"Eckpunkt=({corner[0]:.2f},{corner[1]:.2f}) "
+            f"Eckpunkt=({corner[0]:.2f},{corner[1]:.2f}) o_in={o_in:.2f} o_out={o_out:.2f} R={R:.2f} "
             f"T_A=({T_A[0]:.2f},{T_A[1]:.2f}) T_B=({T_B[0]:.2f},{T_B[1]:.2f}) "
             f"theta_target={math.degrees(theta_target):.1f}.")
         if self.debug:
@@ -505,7 +540,7 @@ class Round1Controller(Node):
         self.publish_cmd(v, omega)
 
     def _turn(self, x, y, theta):
-        C = self.arc['C']; s = self.arc['s']; R = self.R
+        C = self.arc['C']; s = self.arc['s']; R = self.arc['R']
         rx, ry = x - C[0], y - C[1]
         dist = math.hypot(rx, ry) or 1e-6
         r_hat = (rx / dist, ry / dist)
@@ -576,7 +611,7 @@ class Round1Controller(Node):
         self.ct_integral = max(-self.i_ct_limit, min(self.i_ct_limit, self.ct_integral))
 
         v = max(abs(self.v_ist), 0.05)
-        delta = e_theta + math.atan2(self.k_stanley * e_ct, v) + self.ct_integral
+        delta = self.k_heading * e_theta + math.atan2(self.k_stanley * e_ct, v) + self.ct_integral
         delta = max(-self.max_steer, min(self.max_steer, delta))
         omega = v * math.tan(delta) / self.wheelbase
         return omega
