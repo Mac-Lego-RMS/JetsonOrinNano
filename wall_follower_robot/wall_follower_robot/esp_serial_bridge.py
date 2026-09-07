@@ -672,6 +672,8 @@ def _build_node_class():
     from std_msgs.msg import Int32, Int32MultiArray, String
     from std_srvs.srv import SetBool, Trigger
 
+    from wall_follower_robot.steer_lut import SteerLUT
+
     class EspBridgeNode(Node):
         """Alle Funktionen des ESP als Topics und Services.
 
@@ -716,6 +718,7 @@ def _build_node_class():
             self.declare_parameter("steer_b_left", -0.01985)   # rad Offset (CCW)
             self.declare_parameter("steer_a_right", 0.2962)   # rad pro servo-Einheit (CW)
             self.declare_parameter("steer_b_right", 0.00377)  # rad Offset (CW)
+            self.declare_parameter('steer_calib_path', '/workspace/src/wall_follower_robot/wall_follower_robot/steer_calib.json')
             self.declare_parameter("steer_v_min", 0.05)       # darunter: delta bei v_min clampen
             self.declare_parameter("steer_raw_bypass", False)
 
@@ -759,6 +762,10 @@ def _build_node_class():
 
             self.link.start(sync_rounds=int(self._p("sync_rounds")),
                             stamp=bool(self._p("stamp_mode")))
+
+            self.steer_lut = SteerLUT(
+                self.get_parameter('steer_calib_path').value,
+                logger=self.get_logger())
 
             # Erst nach dem Uhrenabgleich einschalten - sonst kaemen die ersten
             # Telemetriepakete ohne brauchbaren Zeitstempel an.
@@ -1004,40 +1011,9 @@ def _build_node_class():
             self._last_cmd_vel = monotonic()
 
         def _omega_to_servo(self, omega: float) -> float:
-            """Kommandierte Gierrate (rad/s) -> Servo-Prozent (-100..100) ueber
-            die Ackermann-Inverse mit seitengetrennter, kalibrierter Kennlinie.
-
-            delta = atan(L*omega/v_ist); servo = (delta - b)/a je nach Richtung.
-            Bei sehr kleiner Geschwindigkeit wuerde delta explodieren -> v auf
-            v_min klemmen (Option a): der Lenkwinkel bleibt der, der bei v_min
-            gaelte, statt unendlich zu werden.
-            """
             if bool(self._p("steer_raw_bypass")):
                 return float(_clamp(omega, -1.0, 1.0) * 100.0)
-
-            if abs(omega) < 1e-6:
-                # Geradeaus: dedizierter Trim-Servo, empirisch getunt, sodass
-                # omega=0 wirklich geradeaus faehrt (nicht aus dem Kurven-Ast
-                # extrapoliert -- der Geradeaus-Nullpunkt ist eine eigene Groesse).
-                return float(_clamp(self._p("steer_center_servo"), -1.0, 1.0) * 100.0)
-
-            # gemessene Vorwaertsgeschwindigkeit, nach unten geklemmt
-            v = self._v_ist
-            v_min = float(self._p("steer_v_min"))
-            v_eff = v if abs(v) >= v_min else math.copysign(v_min, 1.0)
-
-            L = float(self._p("wheelbase"))
-            delta = math.atan(L * omega / v_eff)          # Vorzeichen folgt omega
-
-            if delta >= 0.0:   # links / CCW
-                a = float(self._p("steer_a_left"))
-                b = float(self._p("steer_b_left"))
-            else:              # rechts / CW
-                a = float(self._p("steer_a_right"))
-                b = float(self._p("steer_b_right"))
-
-            servo = (delta - b) / a
-            return float(_clamp(servo, -1.0, 1.0) * 100.0)
+            return float(self.steer_lut.servo_for(omega, self._v_ist) * 100.0)
 
         def _odom_cb(self, msg) -> None:
             """Ist-Geschwindigkeit (skalar, vorwaerts) aus dem EKF."""

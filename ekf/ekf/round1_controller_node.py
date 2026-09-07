@@ -35,7 +35,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from rcl_interfaces.msg import SetParametersResult
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Float64, String
+from std_msgs.msg import Bool, Float64, String, Int32MultiArray
 
 
 def yaw_from_quaternion(q):
@@ -80,20 +80,22 @@ class Round1Controller(Node):
         'o_in':          ('o_in',          0.50,  float),
         'o_out':         ('o_out',         0.50,  float),
         'turn_radius':   ('R',             0.50,  float),
-        'sweep_tol_deg': ('sweep_tol',     2.0,   lambda v: math.radians(float(v))),
-        'ff_blend_deg':  ('ff_blend',      35.0,  lambda v: math.radians(float(v))),
-        'k_ct':          ('k_ct',          3.0,   float),
-        'k_th':          ('k_th',          1.0,   float),
-        'k_stanley':     ('k_stanley',     1.5,   float),
-        'k_stanley_i':   ('k_stanley_i',   0.4,   float),   # cross-track integral gain
+        'sweep_tol_deg': ('sweep_tol',     3.0,   lambda v: math.radians(float(v))),
+        'ff_blend_deg':  ('ff_blend',      7.0,  lambda v: math.radians(float(v))),
+        'k_ct':          ('k_ct',          8.0,   float),
+        'k_th':          ('k_th',          2.5,   float),
+        'k_stanley':     ('k_stanley',     1.2,   float),
+        'k_stanley_i':   ('k_stanley_i',   0.0,   float),   # cross-track integral gain
         'k_heading':     ('k_heading',     1.0,   float),   # Stanley heading-term weight (damping)
+        'k_heading_v_ref': ('k_heading_v_ref', 0.45, float),
+	    'stanley_v_ref': ('stanley_v_ref', 0.0,   float),   # >0: fixed v for cross-track gain (speed-indep.)
         'i_ct_limit':    ('i_ct_limit',    math.radians(15.0), lambda v: math.radians(float(v))),  # anti-windup [deg->rad]
         'max_steer_deg': ('max_steer',     25.0,  lambda v: math.radians(float(v))),
         'wheelbase':     ('wheelbase',     0.10,  float),
         'max_yaw_rate':  ('max_yaw_rate',  3.0,   float),
         # speed profile (distance-based)
-        'v_drive':       ('v_drive',       0.55,  float),   # straight cruise
-        'v_turn':        ('v_turn',        0.35,  float),   # through the arc
+        'v_drive':       ('v_drive',       0.50,  float),   # straight cruise
+        'v_turn':        ('v_turn',        0.50,  float),   # through the arc
         'accel_dist':    ('accel_dist',    0.2,   float),   # ramp v_turn->v_drive after a corner
         'brake_dist':    ('brake_dist',    0.2,   float),   # ramp v_drive->v_turn before T_A
         # lap / finish
@@ -122,9 +124,9 @@ class Round1Controller(Node):
         # (asymmetric racing line is allowed; Stanley drives the transition smoothly).
         from rcl_interfaces.msg import ParameterDescriptor, ParameterType
         arr = ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE_ARRAY)
-        self.declare_parameter('o_in_list', [0.5, 0.5, 0.5, 0.5], arr)
-        self.declare_parameter('o_out_list', [0.5, 0.5, 0.5, 0.5], arr)
-        self.declare_parameter('turn_radius_list', [0.5, 0.5, 0.5, 0.5], arr)        
+        self.declare_parameter('o_in_list', [0.6, 0.6, 0.6, 0.6], arr)
+        self.declare_parameter('o_out_list', [0.6, 0.6, 0.6, 0.6], arr)
+        self.declare_parameter('turn_radius_list', [0.5, 0.5, 0.5, 0.5], arr)
 
         self._load_params()
         self.require_button = bool(self.get_parameter('require_button').value)
@@ -160,6 +162,18 @@ class Round1Controller(Node):
         if self.require_button:
             self.create_subscription(Bool, '/button_state', self.button_cb, 10)
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
+        # debug: Stanley errors for live plotting in Foxglove
+        self.pub_e_ct = self.create_publisher(Float64, '~/dbg/e_ct', 10)
+        self.pub_e_th = self.create_publisher(Float64, '~/dbg/e_theta_deg', 10)
+        self.pub_delta = self.create_publisher(Float64, '~/dbg/delta_deg', 10)
+        self.pub_k_h = self.create_publisher(Float64, '~/dbg/k_h_eff', 10)
+        self.pub_arc_dist = self.create_publisher(Float64, '~/dbg/arc_dist', 10)
+        self.pub_arc_R = self.create_publisher(Float64, '~/dbg/arc_R', 10)
+        # lap state for the perception side (round-1 learning): which corner is
+        # being approached, how many corners done, which lap.
+        # data = [corner_idx, corner_count, lap]  (lap = corner_count // 4)
+        # latched: a later-starting perception node still gets the current state.
+        self.pub_lap = self.create_publisher(Int32MultiArray, '~/lap_state', latched)
 
         self.dt = 1.0 / self.control_rate
         self.create_timer(self.dt, self.control_loop)
@@ -243,6 +257,18 @@ class Round1Controller(Node):
                     f"(Abw {e0:.3f}/{e1:.3f} m). Kanten-Ecken-Konvention verletzt!")
         if ok:
             self.get_logger().info("Kanten-Ecken-Konvention verifiziert (walls<->corners).")
+
+    def publish_lap_state(self):
+        """Publish [corner_idx, corner_count, lap] for the perception side.
+        corner_idx = corner currently being approached (0..3, box index)
+        corner_count = corners completed so far
+        lap = corner_count // 4  (0 = first lap)"""
+        if self.corner_idx is None:
+            return
+        msg = Int32MultiArray()
+        msg.data = [int(self.corner_idx), int(self.corner_count),
+                    int(self.corner_count // 4)]
+        self.pub_lap.publish(msg)
 
     def button_cb(self, msg):
         if msg.data:
@@ -441,6 +467,7 @@ class Round1Controller(Node):
                 self.corner_idx = 0
         if self.arc is None:
             self.plan_arc(theta)
+        self.publish_lap_state()
 
     def _speed_profile(self, dist_to_TA, dist_since_corner):
         """Distance-based speed: accelerate v_turn->v_drive over accel_dist after a
@@ -553,6 +580,16 @@ class Round1Controller(Node):
         blend = max(0.0, min(1.0, abs(theta_err) / self.ff_blend)) if self.ff_blend > 1e-6 else 1.0
         omega = s * (v_meas / R) * blend + s * self.k_ct * e_ct + self.k_th * e_th
 
+        # debug: arc cross-track on the SAME topic as the straight -> continuous plot.
+        # e_ct = dist-R : >0 = robot OUTSIDE the planned circle (turning too wide).
+        # arc_dist vs arc_R shows the REAL radius against the planned one.
+        self.pub_e_ct.publish(Float64(data=float(e_ct)))
+        self.pub_arc_dist.publish(Float64(data=float(dist)))
+        self.pub_arc_R.publish(Float64(data=float(R)))
+        self.pub_e_th.publish(Float64(data=float(math.degrees(e_th))))
+        delta_cmd = math.atan(self.wheelbase * omega / max(abs(self.v_ist), 0.05))
+        self.pub_delta.publish(Float64(data=float(math.degrees(delta_cmd))))
+
         if s * theta_err <= self.sweep_tol:
             # corner done: advance index, plan next arc, back to DRIVE (no stop)
             self.corner_count += 1
@@ -560,6 +597,7 @@ class Round1Controller(Node):
                 f"TURN fertig Ecke {self.corner_count} (theta={math.degrees(theta):.1f}, "
                 f"ziel={math.degrees(self.arc['theta_target']):.1f}).")
             self.corner_idx = (self.corner_idx + self.dir_step()) % 4
+            self.publish_lap_state()
             self.arc = None
             self.drive_start_xy = (x, y)
             self.ct_integral = 0.0        # fresh cross-track integrator for the new straight
@@ -610,10 +648,27 @@ class Round1Controller(Node):
         self.ct_integral += self.k_stanley_i * e_ct * self.dt
         self.ct_integral = max(-self.i_ct_limit, min(self.i_ct_limit, self.ct_integral))
 
-        v = max(abs(self.v_ist), 0.05)
-        delta = self.k_heading * e_theta + math.atan2(self.k_stanley * e_ct, v) + self.ct_integral
+        # speed used everywhere: clamped against EKF spikes/dropouts
+        v = min(max(abs(self.v_ist), 0.2), 1.2)
+
+        # cross-track: real v in the denominator keeps the closed loop
+        # speed-independent (e_ct decays with time constant 1/k_stanley).
+        v_gain = self.stanley_v_ref if self.stanley_v_ref > 1e-3 else v
+
+        # heading: scale k_heading ~ 1/v so the heading loop's time constant
+        # L/(v*k_h_eff) stays constant. 0 -> no scaling.
+        v_ref_h = self.k_heading_v_ref if self.k_heading_v_ref > 1e-3 else v
+        k_h_eff = self.k_heading * (v_ref_h / v)
+
+        delta = (k_h_eff * e_theta + math.atan2(self.k_stanley * e_ct, v_gain) + self.ct_integral)
         delta = max(-self.max_steer, min(self.max_steer, delta))
         omega = v * math.tan(delta) / self.wheelbase
+
+        # debug publish for Foxglove
+        #self.pub_e_ct.publish(Float64(data=float(e_ct)))
+        self.pub_e_th.publish(Float64(data=float(math.degrees(e_theta))))
+        self.pub_delta.publish(Float64(data=float(math.degrees(delta))))
+        self.pub_k_h.publish(Float64(data=float(k_h_eff)))
         return omega
 
 

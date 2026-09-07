@@ -220,6 +220,59 @@ def outer_walls_map(start_pose):
         })
     return walls
  
+
+def inner_band_from_widths(start_pose, widths):
+    """Inner-band walls and corners in the map frame, from measured lane widths.
+
+    The inner edge of straight i is the outer wall i shifted inward by that
+    straight's measured lane width. Intersecting adjacent inner lines gives the
+    inner corners. Uses the MEASURED width (not snapped to 0.6/1.0) because the
+    rules allow +-100 mm at the international final.
+
+    Args:
+        start_pose: field-frame start pose (same one used for outer_box_map).
+        widths: dict {outer_wall_index (0..3): measured lane width in m}.
+                All four indices must be present.
+
+    Returns (walls, corners) or None if the geometry is degenerate:
+        walls:   list of 4 dicts {'alpha','d','p1','p2'}, normals pointing
+                 OUTWARD (into the lane), same format as generate_map.
+        corners: list of 4 (2,) arrays. Index convention matches the outer box:
+                 wall i spans corners[i] -> corners[i+1].
+    """
+    if any(i not in widths for i in range(4)):
+        return None
+
+    _, outer_walls, _ = outer_box_map(start_pose)
+
+    # inner LINES: n . p = d_out + w, with n the outer wall's inward normal
+    lines = []
+    for i in range(4):
+        nx, ny, d_out = outer_walls[i]
+        lines.append((np.array([nx, ny]), d_out + widths[i]))
+
+    # inner corner j = intersection of line[j-1] and line[j]
+    corners = []
+    for j in range(4):
+        n1, c1 = lines[(j - 1) % 4]
+        n2, c2 = lines[j]
+        A = np.array([n1, n2])
+        if abs(np.linalg.det(A)) < 1e-9:
+            return None                      # parallel -> degenerate
+        corners.append(np.linalg.solve(A, np.array([c1, c2])))
+
+    # wall i spans corners[i] -> corners[i+1]; normal flipped to point outward
+    walls = []
+    for i in range(4):
+        n_out = -lines[i][0]                 # outward = into the lane
+        d_out = -lines[i][1]
+        walls.append({
+            'alpha': float(np.arctan2(n_out[1], n_out[0])),
+            'd': float(d_out),
+            'p1': corners[i],
+            'p2': corners[(i + 1) % 4],
+        })
+    return walls, corners
  
 if __name__ == '__main__':
     print('Position 1 CCW walls in map frame:')
