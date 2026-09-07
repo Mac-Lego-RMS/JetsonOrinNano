@@ -34,6 +34,7 @@ setup(
             'speed_calib = ekf.speed_calib_node:main',
             'speed_verify = ekf.speed_varify:main',
             'steer_calib = ekf.steer_calib_node:main',
+            'foxglove_overlay = ekf.foxglove_overlay_node:main',
         ],
     },
 )
