@@ -11,18 +11,34 @@ On a confident majority it commits the map and switches to RUNNING.
   race_mode 'open':     inner-band geometry is unknown, so it commits a reduced
                         3-wall start map (left/right/front) built from the
                         distances averaged over the winning-position votes.
-                        During round 1 it measures the lane width of each
-                        straight and reconstructs the inner band at the end of
-                        the round, extending the matching map.
+                        At the direction latch the exact field start pose is
+                        computed FROM THOSE MEASUREMENTS (not from nominal
+                        values), so the absolute map matches the 3-wall map and
+                        the pose does not jump.
+
+                        Lane-width learning: the START straight's width is taken
+                        straight from the stationary start detection (the best
+                        measurement available -- no motion smear, and there may
+                        be too little driving distance left on it, especially
+                        from position 1). The other straights are measured while
+                        driving. The inner band is committed as soon as all four
+                        widths are known; learning continues past round 1 if a
+                        straight is still missing, because a late commit beats
+                        no commit.
 
 race_mode is a ROS parameter (default 'obstacle').
 
 Subscribes: /scan, /ekf/odom, /round1_controller/lap_state (latched)
 Publishes:  /wall_matches
+            /wall_distances    live [left, right] wall distance in metres,
+                               raw from the scan in the base_link frame, NaN
+                               where no wall is seen on that side. Published
+                               every scan, from the very first one.
             /front_wall_x      (latched) front wall x in the map frame
             /race_direction    (latched) CW / CCW, latched once, then frozen
             /corner_geometry   (latched) outer box, published at direction latch
-            /inner_geometry    (latched) inner band, published after round 1
+            /inner_geometry    (latched) inner band, published as soon as all
+                                         four lane widths are known
                                          (open mode only; edge_length unused)
 """
 import numpy as np
@@ -35,7 +51,7 @@ from nav_msgs.msg import Odometry
 
 from robot_msgs.msg import WallMatch, WallMatchArray
 
-from std_msgs.msg import Float64, String, Int32MultiArray
+from std_msgs.msg import Float64, String, Int32MultiArray, Float64MultiArray
 from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from geometry_msgs.msg import Point
@@ -58,7 +74,11 @@ DIRECTION_VOTES = 5            # confident, agreeing scans before latching direc
 MAP_SWITCH_MAX_X = 0.30        # only switch the map while still near the start
 LANE_NOMINALS = (0.60, 1.00)   # plausible lane widths (open challenge)
 LANE_PLAUS_TOL = 0.15          # measurement must be within this of a nominal
-MIN_WIDTH_SAMPLES = 10         # samples per straight before it counts as learned
+MIN_WIDTH_SAMPLES = 10         # driving samples per straight before it counts
+SIDE_ALPHA_TOL = np.radians(25.0)   # how far off +-90 deg a wall may be to
+                                    # still count as a side wall
+
+OUTER_HALF = 1.5               # outer wall position in the field frame
 
 
 def yaw_from_quaternion(q):
@@ -78,14 +98,23 @@ class ScanProcessor(Node):
         self.front_wall_x = None     # front wall x in the map frame (corner stop)
         self.votes = []              # (position, front_d, left_d, right_d) per scan
         self.position = None         # detected start position (1 or 2)
-        self.lane_width = None       # start-straight lane width
+        self.lane_width = None       # start-straight lane width (stationary)
+
+        # measured start distances, kept for the exact start-pose computation.
+        # front_d_meas is separate from front_wall_x because the latter gets
+        # overwritten when the matching map is switched.
+        self.left_d = None
+        self.right_d = None
+        self.front_d_meas = None
 
         self.direction = None        # latched CW/CCW, then frozen
         self.dir_votes = []          # recent confident direction votes
 
-        # --- round-1 lane-width learning (open mode) ---
+        # --- lane-width learning (open mode) ---
         self.lap_state = None        # [corner_idx, corner_count, lap]
-        self.width_samples = {}      # outer wall index -> [measured widths]
+        self.width_samples = {}      # outer wall index -> [driving samples]
+        self.width_fixed = {}        # outer wall index -> width known directly
+                                     # (start straight, from start detection)
         self.inner_walls = None      # set once the inner band is learned
 
         latched = QoSProfile(depth=1)
@@ -98,6 +127,8 @@ class ScanProcessor(Node):
                                  self.lap_state_cb, latched)
 
         self.pub = self.create_publisher(WallMatchArray, '/wall_matches', 10)
+        self.wall_dist_pub = self.create_publisher(
+            Float64MultiArray, '/wall_distances', 10)
         self.front_wall_pub = self.create_publisher(Float64, '/front_wall_x', latched)
         self.direction_pub = self.create_publisher(String, '/race_direction', latched)
         self.corner_pub = self.create_publisher(CornerGeometry, '/corner_geometry', latched)
@@ -117,15 +148,20 @@ class ScanProcessor(Node):
         self.pose = (x, y, theta)
 
     def lap_state_cb(self, msg):
-        """Track [corner_idx, corner_count, lap]. When lap flips to 1, round 1
-        is done -> try to reconstruct the inner band from the learned widths."""
+        """Track [corner_idx, corner_count, lap]. The inner band is normally
+        committed as soon as all four widths are known; a lap change is only a
+        fallback check that also reports what is still missing."""
         prev = self.lap_state
         self.lap_state = list(msg.data)
-        if prev is not None and prev[2] == 0 and self.lap_state[2] >= 1:
-            self._commit_inner_band()
+        if prev is not None and self.lap_state[2] > prev[2]:
+            self._maybe_commit_inner_band(verbose=True)
 
     def scan_cb(self, msg):
         measured = self._extract(msg)
+
+        # live side distances -- published from the very first scan, before the
+        # map is committed, so the controller always has them
+        self._publish_wall_distances(measured)
 
         # --- DETECTING: vote on the start position ---
         if self.map_walls is None:
@@ -174,6 +210,34 @@ class ScanProcessor(Node):
                 measured.append(lidar_to_base_link(*hnf))
         return measured
 
+    @staticmethod
+    def _side_distances(measured):
+        """Nearest wall distance on each side, in metres (positive).
+
+        Left is alpha ~ -90 deg (+y side), right is alpha ~ +90 deg (-y side),
+        per the verified convention. Returns (left, right); either may be None
+        if no wall was seen on that side -- which is normal in a corner.
+        """
+        left = right = None
+        for w in measured:
+            a, d = w[0], w[1]
+            if abs(wrap(a + np.radians(90.0))) < SIDE_ALPHA_TOL:
+                if left is None or abs(d) < left:
+                    left = abs(d)
+            elif abs(wrap(a - np.radians(90.0))) < SIDE_ALPHA_TOL:
+                if right is None or abs(d) < right:
+                    right = abs(d)
+        return left, right
+
+    def _publish_wall_distances(self, measured):
+        """Live [left, right] side-wall distances, raw from the scan. NaN on a
+        side with no wall, so the consumer can tell 'not seen' from a value."""
+        left, right = self._side_distances(measured)
+        msg = Float64MultiArray()
+        msg.data = [float(left) if left is not None else float('nan'),
+                    float(right) if right is not None else float('nan')]
+        self.wall_dist_pub.publish(msg)
+
     def _detect(self, measured):
         if self.race_mode == 'open':
             return detect_start_open(measured)
@@ -209,6 +273,10 @@ class ScanProcessor(Node):
     def _commit_open(self, position, front_d, left_d, right_d):
         self.position = position
         self.lane_width = left_d + right_d
+        # keep the raw measurements for the exact start-pose computation
+        self.left_d = left_d
+        self.right_d = right_d
+        self.front_d_meas = front_d
         self.map_walls = start_map_3wall(front_d, left_d, right_d)
         self.front_wall_x = front_d   # robot starts at x=0, front at +front_d
         self.get_logger().info(
@@ -258,32 +326,49 @@ class ScanProcessor(Node):
                 f'switching map to avoid a pose jump; check latch timing')
             return
 
-        poses = START_POSES_CW if self.direction == 'CW' else START_POSES_CCW
-        start_pose = (poses[f'pos{self.position}'] if self.race_mode != 'open'
-                      else self._open_start_pose())
-
         if self.race_mode == 'open':
+            start_pose = self._open_start_pose()
+            self.get_logger().info(
+                f'open start pose (from measurements): '
+                f'({start_pose[0]:+.3f}, {start_pose[1]:+.3f}, '
+                f'{np.degrees(start_pose[2]):+.1f} deg)')
             self.map_walls = outer_walls_map(start_pose)   # outer rim only
         else:
+            poses = START_POSES_CW if self.direction == 'CW' else START_POSES_CCW
+            start_pose = poses[f'pos{self.position}']
             self.map_walls = generate_map(start_pose)      # full field map
+
         self.front_wall_x = self._front_wall_x_from_map(self.map_walls)
         self.get_logger().info(
             f'matching map switched to {self.direction} '
             f'({len(self.map_walls)} walls)')
 
     def _open_start_pose(self):
-        """Centred field start pose for the open challenge, from the detected
-        position, measured lane width, and latched direction."""
-        # x along the lane: pos1 front 1.45 -> |x|=0.05 ; pos2 front 1.95 -> 0.45
-        x_mag = 0.05 if self.position == 1 else 0.45
-        # outer wall fixed at y=1.5; lane centre sits lane_width/2 inside it
-        y_centre = 1.5 - self.lane_width / 2.0
+        """Exact field start pose for the open challenge, from the measured
+        distances -- no nominal values.
+
+        The OUTER wall is the only fixed reference (always at +-1.5 in the field
+        frame); the lane centre is not, because the inner band varies. So the
+        lateral position comes from the distance to the OUTER wall, which is on
+        the left for CW and on the right for CCW.
+
+            CW  (faces +x): x = 1.5 - front_d,  y = 1.5 - left_d,   theta = 0
+            CCW (faces -x): x = front_d - 1.5,  y = 1.5 - right_d,  theta = pi
+
+        Sanity check against the nominal poses (front 1.95, outer wall 0.5):
+            CW  -> (-0.45, 1.0, 0)   == START_POSES_CW['pos2']
+            CCW -> (+0.45, 1.0, pi)  == START_POSES_CCW['pos2']
+
+        theta is taken as exactly 0 / pi (robot is placed aligned by hand). The
+        measured side-wall alpha could refine this later if needed.
+        """
+        f = self.front_d_meas
         if self.direction == 'CW':
-            return (x_mag, y_centre, 0.0)
-        return (-x_mag, y_centre, np.pi)      # CCW: faces -x, x flips sign
+            return (OUTER_HALF - f, OUTER_HALF - self.left_d, 0.0)
+        return (f - OUTER_HALF, OUTER_HALF - self.right_d, np.pi)
 
     # ------------------------------------------------------------------ #
-    # round-1 lane-width learning (open mode)
+    # lane-width learning (open mode)
     # ------------------------------------------------------------------ #
 
     def _current_outer_wall_index(self):
@@ -299,48 +384,67 @@ class ScanProcessor(Node):
         return (k - 1) % 4 if self.direction == 'CCW' else k % 4
 
     def _learn_lane_width(self, measured):
-        """Collect lane-width samples per straight during round 1 (open mode)."""
+        """Learn lane widths per straight (open mode).
+
+        The START straight is taken from the stationary start detection, which
+        is both more accurate and available immediately -- important from
+        position 1, where there is little driving distance left on it. All other
+        straights are sampled while driving. Learning continues past round 1
+        until the inner band is committed.
+        """
         if self.race_mode != 'open' or self.inner_walls is not None:
             return
-        if self.lap_state is None or self.lap_state[2] != 0:
-            return                                # only during round 1
         wall_idx = self._current_outer_wall_index()
         if wall_idx is None:
             return
 
-        # need one clean wall on each side (alpha ~ -90 left, +90 right)
-        left_d = right_d = None
-        for w in measured:
-            a, d = w[0], w[1]
-            if abs(wrap(a + np.radians(90.0))) < np.radians(25.0):
-                if left_d is None or abs(d) < abs(left_d):
-                    left_d = d
-            elif abs(wrap(a - np.radians(90.0))) < np.radians(25.0):
-                if right_d is None or abs(d) < abs(right_d):
-                    right_d = d
-        if left_d is None or right_d is None:
+        # start straight: take the stationary measurement directly.
+        # corner_count == 0 guarantees no corner has been driven yet, so the
+        # current wall index really is the start straight.
+        if self.lap_state[1] == 0 and wall_idx not in self.width_fixed:
+            self.width_fixed[wall_idx] = float(self.lane_width)
+            self.get_logger().info(
+                f'start straight {wall_idx}: lane width '
+                f'{self.lane_width:.3f} taken from start detection')
+            self._maybe_commit_inner_band()
+            return
+        if wall_idx in self.width_fixed:
+            return                                # already known, no sampling
+
+        left, right = self._side_distances(measured)
+        if left is None or right is None:
             return
 
-        width = abs(left_d) + abs(right_d)
+        width = left + right
         # plausibility: must be near a legal width (rejects corner geometry)
         if min(abs(width - n) for n in LANE_NOMINALS) > LANE_PLAUS_TOL:
             return
 
         self.width_samples.setdefault(wall_idx, []).append(width)
+        # publish as early as possible: the moment the last straight is covered
+        self._maybe_commit_inner_band()
 
-    def _commit_inner_band(self):
-        """Reconstruct the inner band from the learned widths, extend the
-        matching map, and publish it. Publishes nothing if any straight is
-        missing -- better no inner geometry than a wrong one."""
+    def _maybe_commit_inner_band(self, verbose=False):
+        """Commit + publish the inner band once every straight's width is known
+        -- either fixed (start straight) or with enough driving samples.
+
+        Called after each new measurement (silent) and at a lap change
+        (verbose, reports what is still missing). Publishes nothing while a
+        straight is missing: better no inner geometry than a wrong one.
+        """
         if self.race_mode != 'open' or self.inner_walls is not None:
             return
         widths = {}
         for i in range(4):
+            if i in self.width_fixed:
+                widths[i] = self.width_fixed[i]
+                continue
             s = self.width_samples.get(i, [])
             if len(s) < MIN_WIDTH_SAMPLES:
-                self.get_logger().warn(
-                    f'lane width for straight {i}: only {len(s)} samples '
-                    f'-> inner band NOT committed')
+                if verbose:
+                    self.get_logger().warn(
+                        f'lane width for straight {i}: only {len(s)} samples '
+                        f'-> inner band not committed yet, will keep measuring')
                 return
             widths[i] = float(np.median(s))       # median: robust to outliers
 
@@ -353,8 +457,10 @@ class ScanProcessor(Node):
         self.inner_walls = inner_walls
         self.map_walls = list(self.map_walls) + inner_walls
         wtxt = ', '.join(f'{i}:{widths[i]:.3f}' for i in range(4))
+        where = (f'lap {self.lap_state[2]}, corner {self.lap_state[0]}'
+                 if self.lap_state is not None else 'lap unknown')
         self.get_logger().info(
-            f'inner band learned ({wtxt}) -> map extended to '
+            f'inner band learned ({wtxt}) at {where} -> map extended to '
             f'{len(self.map_walls)} walls')
         self._publish_inner_geometry(inner_walls, inner_corners)
 

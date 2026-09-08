@@ -35,7 +35,8 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from rcl_interfaces.msg import SetParametersResult
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Float64, String, Int32MultiArray
+from std_msgs.msg import Bool, Float64, String, Int32MultiArray, Float64MultiArray
+from std_msgs.msg import Header
 
 
 def yaw_from_quaternion(q):
@@ -79,6 +80,11 @@ class Round1Controller(Node):
         'stop_gap':      ('stop_gap',      0.35,  float),
         'o_in':          ('o_in',          0.50,  float),
         'o_out':         ('o_out',         0.50,  float),
+        'inner_clearance': ('inner_clearance', 0.25, float),  # target gap to the INNER band (lap 2+)
+        'v_start':       ('v_start',       0.4,  float),   # speed on the start straight (before direction latch)
+        'start_stop_gap': ('start_stop_gap', 0.50, float),  # stop this far from the front wall if direction never comes
+        'start_lane_min': ('start_lane_min', 0.45, float),  # plausibility band for d_left+d_right
+        'start_lane_max': ('start_lane_max', 1.30, float),
         'turn_radius':   ('R',             0.50,  float),
         'sweep_tol_deg': ('sweep_tol',     3.0,   lambda v: math.radians(float(v))),
         'ff_blend_deg':  ('ff_blend',      7.0,  lambda v: math.radians(float(v))),
@@ -94,8 +100,8 @@ class Round1Controller(Node):
         'wheelbase':     ('wheelbase',     0.10,  float),
         'max_yaw_rate':  ('max_yaw_rate',  3.0,   float),
         # speed profile (distance-based)
-        'v_drive':       ('v_drive',       0.50,  float),   # straight cruise
-        'v_turn':        ('v_turn',        0.50,  float),   # through the arc
+        'v_drive':       ('v_drive',       0.85,  float),   # straight cruise
+        'v_turn':        ('v_turn',        0.85,  float),   # through the arc
         'accel_dist':    ('accel_dist',    0.2,   float),   # ramp v_turn->v_drive after a corner
         'brake_dist':    ('brake_dist',    0.2,   float),   # ramp v_drive->v_turn before T_A
         # lap / finish
@@ -114,7 +120,7 @@ class Round1Controller(Node):
         for name, (attr, default, conv) in self._PARAMS.items():
             self.declare_parameter(name, default)
         # structural (read once)
-        self.declare_parameter('require_button', False)
+        self.declare_parameter('require_button', True)
         self.declare_parameter('control_rate', 30.0)
         self.declare_parameter('odom_timeout', 0.5)   # bridge past short EKF gaps
 
@@ -124,8 +130,8 @@ class Round1Controller(Node):
         # (asymmetric racing line is allowed; Stanley drives the transition smoothly).
         from rcl_interfaces.msg import ParameterDescriptor, ParameterType
         arr = ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE_ARRAY)
-        self.declare_parameter('o_in_list', [0.6, 0.6, 0.6, 0.6], arr)
-        self.declare_parameter('o_out_list', [0.6, 0.6, 0.6, 0.6], arr)
+        self.declare_parameter('o_in_list', [0.35, 0.35, 0.35, 0.35], arr)
+        self.declare_parameter('o_out_list', [0.35, 0.35, 0.35, 0.35], arr)
         self.declare_parameter('turn_radius_list', [0.5, 0.5, 0.5, 0.5], arr)
 
         self._load_params()
@@ -142,6 +148,10 @@ class Round1Controller(Node):
         self.race_direction = None        # 'CW' | 'CCW'
         self.corners = None               # [(x,y)] * 4
         self.walls = None                 # [(nx,ny,d)] * 4
+        self.inner_walls = None           # [(nx,ny,d)] * 4 from /inner_geometry (lap 2+)
+        self.lane_width = None            # [m] * 4, per straight, from outer<->inner distance
+        self.wall_dist = None             # (d_left, d_right) live, for the start straight
+        self.start_center_y = None        # map-frame y of the lane centre, held once computed
         self.last_odom_time = None
         self.button_pressed = False
         self.v_cmd = 0.0
@@ -159,8 +169,12 @@ class Round1Controller(Node):
         self.create_subscription(String, '/race_direction', self.direction_cb, latched)
         self.create_subscription(self._corner_msg_type(), '/corner_geometry',
                                  self.corner_cb, latched)
+        self.create_subscription(self._corner_msg_type(), '/inner_geometry',
+                                 self.inner_cb, latched)
+        self.create_subscription(Float64MultiArray, '/wall_distances',
+                                 self.wall_dist_cb, 10)
         if self.require_button:
-            self.create_subscription(Bool, '/button_state', self.button_cb, 10)
+            self.create_subscription(Header, '/esp_serial_bridge/button', self.button_cb, 10)
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
         # debug: Stanley errors for live plotting in Foxglove
         self.pub_e_ct = self.create_publisher(Float64, '~/dbg/e_ct', 10)
@@ -207,10 +221,41 @@ class Round1Controller(Node):
                 self.R_list = [float(v) for v in p.value]
         return SetParametersResult(successful=True)
 
+    def _entry_wall_idx(self, idx):
+        """Wall index of the straight the robot is currently ON (entering corner idx).
+
+        walls[i] is the edge corners[i]->corners[i+1]. At corner k the two edges
+        walls[k-1] and walls[k] meet. Which one the robot is driving depends on the
+        direction it walks the indices:
+          CCW (dir_step +1): comes from k-1  -> current straight = walls[k-1]
+          CW  (dir_step -1): comes from k+1  -> current straight = walls[k]
+        """
+        return (idx - 1) % 4 if self.dir_step() > 0 else idx % 4
+
+    def _exit_wall_idx(self, idx):
+        """Wall index of the straight AFTER corner idx (the exit straight)."""
+        return idx % 4 if self.dir_step() > 0 else (idx - 1) % 4
+
+    def _auto_offset_for_wall(self, wall_idx):
+        """Offset from the OUTER wall for a given straight, once the inner band is
+        known: keep a constant inner_clearance to the inner band of THAT straight.
+        Returns None while the inner band is unknown (lap 1 -> use the parameters)."""
+        if self.lane_width is None or wall_idx >= len(self.lane_width):
+            return None
+        o = self.lane_width[wall_idx] - self.inner_clearance
+        # never let the arc collapse onto the outer wall
+        return max(o, 0.05)
+
     def corner_o_in(self, idx):
+        auto = self._auto_offset_for_wall(self._entry_wall_idx(idx))
+        if auto is not None:
+            return auto
         return self.o_in_list[idx] if idx < len(self.o_in_list) else self.o_in
 
     def corner_o_out(self, idx):
+        auto = self._auto_offset_for_wall(self._exit_wall_idx(idx))
+        if auto is not None:
+            return auto
         return self.o_out_list[idx] if idx < len(self.o_out_list) else self.o_out
 
     def corner_R(self, idx):
@@ -242,6 +287,58 @@ class Round1Controller(Node):
         self.corners = corners
         self.walls = walls
 
+    def inner_cb(self, msg):
+        """Inner band from round-1 learning (open mode, once at lap 0->1).
+
+        Index convention matches /corner_geometry: inner walls[i] belongs to the
+        SAME straight as outer walls[i]. From the pair we get that straight's lane
+        width, and from then on the offsets are derived as
+            offset_from_outer = lane_width - inner_clearance
+        so the robot keeps a CONSTANT distance to the inner band on every straight,
+        adapted to the real measured width (which is NOT rounded to 60/100 cm).
+        """
+        inner = [(w.nx, w.ny, w.d) for w in msg.walls]
+        if self.walls is None:
+            self.get_logger().warn("/inner_geometry vor /corner_geometry -- ignoriert.")
+            return
+        widths = []
+        for i in range(4):
+            widths.append(self._wall_gap(self.walls[i], inner[i]))
+        self.inner_walls = inner
+        self.lane_width = widths
+        self.get_logger().info(
+            "/inner_geometry empfangen. Gassenbreiten [m]: " +
+            ", ".join(f"{w:.3f}" for w in widths) +
+            f" -> Offsets (Breite - {self.inner_clearance:.2f}): " +
+            ", ".join(f"{max(w - self.inner_clearance, 0.05):.3f}" for w in widths))
+
+        # Re-plan the UPCOMING corner, but KEEP the entry line of the straight we
+        # are already driving: the robot must finish this straight on its current
+        # line and change offset only THROUGH the corner. Re-planning LA as well
+        # would make Stanley pull over mid-straight and enter the corner skewed.
+        if self.state == 'DRIVE' and self.arc is not None and self.pose is not None:
+            keep_o_in = self.arc.get('o_in')
+            self.arc = None
+            self.plan_arc(self.pose[2], o_in_override=keep_o_in)
+            self.get_logger().info(
+                f"Bogen neu geplant: Eintritt bleibt {keep_o_in:.2f}, "
+                f"Austritt auf neuen Offset.")
+
+    @staticmethod
+    def _wall_gap(outer, inner):
+        """Perpendicular distance between two (near-)parallel HNF lines.
+
+        Outer normals point inward, inner normals point outward (toward the lane),
+        so the two normals are roughly opposite. Flip the inner one to compare, then
+        the gap is the difference of the offsets along the common normal.
+        """
+        onx, ony, od = outer
+        inx, iny, ind = inner
+        if onx * inx + ony * iny < 0.0:      # opposite normals -> align them
+            inx, iny, ind = -inx, -iny, -ind
+        # both normals now point the same way; gap = |d_inner - d_outer|
+        return abs(ind - od)
+
     def _assert_edge_convention(self, corners, walls):
         """Verify walls[i] lies on the line through corners[i]->corners[i+1]."""
         ok = True
@@ -258,6 +355,31 @@ class Round1Controller(Node):
         if ok:
             self.get_logger().info("Kanten-Ecken-Konvention verifiziert (walls<->corners).")
 
+    def wall_dist_cb(self, msg):
+        """Live side-wall distances [left, right] -- used ONLY on the start straight,
+        before /race_direction and /corner_geometry exist. From them we derive the
+        lane centre in the map frame so the robot can pull to the middle without
+        knowing the drive direction (the middle needs no direction).
+
+        Rejects implausible readings (a wall not seen -> outlier) so a single bad
+        sample cannot yank the robot sideways.
+        """
+        if len(msg.data) < 2 or self.pose is None:
+            return
+        d_l, d_r = float(msg.data[0]), float(msg.data[1])
+        width = d_l + d_r
+        if not (self.start_lane_min <= width <= self.start_lane_max):
+            return                      # implausible -> keep the last good centre
+        self.wall_dist = (d_l, d_r)
+        # lateral error to the lane centre: >0 means the robot is RIGHT of centre
+        # (left gap bigger than right) and must move left (+y in its own frame).
+        e_lat = 0.5 * (d_l - d_r)
+        x, y, th = self.pose
+        # left-of-travel unit normal at the current heading
+        lx, ly = -math.sin(th), math.cos(th)
+        # centre point = robot position shifted by e_lat to the LEFT
+        self.start_center_y = (x + e_lat * lx, y + e_lat * ly)
+
     def publish_lap_state(self):
         """Publish [corner_idx, corner_count, lap] for the perception side.
         corner_idx = corner currently being approached (0..3, box index)
@@ -271,8 +393,9 @@ class Round1Controller(Node):
         self.pub_lap.publish(msg)
 
     def button_cb(self, msg):
-        if msg.data:
-            self.button_pressed = True
+        """Die Bridge publiziert bei jedem Tastendruck einen Header (kein Bool).
+        Die Nachricht selbst IST das Ereignis."""
+        self.button_pressed = True
 
     # ------------------------------------------------------------- helpers
     def publish_stop(self):
@@ -303,6 +426,13 @@ class Round1Controller(Node):
         return age > self.odom_timeout
 
     def inputs_ready(self):
+        """Enough to START driving. The corner geometry and the drive direction
+        only latch once the robot is CLOSE to the first corner -- so we must be
+        able to drive the start straight without them (see _drive_start)."""
+        return self.front_wall_x is not None
+
+    def geometry_ready(self):
+        """Everything needed for corner planning."""
         return (self.corners is not None and self.walls is not None
                 and self.race_direction in ('CW', 'CCW'))
 
@@ -331,8 +461,13 @@ class Round1Controller(Node):
         return best_i
 
     # ------------------------------------------------------------- arc planning
-    def plan_arc(self, theta):
-        """Plan the inscribed arc for the current corner_idx from the box walls."""
+    def plan_arc(self, theta, o_in_override=None):
+        """Plan the inscribed arc for the current corner_idx from the box walls.
+
+        o_in_override: keep the entry line of the straight we are ALREADY driving
+        (used when re-planning mid-straight after /inner_geometry arrives -- the
+        robot must finish the straight on its current line and only change offset
+        THROUGH the corner, otherwise it swerves right before turning in)."""
         s = float(self.dir_step())
         idx = self.corner_idx
 
@@ -353,7 +488,7 @@ class Round1Controller(Node):
         if abs(A[0] * tx + A[1] * ty) > abs(B[0] * tx + B[1] * ty):
             A, B = B, A   # ensure A = entry (normal perp to travel), B = exit (normal along -travel)
 
-        o_in = self.corner_o_in(idx)
+        o_in = self.corner_o_in(idx) if o_in_override is None else o_in_override
         o_out = self.corner_o_out(idx)
         R = self.corner_R(idx)
 
@@ -386,12 +521,16 @@ class Round1Controller(Node):
         u_B = u_exit   # keep exit travel consistent with theta_target
 
         tx, ty = travel
-        self.arc = dict(C=C, s=s, R=R, T_A=T_A, T_B=T_B, a0=a0, travel=travel,
+        self.arc = dict(C=C, s=s, R=R, o_in=o_in, T_A=T_A, T_B=T_B, a0=a0, travel=travel,
                         LA=LA, LB=LB, u_B=u_B, theta_target=theta_target)
         corner = self.corners[idx]
         self.get_logger().info(
             f"DECIDE Ecke {self.corner_count+1}/{self.n_corners} (idx {idx}, {self.race_direction}): "
             f"Eckpunkt=({corner[0]:.2f},{corner[1]:.2f}) o_in={o_in:.2f} o_out={o_out:.2f} R={R:.2f} "
+            f"[Gerade ein=w{self._entry_wall_idx(idx)} aus=w{self._exit_wall_idx(idx)}"
+            + (f", Breiten {self.lane_width[self._entry_wall_idx(idx)]:.2f}/"
+               f"{self.lane_width[self._exit_wall_idx(idx)]:.2f}"
+               if self.lane_width is not None else "") + "] "
             f"T_A=({T_A[0]:.2f},{T_A[1]:.2f}) T_B=({T_B[0]:.2f},{T_B[1]:.2f}) "
             f"theta_target={math.degrees(theta_target):.1f}.")
         if self.debug:
@@ -457,9 +596,14 @@ class Round1Controller(Node):
 
     # ------------------------------------------------------------- states
     def _enter_drive(self, x, y, theta):
-        """Enter DRIVE: ensure a corner is targeted and its arc is planned."""
+        """Enter DRIVE. If the corner geometry / direction are not latched yet, we
+        just drive the start straight (see _drive_start) and plan later."""
         self.drive_start_xy = (x, y)
         self.ct_integral = 0.0
+        if not self.geometry_ready():
+            self.get_logger().info(
+                "Start ohne Kartengeometrie: fahre mittig geradeaus bis Richtung erkannt.")
+            return
         if self.corner_idx is None:
             self.corner_idx = self.pick_first_corner(x, y, theta)
             if self.corner_idx is None:
@@ -468,6 +612,48 @@ class Round1Controller(Node):
         if self.arc is None:
             self.plan_arc(theta)
         self.publish_lap_state()
+
+    def _drive_start(self, x, y, theta):
+        """Drive the start straight before the direction/geometry are latched.
+
+        The lane centre comes from /wall_distances (left/right gaps) -- it needs NO
+        drive direction, which is exactly why this works before the latch. We build
+        a virtual target line through the computed centre, along the start heading,
+        and feed it to the SAME verified Stanley controller.
+
+        Safety: if the direction never latches, stop start_stop_gap before the front
+        wall instead of driving into it.
+        """
+        # front-wall safety stop (front_wall_x is available from the very start)
+        front_dist = self.front_wall_x - x - self.nose_offset
+        if front_dist <= self.start_stop_gap:
+            self.publish_stop()
+            self.get_logger().warn(
+                f"Startgerade: {front_dist:.2f} m vor Frontwand, aber keine Fahrtrichtung "
+                f"erkannt. Stoppe.", throttle_duration_sec=2.0)
+            return
+
+        if self.start_center_y is None:
+            # no usable wall reading yet -> hold the start heading, drive slowly on
+            self.publish_cmd(self.v_start, 0.0)
+            return
+
+        # virtual line: through the lane centre, along the start heading (theta~0).
+        cx, cy = self.start_center_y
+        ux, uy = math.cos(0.0), math.sin(0.0)     # start straight = map +x by definition
+        nx, ny = -uy, ux                           # left normal
+        d = nx * cx + ny * cy
+        omega = self._stanley_steer(x, y, theta, (nx, ny, d), (ux, uy))
+
+        if self.debug:
+            dl, dr = self.wall_dist if self.wall_dist else (float('nan'), float('nan'))
+            self.get_logger().info(
+                f"[START] pos=({x:+.2f},{y:+.2f}) th={math.degrees(theta):+.1f} "
+                f"links={dl:.2f} rechts={dr:.2f} mitte_y={cy:+.3f} "
+                f"front={front_dist:.2f} om={omega:+.2f}",
+                throttle_duration_sec=0.3)
+
+        self.publish_cmd(self.v_start, omega)
 
     def _speed_profile(self, dist_to_TA, dist_since_corner):
         """Distance-based speed: accelerate v_turn->v_drive over accel_dist after a
@@ -491,8 +677,14 @@ class Round1Controller(Node):
         """Lane-following on the current straight (Stanley holds the centre line).
         Watches the turn-in point T_A; at the last corner, stops mid-lane at
         finish_front_dist instead of turning in."""
+        # --- start straight: no map geometry / direction yet -> hold lane centre ---
+        if self.arc is None and not self.geometry_ready():
+            self._drive_start(x, y, theta)
+            return
         if self.arc is None:
-            if not self.plan_arc(theta):
+            # geometry just arrived -> set up the corner now
+            self._enter_drive(x, y, theta)
+            if self.arc is None:
                 return
 
         tr = self.arc['travel']

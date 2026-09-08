@@ -32,6 +32,10 @@ from ekf.ekf import DeadReckoningEKF, wrap
 # Magnitude 0.9674: scale factor from the 5x360deg calibration.
 GYRO_SCALE = -0.9674
 
+# Variance reported for states the filter does not estimate (z, roll, pitch,
+# lateral/vertical speed). ROS convention for "unknown", not a real number.
+UNKNOWN_VAR = 1e6
+
 def stamp_to_sec(stamp):
     return stamp.sec + stamp.nanosec * 1e-9
 
@@ -127,6 +131,30 @@ class EKFNode(Node):
         msg.pose.pose.orientation.w = np.cos(th / 2)
         msg.twist.twist.linear.x = float(v)      # forward speed estimate
         msg.twist.twist.angular.z = float(omega)  # yaw rate estimate
+
+        # Filter covariance -> ROS. Odometry covariance is 6x6 row-major over
+        # [x, y, z, roll, pitch, yaw]; our state is [x, y, theta, v, omega, b_g].
+        # Axes we do not estimate get a large variance (the ROS convention for
+        # "unknown"), so consumers do not read a confident zero.
+        P = self.ekf.P
+        pose_cov = [0.0] * 36
+        pose_map = ((0, 0), (1, 1), (5, 2))      # (ROS index, filter index)
+        for r, i in pose_map:
+            for c, j in pose_map:
+                pose_cov[r * 6 + c] = float(P[i, j])
+        for k in (2, 3, 4):                      # z, roll, pitch
+            pose_cov[k * 6 + k] = UNKNOWN_VAR
+        msg.pose.covariance = pose_cov
+
+        twist_cov = [0.0] * 36
+        twist_map = ((0, 3), (5, 4))             # vx <- v, yaw rate <- omega
+        for r, i in twist_map:
+            for c, j in twist_map:
+                twist_cov[r * 6 + c] = float(P[i, j])
+        for k in (1, 2, 3, 4):                   # vy, vz, roll rate, pitch rate
+            twist_cov[k * 6 + k] = UNKNOWN_VAR
+        msg.twist.covariance = twist_cov
+
         self.pub.publish(msg)
 
 
