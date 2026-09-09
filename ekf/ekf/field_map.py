@@ -273,7 +273,104 @@ def inner_band_from_widths(start_pose, widths):
             'p2': corners[(i + 1) % 4],
         })
     return walls, corners
+
+# --- obstacle (traffic sign) seats -----------------------------------------
+# Six seats per straight: two columns and three rows.
+#   columns: 0.4 m inside the outer wall, 0.4 m outside the inner wall
+#            (for a 1 m lane that is 0.1 m either side of the lane centre,
+#             so the two columns are only 0.2 m apart)
+#   rows:    -0.5 / 0 / +0.5 along the straight -- the ends and the middle of
+#            the inner band, i.e. the T- and X-intersections in the rules
+#
+# Measured on the WEST straight (GeoGebra):
+#   outer column x = -1.1, inner column x = -0.9, rows y = -0.5 / 0 / +0.5
+# The other three straights follow by 90 deg rotation (4-fold symmetric field).
+#
+# NOTE: on the START straight the rules move all signs to the positions closer
+# to the inner wall, so only the INNER column is legal there.
+
+SEAT_OUTER_INSET = 0.4         # from the outer wall, into the lane
+SEAT_INNER_INSET = 0.4         # from the inner wall, into the lane
+SEAT_ROWS = (-0.5, 0.0, 0.5)   # along the straight
+
+
+def _rot90(p, k):
+    """Rotate a point k times by 90 deg CCW about the origin."""
+    x, y = p
+    for _ in range(k % 4):
+        x, y = -y, x
+    return np.array([x, y])
+
+
+def _west_straight_seats():
+    """The six seats of the west straight in the field frame, as
+    (point, column) with column 'outer' or 'inner'."""
+    x_outer = -OUTER_HALF + SEAT_OUTER_INSET      # -1.1
+    x_inner = -INNER_HALF - SEAT_INNER_INSET      # -0.9
+    seats = []
+    for y in SEAT_ROWS:
+        seats.append((np.array([x_outer, y]), 'outer'))
+        seats.append((np.array([x_inner, y]), 'inner'))
+    return seats
+
+
+def obstacle_seats_field():
+    """All 24 seats in the FIELD frame, grouped by straight.
+
+    Returns a list of 4 lists (one per straight), each holding dicts:
+        {'p': (2,) field-frame point, 'column': 'outer'|'inner', 'row': index}
+
+    Straight k is the west straight rotated k times by 90 deg CCW. Which
+    straight belongs to which outer-wall index in the map depends on the start
+    pose, so the caller pairs them up via obstacle_seats_map().
+    """
+    base = _west_straight_seats()
+    out = []
+    for k in range(4):
+        straight = []
+        for i, (p, col) in enumerate(base):
+            straight.append({'p': _rot90(p, k), 'column': col,
+                             'row': i // 2})
+        out.append(straight)
+    return out
+
+
+def obstacle_seats_map(start_pose):
+    """All 24 seats transformed into the start-anchored MAP frame.
+
+    Same grouping as obstacle_seats_field(); 'p' is now a map-frame point.
+    """
+    out = []
+    for straight in obstacle_seats_field():
+        out.append([{'p': _transform_point(s['p'], start_pose),
+                     'column': s['column'], 'row': s['row']}
+                    for s in straight])
+    return out
  
+def seat_group_to_wall_index(start_pose):
+    """Map each seat group (0..3 from obstacle_seats_*) to the outer-wall index
+    used by outer_box_map / corner_geometry.
+
+    The two indexings are independent: seat groups are rotations of the west
+    straight in the FIELD frame, wall indices are a CCW ordering in the MAP
+    frame anchored at max x. They are paired geometrically: a straight's seats
+    sit 0.4 m from their own outer wall and much further from the other three,
+    so the nearest wall line is unambiguous.
+
+    Returns a list of 4 wall indices, one per seat group.
+    """
+    _, walls, _ = outer_box_map(start_pose)
+    out = []
+    for group in obstacle_seats_map(start_pose):
+        c = np.mean([s['p'] for s in group], axis=0)
+        best, best_d = -1, np.inf
+        for i, (nx, ny, d) in enumerate(walls):
+            dist = abs(nx * c[0] + ny * c[1] - d)
+            if dist < best_d:
+                best_d, best = dist, i
+        out.append(best)
+    return out
+
 if __name__ == '__main__':
     print('Position 1 CCW walls in map frame:')
     for w in generate_map(START_POSES_CCW['pos2']):

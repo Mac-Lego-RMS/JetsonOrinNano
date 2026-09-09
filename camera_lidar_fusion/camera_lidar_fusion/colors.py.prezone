@@ -6,7 +6,6 @@ braucht deshalb zwei Intervalle.
 
 import cv2
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
 
 # name -> Liste von (h_lo, h_hi) plus gemeinsame S/V-Untergrenzen
 #
@@ -29,16 +28,9 @@ from numpy.lib.stride_tricks import sliding_window_view
 # Farbton getrennt geht es dagegen sauber, bei gleichem s_min=50:
 #     hue (40,90) -> 72 Prozent der Pylonenpixel, 63 Prozent der Wandpixel
 #     hue (35,85) -> 74 Prozent der Pylonenpixel,  4 Prozent der Wandpixel
-# Deshalb zunaechst 85 statt 90 oben. Seit die Zone sitzt und v_min tief darf,
-# musste der Bereich aber noch enger: bei H 80 bis 94 tauchten 45 Punkte auf,
-# ueber Entfernungen von 0.60 bis 2.41 m verteilt -- das ist TUERKIS (H 83
-# entspricht 166 Grad im Farbkreis), also Reflexe auf der Wand, kein Gruen.
-# Die echten Pylonen liegen kompakt bei H 45 bis 64 und jeweils in EINER
-# Entfernung. Am unteren Ende dasselbe Bild: H 30 bis 39 streute ueber 0.16
-# bis 2.50 m, das sind gelbliche Holztoene.
-#
-# Deshalb jetzt 40 bis 72. Die Faustregel dahinter: echte Pylonenpunkte
-# klumpen in Farbton UND Entfernung, Fehltreffer streuen in beidem.
+# Deshalb 85 statt 90 oben, und 35 statt 40 unten (dort liegen nochmal 275
+# Pylonenpixel und genau 1 Wandpixel). Holztoene stoeren da nicht, die liegen
+# bei H 8 bis 23.
 #
 # ENTFERNUNG ist der zweite grosse Faktor, und sie wirkt ueber die Saettigung,
 # nicht ueber die Helligkeit. An vier gruenen Pylonen gemessen:
@@ -49,14 +41,6 @@ from numpy.lib.stride_tricks import sliding_window_view
 # Pylone im Bild so klein, dass der Band-Median sie mit dem Hintergrund
 # verwaschet -- dagegen hilft keine Schwelle. Rot hat das Problem nicht, dort
 # liegt S bei 200 und mehr.
-#
-# SEIT DIE ZONE SITZT darf v_min noch viel tiefer. Solange der Abgriff quer
-# ueber Bande, Matte und Wand lief, war v_min die einzige Bremse gegen dunkles
-# Rauschen. Mit der kalibrierten Zone (siehe README) wird nur noch die Bande
-# angeschnitten -- und die hat, ueber die Zone gemittelt, eine Saettigung von
-# glatt NULL. Eine Pylone davor kommt im selben Mass auf 90 bis 113. s_min
-# allein trennt das also sauber, und v_min darf so tief, dass auch eine Pylone
-# im Schatten (dort gemessen: V=15) noch durchkommt.
 #
 # Und die Helligkeit ist nicht stabil: dieselbe Pylone, vier Minuten spaeter,
 # hatte einen V-Median von 32 statt 44 -- Wolken reichen dafuer. Der Farbton
@@ -118,9 +102,9 @@ from numpy.lib.stride_tricks import sliding_window_view
 # nach durch und ueberschreibt, bei Ueberlappung gewinnt also der letzte
 # Eintrag (magenta). Aktuell ueberlappen die Bereiche nicht.
 DEFAULT_RANGES = {
-    'rot':     {'hue': [(0, 10), (177, 179)], 's_min': 110, 'v_min': 12},
-    'gruen':   {'hue': [(40, 72)],            's_min': 50,  'v_min': 12},
-    'magenta': {'hue': [(140, 176)],          's_min': 90,  'v_min': 15},
+    'rot':     {'hue': [(0, 10), (177, 179)], 's_min': 110, 'v_min': 25},
+    'gruen':   {'hue': [(35, 85)],            's_min': 50,  'v_min': 20},
+    'magenta': {'hue': [(140, 176)],          's_min': 90,  'v_min': 30},
 }
 
 # BGR-Farben fuer Debug-Overlays
@@ -220,146 +204,6 @@ def sample_colors(image_bgr: np.ndarray, u: np.ndarray, v: np.ndarray, patch: in
     bgr = np.median(stack, axis=0).astype(np.uint8)
     hsv = cv2.cvtColor(bgr.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
     return bgr, hsv
-
-
-def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
-                  r_aussen: np.ndarray, center, min_frac: float = 0.20,
-                  ranges: dict = None, steps: int = 13, black_v_max: int = 45,
-                  nutz_anteil: float = 1.0, adaptiv_faktor: float = 0.0,
-                  adaptiv_grad: float = 20.0):
-    """Farbe je Punkt per Abstimmung ueber ein radiales Segment.
-
-    Das Segment ist NICHT konstant breit, sondern wird je Punkt aus zwei
-    Hoehen berechnet und in Bildradien uebergeben (``r_innen`` = obere Kante,
-    ``r_aussen`` = untere Kante; radial nach aussen heisst im Fisheye "nach
-    unten"). Genau das ist der Punkt: eine Bande fester Hoehe erscheint im
-    Fisheye nicht als Kreisband konstanter Dicke.
-
-    Sitzt das Objektiv auf Hoehe der Bandenoberkante, dann ist fuer die
-    Oberkante die Hoehendifferenz null, theta also exakt 90 Grad und der
-    Bildradius konstant -- die Oberkante laeuft als gerade Linie. Die
-    Unterkante liegt die Bandenhoehe tiefer und wandert mit der Entfernung
-    nach oben, weil theta sich von unten an 90 Grad annaehert:
-
-        Bandenhoehe 9 cm, f=262 px/rad:
-        0.3 m -> Unterkante bei r=489   (Zone 77 px dick)
-        1.0 m -> r=436                  (Zone 24 px)
-        3.0 m -> r=420                  (Zone  8 px)
-
-    Eine konstante Pixelbreite ist deshalb nah viel zu schmal und fern zu
-    breit -- fern ragt sie ueber die Bande hinaus und sammelt die helle Wand
-    dahinter mit ein, was die Punkte faelschlich auf "unbekannt" zieht.
-
-    Abgestimmt statt gemittelt: gezaehlt wird, welcher Anteil der Pixel im
-    Segment zu welcher Farbe passt; ab ``min_frac`` gewinnt eine Farbe. Ein
-    Median ueber ein Segment, das halb auf der Pylone und halb auf der Wand
-    liegt, ergaebe dagegen Mischmasch. (Gegenprobe am Aufbau: nimmt man statt
-    der Abstimmung das gesaettigtste Pixel, findet man in fast jeder Linie
-    irgendwas und erzeugt Cluster von 30 Grad Breite, wo eine Pylone 5 Grad
-    haette.)
-
-    Rueckgabe: ``(labels, bgr, hsv)``. Die Farbe ist der Median der Pixel, die
-    fuer das Gewinnerlabel gestimmt haben (sonst der Median des ganzen
-    Segments), damit CSV und der raw-Modus der PointCloud etwas Sinnvolles
-    zeigen.
-    """
-    ranges = ranges or DEFAULT_RANGES
-    height, width = image_bgr.shape[:2]
-    cx, cy = center
-    phi = np.asarray(phi, dtype=float)
-    r_innen = np.asarray(r_innen, dtype=float)
-    r_aussen = np.asarray(r_aussen, dtype=float)
-    steps = max(int(steps), 2)
-
-    cos_p, sin_p = np.cos(phi), np.sin(phi)
-    # Nur den mittleren Teil der Zone abtasten. Sitzen die Zonengrenzen sauber,
-    # ist die Mitte die beste Stelle: maximaler Abstand zur hellen Matte unten
-    # und zur Wand oben. Die Raender tragen dann nur noch Mischpixel bei.
-    # 1.0 = ganze Zone, 0.33 = mittleres Drittel. Ganz auf eine Linie zu gehen
-    # ist allerdings riskant -- dann haengt alles daran, dass die Zone auf ein
-    # paar Pixel genau sitzt, und genau das war vorher das Problem.
-    nutz = min(max(float(nutz_anteil), 0.02), 1.0)
-    rand = (1.0 - nutz) / 2.0
-    anteile = np.linspace(rand, 1.0 - rand, steps)
-
-    stack = np.empty((steps, phi.size, 3), dtype=np.uint8)
-    for k, t in enumerate(anteile):
-        r = r_innen + t * (r_aussen - r_innen)
-        ui = np.clip(np.rint(cx + r * cos_p).astype(int), 0, width - 1)
-        vi = np.clip(np.rint(cy + r * sin_p).astype(int), 0, height - 1)
-        stack[k] = image_bgr[vi, ui]
-
-    hsv_stack = cv2.cvtColor(stack.reshape(-1, 1, 3),
-                             cv2.COLOR_BGR2HSV).reshape(stack.shape)
-    hh = hsv_stack[..., 0].astype(np.int16)
-    ss = hsv_stack[..., 1].astype(np.int16)
-    vv = hsv_stack[..., 2].astype(np.int16)
-
-    # --- Saettigungsschwelle: absolut oder relativ zur Umgebung -------- #
-    # Absolute Schwellen scheitern an dunklen Pylonen: am Aufbau hatte eine im
-    # Schatten S=66 bei V=15, die schwarze Bande daneben S=28 bei V=17 -- in
-    # BEIDEN Kanaelen ueberlappend, also mit keiner festen Schwelle trennbar.
-    # Im Verhaeltnis ist die Sache dagegen eindeutig: die Pylone ist 2.4- bis
-    # 2.9-mal so gesaettigt wie die Bande neben ihr, und das gilt im Schatten
-    # wie in der Sonne. Deshalb kann die Schwelle mitwandern.
-    #
-    # Der Hintergrund ist der gleitende Median der Saettigung ueber ein
-    # Azimutfenster. Es muss deutlich breiter sein als eine Pylone, sonst
-    # hebt sie ihre eigene Schwelle an: bei 0.8 m ist eine Pylone rund 7 Grad
-    # breit, mit 20 Grad Fenster macht sie also gut ein Sechstel aus und der
-    # Median bleibt fest bei der Bande.
-    schwellen = {name: float(spec['s_min']) for name, spec in ranges.items()}
-    if adaptiv_faktor > 0.0 and phi.size >= 16:
-        sat_pkt = np.median(ss, axis=0)
-        ordnung = np.argsort(phi)
-        sortiert = sat_pkt[ordnung]
-        breite = max(int(round(phi.size * adaptiv_grad / 360.0)), 3)
-        if breite % 2 == 0:
-            breite += 1
-        halb = breite // 2
-        # zyklisch, der Azimut laeuft rundum
-        lang = np.concatenate([sortiert[-halb:], sortiert, sortiert[:halb]])
-        grund_sortiert = np.median(sliding_window_view(lang, breite), axis=1)
-        grund = np.empty_like(grund_sortiert)
-        grund[ordnung] = grund_sortiert
-        for name, spec in ranges.items():
-            # Absolute Untergrenze bleibt als Rauschsperre bestehen, sie ist
-            # aber unkritisch, weil die relative Schwelle meist hoeher liegt.
-            schwellen[name] = np.maximum(grund * adaptiv_faktor,
-                                         float(spec['s_min']) * 0.5)
-
-    labels = np.full(phi.size, 'unbekannt', dtype=object)
-    best = np.full(phi.size, float(min_frac) - 1e-9)
-    hits = {}
-    for name, spec in ranges.items():
-        hit = np.zeros(hh.shape, dtype=bool)
-        for lo, hi in spec['hue']:
-            hit |= (hh >= lo) & (hh <= hi)
-        hit &= (ss >= np.asarray(schwellen[name])) & (vv >= spec['v_min'])
-        hits[name] = hit
-        frac = hit.mean(0)
-        take = frac > best
-        labels[take] = name
-        best[take] = frac[take]
-
-    # Keine Farbe hat die Mehrheit: schwarz, wenn das Segment ueberwiegend
-    # dunkel ist (Bande, Schatten), sonst unbekannt.
-    offen = best < float(min_frac)
-    labels[offen & ((vv <= black_v_max).mean(0) >= 0.5)] = 'schwarz'
-
-    gewinner = np.zeros(hh.shape, dtype=bool)
-    for name, hit in hits.items():
-        gewinner |= hit & (labels == name)[None, :]
-
-    arr = stack.astype(float)
-    med = np.median(arr, axis=0)
-    hat = gewinner.any(0)
-    if hat.any():
-        maskiert = np.where(gewinner[..., None], arr, np.nan)
-        med[hat] = np.nanmedian(maskiert[:, hat], axis=0)
-    bgr = med.astype(np.uint8)
-    hsv = cv2.cvtColor(bgr.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
-    return labels.tolist(), bgr, hsv
 
 
 def find_color_blob(image_bgr: np.ndarray, ranges: dict = None, min_area: int = 300,

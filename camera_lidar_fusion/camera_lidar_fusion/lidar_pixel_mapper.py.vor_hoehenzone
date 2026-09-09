@@ -42,31 +42,26 @@ Bandbreite ist in Metern Pylonenhoehe angegeben und wird je Punkt aus der
 Entfernung in Pixel umgerechnet, schrumpft fern also von selbst mit und bleibt
 damit innerhalb der Pylone. 0 schaltet auf ein einzelnes Pixel zurueck.
 
-Statt einer Linie eine ZONE (``sample_zone_high_m`` > ``sample_zone_low_m``):
-ein einzelner Abgriffsradius trifft je nach Entfernung und Kalibrierfehler mal
-die Pylone, mal die Wand dahinter, mal den Boden davor. Die Zone tastet
-stattdessen ein Stueck der radialen Linie ab und zaehlt aus, welcher Anteil der
-Pixel zu welcher Farbe passt; ab ``sample_zone_min_frac`` gewinnt eine Farbe.
+Statt einer Linie eine Zone (``sample_zone_px`` > 0): der duenne Abgriff trifft
+je nach Entfernung und Kalibrierfehler mal die Pylone, mal die Wand dahinter,
+mal den Boden davor. Mit gesetztem ``sample_zone_px`` wird stattdessen ein
+Stueck der radialen Linie abgetastet und ausgezaehlt, welcher Anteil der Pixel
+zu welcher Farbe passt; ab ``sample_zone_min_frac`` gewinnt eine Farbe. Das
+laesst sich mit BEIDEN sample_modes kombinieren.
 
-Entscheidend ist, dass die Zone durch zwei HOEHEN aufgespannt wird und nicht
-durch eine Pixelbreite. Eine Bande fester Hoehe ist im Fisheye naemlich KEIN
-Kreisband konstanter Dicke:
+Die Breite ist bewusst in PIXELN angegeben, nicht in Metern -- +-12 px sind
++-2.6 Grad Blickwinkel und damit +-2.3 cm Hoehe auf 0.5 m, aber +-9.1 cm auf
+2 m. Die Zone waechst also mit der Entfernung mit, waehrend ``sample_band_m``
+fern zusammenschrumpft.
 
-  * Die obere Kante, wenn sie auf Objektivhoehe liegt: Hoehendifferenz null,
-    theta exakt 90 Grad, Radius konstant. Sie laeuft als gerade Linie, egal in
-    welcher Entfernung.
-  * Die untere Kante liegt die Bandenhoehe tiefer. Ihr theta naehert sich mit
-    wachsender Entfernung von oben an 90 Grad an, ihr Radius also von aussen an
-    den der oberen Kante. Sie wandert mit der Entfernung nach oben.
-
-Bei 9 cm Bandenhoehe und f=262 px/rad heisst das: die Zone ist auf 0.3 m rund
-77 px dick, auf 1 m noch 24 px und auf 3 m nur 8 px. Eine konstante Pixelbreite
-waere nah viel zu schmal und fern zu breit -- fern ragt sie ueber die Bande
-hinaus und sammelt die helle Wand dahinter mit ein, wodurch die Punkte
-faelschlich als "unbekannt" statt "schwarz" herauskommen. Genau das war am
-Aufbau zu sehen: bei 2.3 m Entfernung lag die Bande bei r=402 px, bei 0.7 m
-zwischen 370 und 415 px, und ein fester Ring bei 412 px las in den fernen
-Richtungen V=235 statt V=25.
+WICHTIG zur Modus-Wahl: eine Bande fester Hoehe erscheint NICHT als Kreis im
+Bild. Ihr Bildradius haengt an der Entfernung, und die ist bei einem eckigen
+Spielfeld richtungsabhaengig. Am Aufbau gemessen liegt die schwarze Bande bei
+2.3 m Entfernung bei r=402 px, bei 0.7 m dagegen zwischen 370 und 415 px --
+der feste horizon-Ring bei 412 px liest in den fernen Richtungen deshalb die
+weisse Wand UEBER der Bande (dort gemessen V=235 statt V=25). Wer die Bande
+oder weit entfernte Pylonen sauber treffen will, braucht ``height``, wo der
+Radius je Punkt aus der Entfernung folgt.
 
 CSV-Modi (Parameter ``csv_mode``):
   trigger      pro Trigger eine Datei  -> ros2 topic pub --once \
@@ -84,7 +79,6 @@ import math
 import os
 
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
@@ -136,35 +130,13 @@ class LidarPixelMapper(Node):
         # Pylonenhoehe, mit sample_band_count Stuetzstellen. 0 = ein Pixel.
         self.declare_parameter('sample_band_m', 0.03)
         self.declare_parameter('sample_band_count', 5)
-        # Zonen-Abstimmung statt Band-Median. Die Zone wird durch zwei HOEHEN
-        # ueber der Lidar-Ebene aufgespannt, nicht durch eine Pixelbreite --
-        # eine Bande fester Hoehe erscheint im Fisheye naemlich nicht als
-        # Kreisband konstanter Dicke (siehe Modulkopf). Aus den Hoehen folgt je
-        # Punkt ein Radienintervall, das mit der Entfernung von selbst
-        # schrumpft. sample_zone_high_m <= sample_zone_low_m schaltet ab.
-        self.declare_parameter('sample_zone_low_m', 0.0)
-        self.declare_parameter('sample_zone_high_m', 0.0)
-        self.declare_parameter('sample_zone_steps', 13)
+        # Zonen-Abstimmung statt Band-Median. 0 = aus (dann zaehlt sample_band_m).
+        # Halbe Breite des radialen Segments in PIXELN, plus der Stimmenanteil,
+        # den eine Farbe erreichen muss. Laesst sich mit BEIDEN sample_modes
+        # kombinieren: horizon legt das Segment um den festen Ring, height um
+        # den aus der Entfernung berechneten Radius. Siehe Modulkopf.
+        self.declare_parameter('sample_zone_px', 0.0)
         self.declare_parameter('sample_zone_min_frac', 0.20)
-        # Welcher Anteil der Zone wird abgetastet? 1.0 = ganze Zone,
-        # 0.33 = mittleres Drittel. Sitzen die Zonengrenzen sauber, ist die
-        # Mitte die sauberste Stelle -- die Raender tragen Mischpixel bei.
-        self.declare_parameter('sample_zone_nutz', 1.0)
-        # Welche Farben ueberhaupt gesucht werden. Wird bei jedem Scan gelesen,
-        # laesst sich also im Betrieb umschalten -- anders als die Schwellen in
-        # color.*, die beim Start eingefroren werden. Magenta zum Beispiel
-        # produziert in der Entfernung leicht Fehltreffer und stoert nur,
-        # solange die Parkzone nicht gebraucht wird.
-        self.declare_parameter('active_labels', ['rot', 'gruen', 'magenta'])
-        # Saettigungsschwelle relativ zur Umgebung statt absolut. 0 = aus.
-        # Eine Pylone ist immer deutlich gesaettigter als die Bande neben ihr
-        # (gemessen Faktor 2.4 bis 2.9), und zwar unabhaengig davon, ob sie im
-        # Schatten steht. Absolute Schwellen scheitern dagegen an dunklen
-        # Pylonen, weil die in S UND V mit der Bande ueberlappen.
-        # Das Fenster muss breiter sein als eine Pylone, sonst hebt sie ihre
-        # eigene Schwelle an.
-        self.declare_parameter('sample_zone_adaptiv', 0.0)
-        self.declare_parameter('sample_zone_adaptiv_grad', 20.0)
         # Median-Blur ueber das GANZE Bild -- kostet auf 1280x960 rund 26 ms je
         # Scan, also bei 15 Hz gut 40 Prozent eines Kerns. Solange das Band aktiv
         # ist (sample_band_m > 0), ist der Blur ueberfluessig: der Median laengs
@@ -202,34 +174,6 @@ class LidarPixelMapper(Node):
         # Rand zusammengedraengt ist.
         self.declare_parameter('debug_polar', True)
         self.declare_parameter('debug_polar_height', 150)
-        # Bandensuche: je Azimut von innen nach aussen laufen und die Stelle
-        # suchen, an der die schwarze Bande in die helle Matte uebergeht. Das
-        # ist die verlaesslichste Kante im Bild -- dahinter liegt immer die
-        # Matte, also derselbe Kontrast, egal in welche Richtung. Die Oberkante
-        # taugt dafuer nicht: hinter ihr ist mal Wand, mal Moebel, mal Holz
-        # (an 1362 Kantenpaaren gemessen: RMS 12.8 px oben gegen 5.3 px unten).
-        self.declare_parameter('band_detect', True)
-        self.declare_parameter('band_steps', 360)        # Azimutschritte
-        self.declare_parameter('band_r_min', 360.0)      # Suchbereich von innen
-        self.declare_parameter('band_r_max', 0.0)        # 0 = bis Bildkreisrand
-        self.declare_parameter('band_dark_max', 60)      # so dunkel ist die Bande
-        self.declare_parameter('band_bright_min', 100)   # so hell ist die Matte
-        self.declare_parameter('band_run', 4)            # so viele helle am Stueck
-        # Ausreisserfilter. Die Bande ist rund 10 cm hoch und die Kamera sitzt
-        # auf ihrer Oberkante -- deshalb kann die Unterkante nur in einem
-        # schmalen Band liegen, und Nachbarazimute muessen sich aehneln. Ein
-        # Glanzpunkt IN der Bande loest die Kante sonst zu frueh aus und zieht
-        # eine Zacke nach innen. Solche Werte sind schlicht falsch.
-        self.declare_parameter('band_smooth', 9)         # Median ueber n Azimute
-        self.declare_parameter('band_max_dev', 12.0)     # max Abweichung davon [px]
-        self.declare_parameter('band_min_dicke', 3.0)    # min Abstand zur Oberkante
-        # Die Zone an die gefundene Bande koppeln, statt sie zu rechnen oder aus
-        # der Kalibrierkurve zu nehmen. Die Oberkante ist dabei konstant -- das
-        # Objektiv sitzt auf ihrer Hoehe, die Hoehendifferenz ist damit null und
-        # der Bildradius entfernungsunabhaengig (die Zonenkalibrierung bestaetigt
-        # das: zone_k_in entspricht nur 0.9 cm). Die Unterkante kommt live aus
-        # dem Bild. Wo keine Kante gefunden wurde, greift die Kalibrierkurve.
-        self.declare_parameter('zone_from_band', False)
 
         self.scan_topic = self.get_parameter('scan_topic').value
         self.image_topic = self.get_parameter('image_topic').value
@@ -279,30 +223,18 @@ class LidarPixelMapper(Node):
             abgriff = (f'height -- {self.get_parameter("sample_height_m").value * 100:.1f} cm '
                        f'ueber der Lidar-Ebene, Bildradius haengt an der Entfernung.')
 
-        z_lo = self.get_parameter('sample_zone_low_m').value
-        z_hi = self.get_parameter('sample_zone_high_m').value
-        zone_an = z_hi > z_lo or self.calib.zone_kalibriert
-        band_m = 0.0 if zone_an else self.get_parameter('sample_band_m').value
-        if zone_an:
+        zpx = self.get_parameter('sample_zone_px').value
+        band_m = 0.0 if zpx > 0.0 else self.get_parameter('sample_band_m').value
+        if zpx > 0.0:
             frac = self.get_parameter('sample_zone_min_frac').value
-            dicke = []
-            for d in (0.3, 1.0, 3.0):
-                ri, ra = self._zone_radien(np.array([d]), z_lo, z_hi)
-                dicke.append(f'{d:.1f} m: {float(ri[0]):.0f}..{float(ra[0]):.0f} px')
-            if self.calib.zone_kalibriert:
-                quelle = (f'GEMESSEN: r_innen = {self.calib.zone_r0_in:.1f} '
-                          f'{self.calib.zone_k_in:+.2f}/rho, r_aussen = '
-                          f'{self.calib.zone_r0_out:.1f} {self.calib.zone_k_out:+.2f}/rho')
-            else:
-                quelle = (f'GERECHNET aus {z_lo * 100:.1f} bis {z_hi * 100:.1f} cm ueber '
-                          f'der Lidar-Ebene (nicht kalibriert -- "zone"/"zonefit" in der '
-                          f'Kalibrier-Node liefert bessere Werte)')
-            abgriff = (
-                f'ZONE, Abstimmung ab {frac * 100:.0f} Prozent der Pixel.\n'
-                f'    {quelle}\n'
-                f'    Daraus: ' + ', '.join(dicke) + '.\n'
-                f'    Eine Pylone fester Hoehe ist im Fisheye eben KEIN Kreisband '
-                f'konstanter Dicke -- nah ist sie breit, fern schmal.')
+            grad = math.degrees(zpx / self.calib.focal_px)
+            abgriff += (
+                f'\n    ZONE statt Median: radiales Segment +-{zpx:.0f} px, eine Farbe '
+                f'gewinnt ab {frac * 100:.0f} Prozent der Pixel.\n'
+                f'    +-{zpx:.0f} px sind +-{grad:.1f} Grad Blickwinkel, also '
+                f'+-{math.tan(math.radians(grad)) * 50:.1f} cm Hoehe auf 0.5 m und '
+                f'+-{math.tan(math.radians(grad)) * 200:.1f} cm auf 2 m -- die Zone '
+                f'waechst mit der Entfernung mit.')
         elif band_m > 0.0:
             abgriff += (f'\n    Median ueber +-{band_m * 100:.1f} cm Pylonenhoehe '
                         f'({self.get_parameter("sample_band_count").value} Stuetzstellen '
@@ -372,30 +304,6 @@ class LidarPixelMapper(Node):
             return self.calib.cam_z
         return self.calib.cam_z - rho * math.tan(depression)
 
-    def _zone_radien(self, rho, hoehe_unten, hoehe_oben):
-        """Zwei Hoehen ueber der Lidar-Ebene -> Bildradien je Punkt.
-
-        Der Witz an der Sache: die Dicke der Zone folgt aus der Geometrie und
-        muss nicht geraten werden. Sitzt das Objektiv auf Hoehe der oberen
-        Kante, ist deren Hoehendifferenz null, theta damit exakt 90 Grad und
-        der Radius konstant -- die Kante laeuft als gerade Linie. Die untere
-        Kante liegt tiefer, ihr theta naehert sich mit wachsender Entfernung
-        von oben an 90 Grad an, ihr Radius also von aussen an den der oberen.
-        Die Zone ist deshalb nah breit und fern schmal, genau wie das Objekt
-        selbst im Bild.
-        """
-        rho = np.maximum(np.asarray(rho, dtype=float), 1e-3)
-        # Ist die Zone gemessen worden ("zone" + "zonefit" in der Kalibrier-Node),
-        # gilt die Messung. Sie faengt den Modellfehler am Bildrand mit auf, den
-        # die Rechnung unten nicht kennen kann.
-        if self.calib.zone_kalibriert:
-            return self.calib.zone_radien(rho)
-        dz_oben = hoehe_oben - self.calib.cam_z
-        dz_unten = hoehe_unten - self.calib.cam_z
-        r_innen = self.calib.focal_px * np.arctan2(rho, dz_oben)
-        r_aussen = self.calib.focal_px * np.arctan2(rho, dz_unten)
-        return r_innen, r_aussen
-
     def on_scan(self, msg: LaserScan):
         if self.latest_image is None:
             self.get_logger().warn('Noch kein Kamerabild empfangen.', throttle_duration_sec=5.0)
@@ -447,36 +355,25 @@ class LidarPixelMapper(Node):
         if band_m > 0.0:
             band_px = self.calib.focal_px * np.arctan(band_m / np.maximum(rho, 1e-3))
 
-        zone_low = self.get_parameter('sample_zone_low_m').value
-        zone_high = self.get_parameter('sample_zone_high_m').value
-        if zone_high > zone_low or self.calib.zone_kalibriert:
-            # Die beiden Zonengrenzen je Punkt in Bildradien umrechnen. Hoehere
-            # Kante = kleinerer Radius (radial nach aussen heisst nach unten).
-            r_innen, r_aussen = self._zone_radien(rho, zone_low, zone_high)
-            if self.get_parameter('zone_from_band').value:
-                r_innen, r_aussen = self._zone_aus_bande(image, phi, r_innen, r_aussen)
+        if self.get_parameter('sample_zone_px').value > 0.0:
             labels, bgr, hsv = colors.classify_zone(
-                image, phi, r_innen, r_aussen,
-                center=(self.calib.cx, self.calib.cy),
+                image, u, v, center=(self.calib.cx, self.calib.cy),
+                zone_px=self.get_parameter('sample_zone_px').value,
                 min_frac=self.get_parameter('sample_zone_min_frac').value,
-                ranges=self._aktive_ranges(),
-                steps=self.get_parameter('sample_zone_steps').value,
-                nutz_anteil=self.get_parameter('sample_zone_nutz').value,
-                adaptiv_faktor=self.get_parameter('sample_zone_adaptiv').value,
-                adaptiv_grad=self.get_parameter('sample_zone_adaptiv_grad').value)
+                ranges=self.ranges)
         else:
             bgr, hsv = colors.sample_colors(
                 image, u, v, self.get_parameter('patch_px').value,
                 center=(self.calib.cx, self.calib.cy), band_px=band_px,
                 band_count=self.get_parameter('sample_band_count').value)
-            labels = colors.classify_hsv(hsv, self._aktive_ranges())
+            labels = colors.classify_hsv(hsv, self.ranges)
 
         self._publish_summary(labels)
         debug = self.get_parameter('debug').value
         if debug and self.get_parameter('publish_cloud').value:
             self._publish_cloud(msg.header, pts, bgr, labels)
         if debug and self.get_parameter('publish_debug_image').value:
-            self._publish_debug(image, u, v, labels, bgr, rho)
+            self._publish_debug(image, u, v, labels, bgr)
 
         self._write_csv(scan_stamp, idx, angles, np.linalg.norm(pts[:, :2], axis=1),
                         pts, u, v, theta, phi, bgr, hsv, labels)
@@ -501,7 +398,7 @@ class LidarPixelMapper(Node):
         cloud_points = np.column_stack([pts.astype(np.float32), rgb]).tolist()
         self.pub_cloud.publish(point_cloud2.create_cloud(header, CLOUD_FIELDS, cloud_points))
 
-    def _publish_debug(self, image, u, v, labels, bgr, rho):
+    def _publish_debug(self, image, u, v, labels, bgr):
         now = self.get_clock().now().nanoseconds * 1e-9
         rate = self.get_parameter('debug_rate_hz').value
         if rate > 0 and now - self.last_debug_stamp < 1.0 / rate:
@@ -514,105 +411,63 @@ class LidarPixelMapper(Node):
         # Horizontring zur Kontrolle: liegt er auf Hoehe der Pylonen?
         ring = self.calib.focal_px * math.pi / 2.0
         mode = self.get_parameter('sample_mode').value
-        z_lo = self.get_parameter('sample_zone_low_m').value
-        z_hi = self.get_parameter('sample_zone_high_m').value
-        zone_an = z_hi > z_lo or self.calib.zone_kalibriert
-        if zone_an:
-            r_innen, r_aussen = self._zone_radien(rho, z_lo, z_hi)
-        else:
-            r_innen = r_aussen = None
-        winkel_pkt = np.arctan2(np.asarray(v) - self.calib.cy,
-                                np.asarray(u) - self.calib.cx)
+        zone_px = float(self.get_parameter('sample_zone_px').value)
         # Der Horizontring als Referenz -- bei height liegt der Abgriff NICHT
         # darauf, dann ist er nur die Marke fuer "Objektivhoehe".
         cv2.circle(canvas, center, int(round(ring)), (0, 90, 160), 1)
 
-        if zone_an and len(u):
-            # Die Zone so zeichnen, wie sie tatsaechlich liegt: je eine
-            # Polylinie durch die inneren und die aeusseren Kanten. Die innere
-            # laeuft fast kreisrund, die aeussere wandert mit der Entfernung --
-            # genau daran sieht man, ob die Zone die Bande abdeckt.
-            reihe = np.argsort(winkel_pkt)
+        if zone_px > 0.0 and len(u):
+            # Die Zone so zeichnen, wie sie tatsaechlich liegt: zwei Polylinien
+            # durch die Segmentenden aller Punkte. Bei horizon ergibt das einen
+            # Kreis, bei height eine Kurve, die der Entfernung folgt -- und
+            # genau daran sieht man, ob die Zone die Bande trifft oder darueber
+            # hinweg auf die Raumwand greift.
+            du = np.asarray(u) - self.calib.cx
+            dv = np.asarray(v) - self.calib.cy
+            laenge = np.hypot(du, dv)
+            laenge[laenge < 1e-6] = 1.0
+            du, dv = du / laenge, dv / laenge
+            winkel = np.arctan2(dv, du)
+            reihe = np.argsort(winkel)
             # In den Blindsektoren fehlen Punkte. Ohne Unterbrechung zoege die
-            # Polylinie eine Sehne quer durchs Bild.
-            luecke = np.diff(winkel_pkt[reihe]) > math.radians(5.0)
+            # Polylinie eine Sehne quer durchs Bild -- also bei jedem groesseren
+            # Winkelsprung ein neues Teilstueck beginnen.
+            luecke = np.diff(winkel[reihe]) > math.radians(5.0)
             grenzen = np.flatnonzero(luecke) + 1
-            cosw, sinw = np.cos(winkel_pkt[reihe]), np.sin(winkel_pkt[reihe])
-            for radien, farbe in ((r_innen, (0, 200, 255)), (r_aussen, (0, 140, 255))):
-                pu = self.calib.cx + radien[reihe] * cosw
-                pv = self.calib.cy + radien[reihe] * sinw
+            for vorzeichen in (-1.0, 1.0):
+                pu = np.asarray(u)[reihe] + vorzeichen * zone_px * du[reihe]
+                pv = np.asarray(v)[reihe] + vorzeichen * zone_px * dv[reihe]
                 punkte = np.column_stack([pu, pv]).astype(np.int32)
                 for teil in np.split(punkte, grenzen):
                     if len(teil) >= 2:
-                        cv2.polylines(canvas, [teil.reshape(-1, 1, 2)], False, farbe, 1)
+                        cv2.polylines(canvas, [teil.reshape(-1, 1, 2)], False,
+                                      (0, 140, 255), 1)
 
-        for i, (pu, pv, label, color) in enumerate(zip(u, v, labels, bgr)):
+        for pu, pv, label, color in zip(u, v, labels, bgr):
             point = (int(round(pu)), int(round(pv)))
             lab_bgr = colors.LABEL_BGR.get(label, (255, 255, 255))
             # Bei zone das abgetastete Segment mitzeichnen -- daran sieht man,
             # WOHER die Stimmen kamen und ob das Segment die Pylone trifft oder
             # ueber sie hinweg auf Wand und Boden greift.
-            if zone_an and label in ('rot', 'gruen', 'magenta'):
-                w = winkel_pkt[i]
+            if zone_px > 0.0 and label in ('rot', 'gruen', 'magenta'):
+                du, dv = pu - self.calib.cx, pv - self.calib.cy
+                laenge = math.hypot(du, dv) or 1.0
+                du, dv = du / laenge, dv / laenge
                 cv2.line(canvas,
-                         (int(round(self.calib.cx + r_innen[i] * math.cos(w))),
-                          int(round(self.calib.cy + r_innen[i] * math.sin(w)))),
-                         (int(round(self.calib.cx + r_aussen[i] * math.cos(w))),
-                          int(round(self.calib.cy + r_aussen[i] * math.sin(w)))),
+                         (int(round(pu - zone_px * du)), int(round(pv - zone_px * dv))),
+                         (int(round(pu + zone_px * du)), int(round(pv + zone_px * dv))),
                          lab_bgr, 1)
             cv2.circle(canvas, point, 4, tuple(int(c) for c in color), -1)
             cv2.circle(canvas, point, 4, lab_bgr, 1)
-
-        # Gefundene Bandenunterkante als durchgehende Linie. Loecher (NaN) sind
-        # Stellen, an denen keine Kante gefunden wurde -- dort steht etwas davor
-        # oder es gibt keine Bande. Die Linie bricht dort ab statt zu raten.
-        band_winkel = band_kante = None
-        if self.get_parameter('band_detect').value:
-            band_winkel, band_kante = self._bande_finden(image)
-            if band_kante is not None:
-                gute = np.isfinite(band_kante)
-                if gute.any():
-                    pu = self.calib.cx + band_kante * np.cos(band_winkel)
-                    pv = self.calib.cy + band_kante * np.sin(band_winkel)
-                    stueck = []
-                    for i in range(len(band_kante)):
-                        if gute[i]:
-                            stueck.append((pu[i], pv[i]))
-                        elif len(stueck) >= 2:
-                            cv2.polylines(canvas, [np.array(stueck, np.int32).reshape(-1, 1, 2)],
-                                          False, (255, 0, 255), 2)
-                            stueck = []
-                        else:
-                            stueck = []
-                    if len(stueck) >= 2:
-                        cv2.polylines(canvas, [np.array(stueck, np.int32).reshape(-1, 1, 2)],
-                                      False, (255, 0, 255), 2)
 
         # Kopfzeile: welcher Modus, und was ist dabei herausgekommen?
         zaehl = {}
         for label in labels:
             zaehl[label] = zaehl.get(label, 0) + 1
         kopf = f'{mode}'
-        if zone_an:
-            if self.get_parameter('zone_from_band').value:
-                woher = 'zone: Bande live'
-            elif self.calib.zone_kalibriert:
-                woher = 'zone: kalibriert'
-            else:
-                woher = f'zone {z_lo * 100:.0f}..{z_hi * 100:.0f} cm gerechnet'
-            adaptiv = self.get_parameter('sample_zone_adaptiv').value
-            if adaptiv > 0.0:
-                woher += f'  adaptiv x{adaptiv:.1f}'
-            nutz = self.get_parameter('sample_zone_nutz').value
-            kopf += (f'  {woher}  '
-                     f'>={self.get_parameter("sample_zone_min_frac").value * 100:.0f} %'
-                     + (f'  mitte {nutz * 100:.0f} %' if nutz < 0.999 else ''))
+        if zone_px > 0.0:
+            kopf += (f'  +-{zone_px:.0f} px  >={self.get_parameter("sample_zone_min_frac").value * 100:.0f} %')
         kopf += f'  |  {len(labels)} Punkte'
-        if band_kante is not None:
-            gute = int(np.isfinite(band_kante).sum())
-            kopf += (f'  |  Bande {gute}/{len(band_kante)} Azimute'
-                     + (f', r {np.nanmin(band_kante):.0f}..{np.nanmax(band_kante):.0f}'
-                        if gute else ''))
         cv2.putText(canvas, kopf, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         spalte = 12
         for name in ('rot', 'gruen', 'magenta', 'schwarz', 'unbekannt'):
@@ -634,8 +489,7 @@ class LidarPixelMapper(Node):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         if self.get_parameter('debug_polar').value:
-            streifen = self._polar_view(image, u, v, labels, r_innen, r_aussen,
-                                        canvas.shape[1], band_winkel, band_kante)
+            streifen = self._polar_view(image, u, v, labels, zone_px, canvas.shape[1])
             if streifen is not None:
                 canvas = np.vstack([canvas, streifen])
 
@@ -643,129 +497,7 @@ class LidarPixelMapper(Node):
         out.header.frame_id = 'camera'
         self.pub_debug.publish(out)
 
-    def _aktive_ranges(self):
-        """Nur die Farben, die gerade gesucht werden sollen."""
-        aktiv = set(self.get_parameter('active_labels').value)
-        gefiltert = {k: v for k, v in self.ranges.items() if k in aktiv}
-        return gefiltert or self.ranges
-
-    def _zone_aus_bande(self, image, phi, r_innen, r_aussen):
-        """Zone an die live gefundene Bandenunterkante haengen.
-
-        Die Oberkante bleibt, wo sie ist: das Objektiv sitzt auf ihrer Hoehe,
-        also ist ihr Bildradius konstant und unabhaengig von der Entfernung --
-        da gibt es nichts zu suchen. Die Unterkante dagegen wandert mit der
-        Entfernung und wird deshalb im Bild gemessen statt gerechnet.
-
-        Wo keine Kante gefunden wurde (etwas steht davor, oder die Bande fehlt),
-        bleibt der Wert aus der Kalibrierkurve stehen -- die Bandensuche
-        verbessert also nur, wo sie etwas gefunden hat, und verschlechtert nie.
-        """
-        winkel, kante = self._bande_finden(image)
-        if kante is None:
-            return r_innen, r_aussen
-        gute = np.isfinite(kante)
-        if gute.sum() < 8:
-            return r_innen, r_aussen
-        # Zyklisch interpolieren: fuer jeden Punkt die Kante in SEINER Richtung
-        w = np.concatenate([winkel[gute] - 2 * math.pi, winkel[gute],
-                            winkel[gute] + 2 * math.pi])
-        k = np.tile(kante[gute], 3)
-        aussen_neu = np.interp(np.asarray(phi), w, k)
-        # Nur uebernehmen, wo die Interpolation nicht ueber eine grosse Luecke
-        # gemittelt hat -- sonst zoege eine Fehlstelle die Zone quer durchs Bild.
-        naechste = np.min(np.abs(np.asarray(phi)[:, None] - w[None, :]), axis=1)
-        brauchbar = naechste < math.radians(4.0)
-        r_aussen = np.where(brauchbar, aussen_neu, r_aussen)
-        return r_innen, np.maximum(r_aussen, r_innen + 2.0)
-
-    def _bande_finden(self, image):
-        # Je Bild nur einmal rechnen: bei zone_from_band braucht sie jeder Scan,
-        # das Debug-Bild noch einmal. Ohne Cache liefe sie doppelt.
-        kennung = id(image), image.shape
-        if getattr(self, '_band_cache', (None,))[0] == kennung:
-            return self._band_cache[1], self._band_cache[2]
-        winkel, kante = self._bande_suchen(image)
-        self._band_cache = (kennung, winkel, kante)
-        return winkel, kante
-
-    def _bande_suchen(self, image):
-        """Sucht je Azimut die Unterkante der schwarzen Bande.
-
-        Von innen nach aussen laufen und die erste Stelle nehmen, an der es
-        dauerhaft hell wird -- das ist der Uebergang Bande -> Matte. "Dauerhaft"
-        heisst ``band_run`` Pixel am Stueck, damit ein einzelner Glanzpunkt auf
-        der Bande die Kante nicht vorzeitig ausloest. Davor muss mindestens ein
-        dunkles Pixel gelegen haben, sonst war da gar keine Bande.
-
-        Warum die UNTERkante und nicht die obere: dahinter liegt immer die
-        Matte, also derselbe Kontrast in jeder Richtung. Hinter der Oberkante
-        liegt dagegen der halbe Raum -- mal weisse Wand, mal dunkle Couch. An
-        1362 Kantenpaaren gemessen: RMS 5.3 px unten gegen 12.8 px oben.
-
-        Rueckgabe: (winkel, radien) -- Radien sind NaN, wo keine Kante gefunden
-        wurde (etwa wo etwas vor der Bande steht oder sie ganz fehlt).
-        """
-        schritte = max(int(self.get_parameter('band_steps').value), 8)
-        r_von = float(self.get_parameter('band_r_min').value)
-        r_bis = float(self.get_parameter('band_r_max').value) or float(self.calib.radius_px)
-        dunkel_max = int(self.get_parameter('band_dark_max').value)
-        hell_min = int(self.get_parameter('band_bright_min').value)
-        lauf = max(int(self.get_parameter('band_run').value), 1)
-        if r_bis - r_von < lauf + 2:
-            return None, None
-
-        hoehe, breite = image.shape[:2]
-        grau = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[..., 2]
-        winkel = np.linspace(-math.pi, math.pi, schritte, endpoint=False)
-        radien = np.arange(r_von, r_bis)
-        uu = np.clip(np.rint(self.calib.cx + radien[None, :] * np.cos(winkel)[:, None]),
-                     0, breite - 1).astype(int)
-        vv = np.clip(np.rint(self.calib.cy + radien[None, :] * np.sin(winkel)[:, None]),
-                     0, hoehe - 1).astype(int)
-        profil = grau[vv, uu].astype(np.int16)          # (Azimut, Radius)
-
-        hell = profil >= hell_min
-        # Wieviele helle Pixel liegen in einem Fenster der Laenge lauf?
-        summe = np.cumsum(np.concatenate(
-            [np.zeros((schritte, 1), int), hell.astype(int)], axis=1), axis=1)
-        voll = (summe[:, lauf:] - summe[:, :-lauf]) >= lauf
-        # Vor der Kante muss es dunkel gewesen sein
-        dunkel_davor = np.cumsum((profil <= dunkel_max).astype(int), axis=1)[:, :voll.shape[1]] > 0
-        treffer = voll & dunkel_davor
-
-        gefunden = treffer.any(axis=1)
-        kante = np.full(schritte, np.nan)
-        kante[gefunden] = radien[np.argmax(treffer[gefunden], axis=1)]
-
-        # --- Ausreisser raus ---------------------------------------------- #
-        # Die Kante darf nicht innerhalb der Oberkante liegen: die Bande ist
-        # rund 10 cm hoch, ihre Unterkante also immer ein Stueck WEITER AUSSEN
-        # als die Oberkante (radial nach aussen heisst nach unten).
-        oben = self.calib.zone_r0_in if self.calib.zone_kalibriert else \
-            self.calib.focal_px * math.pi / 2.0
-        kante[kante < oben + float(self.get_parameter('band_min_dicke').value)] = np.nan
-
-        # Nachbarazimute muessen sich aehneln -- die Bande springt nicht. Der
-        # Median ueber ein Fenster ist der robuste Erwartungswert; wer zu weit
-        # davon abweicht, ist eine Fehldetektion (meist ein Glanzpunkt in der
-        # Bande, der die Kante zu frueh ausloest).
-        fenster = max(int(self.get_parameter('band_smooth').value), 1)
-        if fenster > 1 and np.isfinite(kante).sum() >= fenster:
-            halb = fenster // 2
-            # zyklisch, der Azimut laeuft ja rundum. Vektorisiert ueber ein
-            # Gleitfenster -- als Python-Schleife kostete genau das hier 17.7 ms
-            # von 24 ms Gesamtlaufzeit, so sind es 1.1 ms.
-            breit = np.concatenate([kante[-halb:], kante, kante[:halb]])
-            with np.errstate(all='ignore'):
-                glatt = np.nanmedian(sliding_window_view(breit, 2 * halb + 1), axis=1)
-            grenze = float(self.get_parameter('band_max_dev').value)
-            daneben = np.isfinite(kante) & np.isfinite(glatt) & (np.abs(kante - glatt) > grenze)
-            kante[daneben] = np.nan
-        return winkel, kante
-
-    def _polar_view(self, image, u, v, labels, r_innen, r_aussen, breite,
-                    band_winkel=None, band_kante=None):
+    def _polar_view(self, image, u, v, labels, zone_px, breite):
         """Entzerrter Streifen: Azimut waagerecht, Bildradius senkrecht.
 
         Im runden Fisheye liegt alles Interessante am aeusseren Rand und ist
@@ -783,9 +515,9 @@ class LidarPixelMapper(Node):
         # nahe Punkte kleine Radien, ein Fenster am Minimum rutscht viel zu weit
         # nach innen. Die Perzentile lassen einzelne Ausreisser aussen vor.
         rad_pkt = np.hypot(np.asarray(u) - self.calib.cx, np.asarray(v) - self.calib.cy)
-        alle = rad_pkt if r_innen is None else np.concatenate([r_innen, r_aussen, rad_pkt])
-        r_lo = max(0.0, float(np.percentile(alle, 2)) - 15.0)
-        r_hi = min(float(self.calib.radius_px), float(np.percentile(alle, 98)) + 20.0)
+        r_lo = max(0.0, float(np.percentile(rad_pkt, 2)) - zone_px - 20.0)
+        r_hi = min(float(self.calib.radius_px),
+                   float(np.percentile(rad_pkt, 98)) + zone_px + 30.0)
         if r_hi - r_lo < 20.0:
             return None
 
@@ -803,28 +535,17 @@ class LidarPixelMapper(Node):
 
         winkel = np.arctan2(np.asarray(v) - self.calib.cy,
                             np.asarray(u) - self.calib.cx) % (2 * math.pi)
-        for i, (w, r, label) in enumerate(zip(winkel, rad_pkt, labels)):
+        for w, r, label in zip(winkel, rad_pkt, labels):
             x = int(round(w / (2 * math.pi) * breite)) % breite
             y = int(round((r - r_lo) * skala))
             farbe = colors.LABEL_BGR.get(label, (255, 255, 255))
-            if r_innen is not None:
-                for rr, fb in ((r_innen[i], (0, 200, 255)), (r_aussen[i], (0, 140, 255))):
-                    yy = int(round((rr - r_lo) * skala))
+            if zone_px > 0.0:
+                for dy in (-zone_px * skala, zone_px * skala):
+                    yy = int(round(y + dy))
                     if 0 <= yy < hoehe:
-                        streifen[yy, x] = fb
+                        streifen[yy, x] = (0, 140, 255)
             if 0 <= y < hoehe:
                 cv2.circle(streifen, (x, y), 1, farbe, -1)
-
-        # Die gefundene Bandenunterkante -- im entzerrten Streifen laeuft sie als
-        # Kurve, an der man sofort sieht, ob die Abgriffszone darauf sitzt.
-        if band_kante is not None and band_winkel is not None:
-            for w, r in zip(band_winkel, band_kante):
-                if not np.isfinite(r):
-                    continue
-                x = int(round((w % (2 * math.pi)) / (2 * math.pi) * breite)) % breite
-                y = int(round((r - r_lo) * skala))
-                if 0 <= y < hoehe:
-                    cv2.circle(streifen, (x, y), 1, (255, 0, 255), -1)
 
         # Radiusskala und die Marke fuer den Horizontring
         schritt = 10 if (r_hi - r_lo) < 120 else 20

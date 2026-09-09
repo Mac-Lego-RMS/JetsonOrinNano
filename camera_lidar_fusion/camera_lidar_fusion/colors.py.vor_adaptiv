@@ -6,7 +6,6 @@ braucht deshalb zwei Intervalle.
 
 import cv2
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
 
 # name -> Liste von (h_lo, h_hi) plus gemeinsame S/V-Untergrenzen
 #
@@ -29,16 +28,9 @@ from numpy.lib.stride_tricks import sliding_window_view
 # Farbton getrennt geht es dagegen sauber, bei gleichem s_min=50:
 #     hue (40,90) -> 72 Prozent der Pylonenpixel, 63 Prozent der Wandpixel
 #     hue (35,85) -> 74 Prozent der Pylonenpixel,  4 Prozent der Wandpixel
-# Deshalb zunaechst 85 statt 90 oben. Seit die Zone sitzt und v_min tief darf,
-# musste der Bereich aber noch enger: bei H 80 bis 94 tauchten 45 Punkte auf,
-# ueber Entfernungen von 0.60 bis 2.41 m verteilt -- das ist TUERKIS (H 83
-# entspricht 166 Grad im Farbkreis), also Reflexe auf der Wand, kein Gruen.
-# Die echten Pylonen liegen kompakt bei H 45 bis 64 und jeweils in EINER
-# Entfernung. Am unteren Ende dasselbe Bild: H 30 bis 39 streute ueber 0.16
-# bis 2.50 m, das sind gelbliche Holztoene.
-#
-# Deshalb jetzt 40 bis 72. Die Faustregel dahinter: echte Pylonenpunkte
-# klumpen in Farbton UND Entfernung, Fehltreffer streuen in beidem.
+# Deshalb 85 statt 90 oben, und 35 statt 40 unten (dort liegen nochmal 275
+# Pylonenpixel und genau 1 Wandpixel). Holztoene stoeren da nicht, die liegen
+# bei H 8 bis 23.
 #
 # ENTFERNUNG ist der zweite grosse Faktor, und sie wirkt ueber die Saettigung,
 # nicht ueber die Helligkeit. An vier gruenen Pylonen gemessen:
@@ -49,14 +41,6 @@ from numpy.lib.stride_tricks import sliding_window_view
 # Pylone im Bild so klein, dass der Band-Median sie mit dem Hintergrund
 # verwaschet -- dagegen hilft keine Schwelle. Rot hat das Problem nicht, dort
 # liegt S bei 200 und mehr.
-#
-# SEIT DIE ZONE SITZT darf v_min noch viel tiefer. Solange der Abgriff quer
-# ueber Bande, Matte und Wand lief, war v_min die einzige Bremse gegen dunkles
-# Rauschen. Mit der kalibrierten Zone (siehe README) wird nur noch die Bande
-# angeschnitten -- und die hat, ueber die Zone gemittelt, eine Saettigung von
-# glatt NULL. Eine Pylone davor kommt im selben Mass auf 90 bis 113. s_min
-# allein trennt das also sauber, und v_min darf so tief, dass auch eine Pylone
-# im Schatten (dort gemessen: V=15) noch durchkommt.
 #
 # Und die Helligkeit ist nicht stabil: dieselbe Pylone, vier Minuten spaeter,
 # hatte einen V-Median von 32 statt 44 -- Wolken reichen dafuer. Der Farbton
@@ -118,9 +102,9 @@ from numpy.lib.stride_tricks import sliding_window_view
 # nach durch und ueberschreibt, bei Ueberlappung gewinnt also der letzte
 # Eintrag (magenta). Aktuell ueberlappen die Bereiche nicht.
 DEFAULT_RANGES = {
-    'rot':     {'hue': [(0, 10), (177, 179)], 's_min': 110, 'v_min': 12},
-    'gruen':   {'hue': [(40, 72)],            's_min': 50,  'v_min': 12},
-    'magenta': {'hue': [(140, 176)],          's_min': 90,  'v_min': 15},
+    'rot':     {'hue': [(0, 10), (177, 179)], 's_min': 110, 'v_min': 25},
+    'gruen':   {'hue': [(35, 85)],            's_min': 50,  'v_min': 20},
+    'magenta': {'hue': [(140, 176)],          's_min': 90,  'v_min': 30},
 }
 
 # BGR-Farben fuer Debug-Overlays
@@ -225,8 +209,7 @@ def sample_colors(image_bgr: np.ndarray, u: np.ndarray, v: np.ndarray, patch: in
 def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
                   r_aussen: np.ndarray, center, min_frac: float = 0.20,
                   ranges: dict = None, steps: int = 13, black_v_max: int = 45,
-                  nutz_anteil: float = 1.0, adaptiv_faktor: float = 0.0,
-                  adaptiv_grad: float = 20.0):
+                  nutz_anteil: float = 1.0):
     """Farbe je Punkt per Abstimmung ueber ein radiales Segment.
 
     Das Segment ist NICHT konstant breit, sondern wird je Punkt aus zwei
@@ -295,39 +278,6 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
     ss = hsv_stack[..., 1].astype(np.int16)
     vv = hsv_stack[..., 2].astype(np.int16)
 
-    # --- Saettigungsschwelle: absolut oder relativ zur Umgebung -------- #
-    # Absolute Schwellen scheitern an dunklen Pylonen: am Aufbau hatte eine im
-    # Schatten S=66 bei V=15, die schwarze Bande daneben S=28 bei V=17 -- in
-    # BEIDEN Kanaelen ueberlappend, also mit keiner festen Schwelle trennbar.
-    # Im Verhaeltnis ist die Sache dagegen eindeutig: die Pylone ist 2.4- bis
-    # 2.9-mal so gesaettigt wie die Bande neben ihr, und das gilt im Schatten
-    # wie in der Sonne. Deshalb kann die Schwelle mitwandern.
-    #
-    # Der Hintergrund ist der gleitende Median der Saettigung ueber ein
-    # Azimutfenster. Es muss deutlich breiter sein als eine Pylone, sonst
-    # hebt sie ihre eigene Schwelle an: bei 0.8 m ist eine Pylone rund 7 Grad
-    # breit, mit 20 Grad Fenster macht sie also gut ein Sechstel aus und der
-    # Median bleibt fest bei der Bande.
-    schwellen = {name: float(spec['s_min']) for name, spec in ranges.items()}
-    if adaptiv_faktor > 0.0 and phi.size >= 16:
-        sat_pkt = np.median(ss, axis=0)
-        ordnung = np.argsort(phi)
-        sortiert = sat_pkt[ordnung]
-        breite = max(int(round(phi.size * adaptiv_grad / 360.0)), 3)
-        if breite % 2 == 0:
-            breite += 1
-        halb = breite // 2
-        # zyklisch, der Azimut laeuft rundum
-        lang = np.concatenate([sortiert[-halb:], sortiert, sortiert[:halb]])
-        grund_sortiert = np.median(sliding_window_view(lang, breite), axis=1)
-        grund = np.empty_like(grund_sortiert)
-        grund[ordnung] = grund_sortiert
-        for name, spec in ranges.items():
-            # Absolute Untergrenze bleibt als Rauschsperre bestehen, sie ist
-            # aber unkritisch, weil die relative Schwelle meist hoeher liegt.
-            schwellen[name] = np.maximum(grund * adaptiv_faktor,
-                                         float(spec['s_min']) * 0.5)
-
     labels = np.full(phi.size, 'unbekannt', dtype=object)
     best = np.full(phi.size, float(min_frac) - 1e-9)
     hits = {}
@@ -335,7 +285,7 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
         hit = np.zeros(hh.shape, dtype=bool)
         for lo, hi in spec['hue']:
             hit |= (hh >= lo) & (hh <= hi)
-        hit &= (ss >= np.asarray(schwellen[name])) & (vv >= spec['v_min'])
+        hit &= (ss >= spec['s_min']) & (vv >= spec['v_min'])
         hits[name] = hit
         frac = hit.mean(0)
         take = frac > best

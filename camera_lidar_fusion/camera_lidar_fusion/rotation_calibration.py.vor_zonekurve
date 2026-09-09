@@ -36,7 +36,6 @@ Start:
 """
 
 import copy
-import inspect
 import math
 import os
 
@@ -130,8 +129,6 @@ class RotationCalibration(Node):
         self.background = None
         self.background_buffer = []
         self.background_collecting = False
-        # Messreihe fuer die Abgriffszone: je Eintrag (rho, r_innen, r_aussen)
-        self.zone_samples = []
 
         self.commands = {
             'circle': self.cmd_circle, 'sample': self.cmd_sample, 'solve': self.cmd_solve,
@@ -139,9 +136,6 @@ class RotationCalibration(Node):
             'list': self.cmd_list, 'verify': self.cmd_verify, 'auto': self.cmd_auto,
             'height': self.cmd_height, 'radial': self.cmd_radial, 'ring': self.cmd_ring,
             'blind': self.cmd_blind, 'background': self.cmd_background,
-            'zone': self.cmd_zone, 'zonefit': self.cmd_zonefit,
-            'zonelist': self.cmd_zonelist, 'zoneclear': self.cmd_zoneclear,
-            'zonedel': self.cmd_zonedel,
         }
 
         self.create_subscription(Image, self.get_parameter('image_topic').value,
@@ -217,19 +211,13 @@ class RotationCalibration(Node):
             self._try_auto_sample()
 
     def on_command(self, msg: String):
-        # Kommandos duerfen ein Argument tragen, z.B. "zonedel 10".
-        teile = msg.data.strip().lower().split()
-        command = teile[0] if teile else ''
-        argument = ' '.join(teile[1:])
+        command = msg.data.strip().lower()
         handler = self.commands.get(command)
         if handler is None:
             self._status(f'Unbekanntes Kommando "{msg.data}". Bekannt: '
                          + ', '.join(sorted(self.commands)), warn=True)
             return
-        if argument and inspect.signature(handler).parameters:
-            handler(argument)
-        else:
-            handler()
+        handler()
 
     # ------------------------------------------------------------------ #
     # Messung: naechstliegendes Lidar-Cluster + groesster Farb-Blob
@@ -668,199 +656,6 @@ class RotationCalibration(Node):
         lines.append(f'Summe {total:.0f} Grad blockiert -> nutzbar rund {360 - total:.0f} Grad.')
         lines.append('Mit "save" festschreiben.')
         self._status('\n'.join(lines))
-
-    # ------------------------------------------------------------------ #
-    # Abgriffszone: messen statt rechnen
-    # ------------------------------------------------------------------ #
-    def cmd_zone(self):
-        """Misst an der aufgestellten Pylone, WO ihre Farbe radial liegt.
-
-        Ablauf: Pylone in einer Entfernung aufstellen, Kommando senden, Pylone
-        versetzen, wieder senden -- moeglichst weit gespreizt, denn der Fit
-        trennt einen konstanten von einem 1/rho-Anteil und braucht dafuer nah
-        UND fern.
-
-        Gemessen wird entlang der radialen Linie durch das Lidar-Cluster: von
-        innen nach aussen wird geschaut, ueber welchen Radiusbereich die
-        Pylonenfarbe steht. Das ist der Bereich, den lidar_pixel_mapper spaeter
-        abtasten soll -- er wird also direkt gemessen und nicht aus cam_z und
-        Brennweite hergeleitet, wo sich jeder Kalibrierfehler aufschaukelt.
-        """
-        cluster = self.find_target_cluster()
-        if cluster is None:
-            self._status('Kein sauberes Lidar-Cluster gefunden.', warn=True)
-            return
-        if self.latest_image is None:
-            self._status('Noch kein Kamerabild.', warn=True)
-            return
-        bearing, distance, punkte = cluster
-
-        label = self.get_parameter('target_label').value
-        if not label:
-            self._status('Bitte target_label auf die Pylonenfarbe setzen '
-                         '(rot, gruen oder magenta).', warn=True)
-            return
-        spec = self.ranges.get(label)
-        if spec is None:
-            self._status(f'Unbekannte Farbe {label!r}.', warn=True)
-            return
-
-        # Richtung im Bild, in der die Pylone steht
-        punkt = np.array([[distance * math.cos(bearing),
-                           distance * math.sin(bearing), self.calib.cam_z]])
-        u, v, _, _, _ = project(self.calib, punkt)
-        phi = math.atan2(float(v[0]) - self.calib.cy, float(u[0]) - self.calib.cx)
-
-        hsv = cv2.cvtColor(self.latest_image, cv2.COLOR_BGR2HSV)
-        hoehe, breite = self.latest_image.shape[:2]
-        treffer = []
-        for r in range(int(self.calib.radius_px * 0.6), int(self.calib.radius_px) + 1):
-            uu = int(round(self.calib.cx + r * math.cos(phi)))
-            vv = int(round(self.calib.cy + r * math.sin(phi)))
-            if not (0 <= uu < breite and 0 <= vv < hoehe):
-                continue
-            h, sat, val = (int(x) for x in hsv[vv, uu])
-            passt = any(lo <= h <= hi for lo, hi in spec['hue'])
-            if passt and sat >= spec['s_min'] and val >= spec['v_min']:
-                treffer.append(r)
-        if len(treffer) < 3:
-            self._status(
-                f'In Richtung der Pylone ({math.degrees(bearing):+.1f} Grad, '
-                f'{distance:.2f} m) keine {label}-Flaeche gefunden. Steht sie dort, '
-                'und stimmt target_label?', warn=True)
-            return
-
-        # Groesster zusammenhaengender Lauf -- einzelne Streupixel ignorieren
-        laeufe, start, vorher = [], treffer[0], treffer[0]
-        for r in treffer[1:]:
-            if r > vorher + 2:
-                laeufe.append((start, vorher))
-                start = r
-            vorher = r
-        laeufe.append((start, vorher))
-        r_in, r_out = max(laeufe, key=lambda t: t[1] - t[0])
-        if r_out - r_in < 2:
-            self._status('Farbflaeche zu duenn -- Pylone naeher stellen oder '
-                         'Belichtung pruefen.', warn=True)
-            return
-
-        self.zone_samples.append({'rho': distance, 'r_in': float(r_in),
-                                  'r_out': float(r_out), 'label': label})
-        erwartet = self.calib.focal_px * math.atan(0.10 / max(distance, 1e-3))
-        self._status(
-            f'Zone-Sample {len(self.zone_samples)}: {label} bei {distance:.2f} m '
-            f'({math.degrees(bearing):+.1f} Grad, {punkte} Lidar-Punkte) -> '
-            f'Farbe von r={r_in} bis r={r_out} px, also {r_out - r_in} px dick '
-            f'(eine 10-cm-Pylone waere hier {erwartet:.0f} px). '
-            f'Jetzt versetzen und nochmal.')
-
-    def cmd_zonelist(self):
-        if not self.zone_samples:
-            self._status('Keine Zone-Samples.')
-            return
-        zeilen = [f'{len(self.zone_samples)} Zone-Samples:']
-        for i, z in enumerate(self.zone_samples, 1):
-            zeilen.append(f'  {i:2d}  {z["rho"]:5.2f} m  r {z["r_in"]:5.0f}..{z["r_out"]:5.0f}  '
-                          f'({z["r_out"] - z["r_in"]:3.0f} px)  [{z["label"]}]')
-        spanne = (max(z['rho'] for z in self.zone_samples)
-                  / max(min(z['rho'] for z in self.zone_samples), 1e-3))
-        zeilen.append(f'Entfernungen liegen Faktor {spanne:.1f} auseinander '
-                      f'(fuer den Fit sind 4 oder mehr gut).')
-        self._status('\n'.join(zeilen))
-
-    def cmd_zoneclear(self):
-        self.zone_samples.clear()
-        self._status('Zone-Samples verworfen.')
-
-    def cmd_zonedel(self, argument=''):
-        """Einzelne Zone-Samples wegwerfen: "zonedel 10" oder "zonedel 3 7 10".
-
-        Nummern beziehen sich auf die Ausgabe von "zonelist". Es wird von
-        hinten geloescht, damit die noch offenen Nummern gueltig bleiben.
-        """
-        if not argument:
-            self._status('Welches Sample? Zum Beispiel: zonedel 10   (Nummern aus '
-                         '"zonelist", mehrere durch Leerzeichen getrennt)', warn=True)
-            return
-        gewuenscht, murks = [], []
-        for stueck in argument.split():
-            try:
-                gewuenscht.append(int(stueck))
-            except ValueError:
-                murks.append(stueck)
-        if murks:
-            self._status(f'Keine Nummer: {" ".join(murks)}', warn=True)
-            return
-        ausserhalb = [n for n in gewuenscht if not 1 <= n <= len(self.zone_samples)]
-        if ausserhalb:
-            self._status(f'Es gibt {len(self.zone_samples)} Samples, '
-                         f'{ausserhalb} liegt ausserhalb.', warn=True)
-            return
-        weg = []
-        for n in sorted(set(gewuenscht), reverse=True):
-            z = self.zone_samples.pop(n - 1)
-            weg.append(f'{n} ({z["rho"]:.2f} m, r {z["r_in"]:.0f}..{z["r_out"]:.0f})')
-        self._status(f'Geloescht: {", ".join(reversed(weg))}. '
-                     f'Es bleiben {len(self.zone_samples)} Samples -- ACHTUNG, sie sind '
-                     f'neu durchnummeriert, vor dem naechsten "zonedel" also "zonelist".')
-
-    def cmd_zonefit(self):
-        """Legt r = r0 + k/rho durch die Messungen, je fuer innen und aussen.
-
-        Die Form kommt aus der Geometrie: fuer theta nahe 90 Grad ist
-        atan2(rho, dz) ungefaehr pi/2 - dz/rho, also r ungefaehr
-        f*pi/2 - f*dz/rho. Der 1/rho-Anteil traegt die Hoehe der Kante ueber
-        dem Objektiv, der konstante Anteil die Brennweite -- und mit ihm
-        gleich den Modellfehler, den man sonst nirgends loswird.
-        """
-        if len(self.zone_samples) < 3:
-            self._status('Mindestens 3 Samples noetig, besser 5 bis 6 ueber einen '
-                         'weiten Entfernungsbereich.', warn=True)
-            return
-        rho = np.array([z['rho'] for z in self.zone_samples])
-        spanne = rho.max() / max(rho.min(), 1e-3)
-        if spanne < 2.5:
-            self._status(f'Entfernungen liegen nur Faktor {spanne:.1f} auseinander. '
-                         'Der Fit kann den konstanten Anteil dann kaum vom '
-                         '1/rho-Anteil trennen -- naeher UND weiter sampeln.', warn=True)
-
-        ergebnis = {}
-        for name, werte in (('in', np.array([z['r_in'] for z in self.zone_samples])),
-                            ('out', np.array([z['r_out'] for z in self.zone_samples]))):
-            A = np.column_stack([np.ones_like(rho), 1.0 / rho])
-            loesung, *_ = np.linalg.lstsq(A, werte, rcond=None)
-            rest = A @ loesung - werte
-            ergebnis[name] = (float(loesung[0]), float(loesung[1]),
-                              float(np.sqrt(np.mean(rest ** 2))))
-
-        self.calib.zone_r0_in, self.calib.zone_k_in, rms_in = ergebnis['in']
-        self.calib.zone_r0_out, self.calib.zone_k_out, rms_out = ergebnis['out']
-
-        zeilen = [
-            f'Zonenkurve aus {len(self.zone_samples)} Samples '
-            f'(Entfernungen {rho.min():.2f} bis {rho.max():.2f} m):',
-            f'  r_innen  = {self.calib.zone_r0_in:7.1f} + {self.calib.zone_k_in:+7.2f}/rho   '
-            f'RMS {rms_in:.1f} px',
-            f'  r_aussen = {self.calib.zone_r0_out:7.1f} + {self.calib.zone_k_out:+7.2f}/rho   '
-            f'RMS {rms_out:.1f} px',
-            '  Ergibt folgende Zone:']
-        for d in (0.3, 0.5, 1.0, 2.0, 3.0):
-            ri, ra = self.calib.zone_radien(d)
-            zeilen.append(f'    {d:4.1f} m -> {float(ri):6.1f} .. {float(ra):6.1f} px  '
-                          f'({float(ra - ri):5.1f} px dick)')
-        ring = self.calib.focal_px * math.pi / 2.0
-        zeilen.append(
-            f'  Zum Vergleich: das gerechnete Modell setzt den Horizontring auf '
-            f'{ring:.1f} px, der Fit laeuft gegen {self.calib.zone_r0_in:.1f} px. '
-            f'Die Differenz von {ring - self.calib.zone_r0_in:+.1f} px ist der '
-            f'Modellfehler, den die Messung nebenbei mit auffaengt.')
-        hoehe_cm = (self.calib.zone_k_out - self.calib.zone_k_in) / self.calib.focal_px * 100
-        zeilen.append(f'  Farbige Hoehe der Pylone laut Fit: {hoehe_cm:.1f} cm.')
-        zeilen.append('Mit "save" festschreiben, dann im Mapper "reload".')
-        self._status('\n'.join(zeilen))
-        if max(rms_in, rms_out) > 6.0:
-            self._status(f'RMS ueber 6 px -- meist steckt ein Sample dahinter, bei dem '
-                         'die Farbflaeche verdeckt war. Mit "zonelist" pruefen.', warn=True)
 
     def cmd_ring(self):
         """Meldet, wo der Horizontring aktuell liegt, und gleicht f_px ab.

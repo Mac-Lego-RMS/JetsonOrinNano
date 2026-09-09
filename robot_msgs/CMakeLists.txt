@@ -16,6 +16,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/WallMatchArray.msg"
   "msg/WallHNF.msg"
   "msg/CornerGeometry.msg"
+  "msg/Obstacle.msg"
+  "msg/ObstacleArray.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

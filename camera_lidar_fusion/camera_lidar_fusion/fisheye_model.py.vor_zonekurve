@@ -63,25 +63,6 @@ class FisheyeCalib:
     # von > bis schreiben, das wird zyklisch verstanden.
     lidar_blind_sectors_deg: list = field(default_factory=list)
 
-    # --- Abgriffszone, empirisch kalibriert (Kommando "zone") ---
-    # Wo im Bild liegt die farbige Flaeche einer Pylone? Statt das aus cam_z und
-    # der Brennweite zu RECHNEN, wird es gemessen: die Zonengrenzen laufen als
-    #     r(rho) = r0 + k / rho
-    # Diese Form folgt aus der Geometrie -- fuer theta nahe 90 Grad ist
-    # atan2(rho, dz) ~ pi/2 - dz/rho, also r ~ f*pi/2 - f*dz/rho. Der 1/rho-Term
-    # traegt die Hoehe, der konstante Term die Brennweite.
-    #
-    # Der Witz am Messen statt Rechnen: der konstante Term faengt nebenbei den
-    # Modellfehler mit ein. Am Aufbau lag er bei 403 px, waehrend das
-    # equidistante Modell 412 px vorhersagt -- 9 px Unterschied, weil das
-    # Objektiv am Bildrand von r = f*theta abweicht und poly_coeffs leer ist.
-    # Genau diese 9 px haben jeden Versuch verdorben, die Zone ueber Hoehen zu
-    # setzen. Ist zone_k_out gleich 0, ist die Kurve nicht kalibriert.
-    zone_r0_in: float = 0.0
-    zone_k_in: float = 0.0
-    zone_r0_out: float = 0.0
-    zone_k_out: float = 0.0
-
     # --- Metadaten ---
     image_width: int = 1280
     image_height: int = 960
@@ -98,16 +79,6 @@ class FisheyeCalib:
         if self.f_px > 0.0:
             return self.f_px
         return self.radius_px / self.theta_max_rad
-
-    @property
-    def zone_kalibriert(self) -> bool:
-        return self.zone_k_out != 0.0 or self.zone_r0_out != 0.0
-
-    def zone_radien(self, rho) -> tuple:
-        """Entfernung -> (r_innen, r_aussen) der Abgriffszone in px."""
-        rho = np.maximum(np.asarray(rho, dtype=float), 1e-3)
-        return (self.zone_r0_in + self.zone_k_in / rho,
-                self.zone_r0_out + self.zone_k_out / rho)
 
     def rotation_matrix(self) -> np.ndarray:
         """R mit P_cam = R @ (P_robot - t)."""
