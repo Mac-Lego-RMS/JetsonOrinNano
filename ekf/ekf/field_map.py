@@ -22,7 +22,7 @@ consistent: for a CCW-ordered polygon, the left-hand normal of each edge
     left-hand normal point outward.
 """
 import numpy as np
- 
+
 from ekf.ekf import wrap
 
 # --- field dimensions (metres) ---
@@ -93,8 +93,8 @@ START_POSES_CCW = {
     'pos1': (-0.05, 1.0, np.pi),
     'pos2': (0.45, 1.0, np.pi),
 }
- 
- 
+
+
 def _transform_point(p, start_pose):
     """Map a field-frame point into the start-anchored map frame."""
     xs, ys, th = start_pose
@@ -104,29 +104,35 @@ def _transform_point(p, start_pose):
     x_map = c * dx + s * dy
     y_map = -s * dx + c * dy
     return np.array([x_map, y_map])
- 
- 
+
+
+def _segments_to_map(segments, start_pose):
+    """Transform a list of (p1, p2) field-frame segments into map-frame wall
+    dicts {'alpha', 'd', 'p1', 'p2'}. Shared by generate_map, outer_walls_map
+    and inner_walls_map so the transformation lives in exactly one place."""
+    xs, ys, th = start_pose
+    walls = []
+    for (p1, p2) in segments:
+        alpha_f, d_f = segment_to_hnf(p1, p2)
+        walls.append({
+            'alpha': wrap(alpha_f - th),
+            'd': d_f - (xs * np.cos(alpha_f) + ys * np.sin(alpha_f)),
+            'p1': _transform_point(np.asarray(p1), start_pose),
+            'p2': _transform_point(np.asarray(p2), start_pose),
+        })
+    return walls
+
+
 def generate_map(start_pose, segments=FIELD_SEGMENTS):
     """Transform field-fixed wall segments into the map frame for a start pose.
- 
+
     Returns a list of dicts, one per wall:
         {'alpha', 'd', 'p1', 'p2'}
     where alpha, d are the map-frame HNF (for matching) and p1, p2 are the
     transformed endpoints (for visibility gating).
     """
-    xs, ys, th = start_pose
-    walls = []
-    for (p1, p2) in segments:
-        alpha_f, d_f = segment_to_hnf(p1, p2)
-        alpha_m = wrap(alpha_f - th)
-        d_m = d_f - (xs * np.cos(alpha_f) + ys * np.sin(alpha_f))
-        walls.append({
-            'alpha': alpha_m,
-            'd': d_m,
-            'p1': _transform_point(p1, start_pose),
-            'p2': _transform_point(p2, start_pose),
-        })
-    return walls
+    return _segments_to_map(segments, start_pose)
+
 
 def start_map_3wall(front_dist, left_d, right_d):
     """Reduced start-straight map: the three visible walls as (alpha, d).
@@ -154,6 +160,7 @@ def start_map_3wall(front_dist, left_d, right_d):
         (np.radians(-90.0), -abs(left_d)),   # left  (+y side)
         (np.radians(90.0), -abs(right_d)),   # right (-y side)
     ]
+
 
 def outer_box_map(start_pose):
     """Outer track box (fixed 3x3 rim) in the start-anchored map frame.
@@ -198,6 +205,7 @@ def outer_box_map(start_pose):
 
     return ccw, walls, 3.0
 
+
 def outer_walls_map(start_pose):
     """The 4 outer-band walls (3x3 rim) as match-ready walls in the map frame.
 
@@ -206,39 +214,45 @@ def outer_walls_map(start_pose):
     open challenge until round-1 learning). Used as the EKF matching map after
     the direction latch on the open challenge.
     """
-    walls = []
-    for (p1, p2) in OUTER_SEGMENTS:
-        alpha_f, d_f = segment_to_hnf(p1, p2)
-        xs, ys, th = start_pose
-        alpha_m = wrap(alpha_f - th)
-        d_m = d_f - (xs * np.cos(alpha_f) + ys * np.sin(alpha_f))
-        walls.append({
-            'alpha': alpha_m,
-            'd': d_m,
-            'p1': _transform_point(np.array(p1), start_pose),
-            'p2': _transform_point(np.array(p2), start_pose),
-        })
-    return walls
- 
+    return _segments_to_map(OUTER_SEGMENTS, start_pose)
+
+
+def inner_walls_map(start_pose):
+    """The 4 inner-band walls (fixed 1x1 square) in the map frame.
+
+    OBSTACLE CHALLENGE ONLY. There the lane is always 1000 mm (+-10 mm), so the
+    inner band is known exactly and must NOT be measured -- measuring would
+    replace a known constant with a noisy estimate.
+
+    Returns (walls, corners) in the same shape as inner_band_from_widths, so
+    both challenges can feed the same publisher:
+        walls:   list of 4 dicts {'alpha','d','p1','p2'}, normals pointing
+                 OUTWARD (into the lane)
+        corners: list of 4 (2,) arrays, with wall i spanning
+                 corners[i] -> corners[i+1]
+    """
+    walls = _segments_to_map(INNER_SEGMENTS, start_pose)
+    corners = [w['p1'] for w in walls]
+    return walls, corners
+
 
 def inner_band_from_widths(start_pose, widths):
     """Inner-band walls and corners in the map frame, from measured lane widths.
 
-    The inner edge of straight i is the outer wall i shifted inward by that
-    straight's measured lane width. Intersecting adjacent inner lines gives the
-    inner corners. Uses the MEASURED width (not snapped to 0.6/1.0) because the
-    rules allow +-100 mm at the international final.
+    OPEN CHALLENGE: the inner band is variable, so it is reconstructed from the
+    widths learned while driving. The inner edge of straight i is the outer wall
+    i shifted inward by that straight's measured lane width; intersecting
+    adjacent inner lines gives the inner corners. Uses the MEASURED width (not
+    snapped to 0.6/1.0) because the rules allow +-100 mm at the international
+    final.
 
     Args:
         start_pose: field-frame start pose (same one used for outer_box_map).
         widths: dict {outer_wall_index (0..3): measured lane width in m}.
                 All four indices must be present.
 
-    Returns (walls, corners) or None if the geometry is degenerate:
-        walls:   list of 4 dicts {'alpha','d','p1','p2'}, normals pointing
-                 OUTWARD (into the lane), same format as generate_map.
-        corners: list of 4 (2,) arrays. Index convention matches the outer box:
-                 wall i spans corners[i] -> corners[i+1].
+    Returns (walls, corners) or None if the geometry is degenerate. Same shape
+    as inner_walls_map.
     """
     if any(i not in widths for i in range(4)):
         return None
@@ -273,6 +287,7 @@ def inner_band_from_widths(start_pose, widths):
             'p2': corners[(i + 1) % 4],
         })
     return walls, corners
+
 
 # --- obstacle (traffic sign) seats -----------------------------------------
 # Six seats per straight: two columns and three rows.
@@ -322,7 +337,7 @@ def obstacle_seats_field():
 
     Straight k is the west straight rotated k times by 90 deg CCW. Which
     straight belongs to which outer-wall index in the map depends on the start
-    pose, so the caller pairs them up via obstacle_seats_map().
+    pose, so the caller pairs them up via seat_group_to_wall_index().
     """
     base = _west_straight_seats()
     out = []
@@ -346,7 +361,8 @@ def obstacle_seats_map(start_pose):
                      'column': s['column'], 'row': s['row']}
                     for s in straight])
     return out
- 
+
+
 def seat_group_to_wall_index(start_pose):
     """Map each seat group (0..3 from obstacle_seats_*) to the outer-wall index
     used by outer_box_map / corner_geometry.
@@ -371,9 +387,18 @@ def seat_group_to_wall_index(start_pose):
         out.append(best)
     return out
 
+
 if __name__ == '__main__':
-    print('Position 1 CCW walls in map frame:')
-    for w in generate_map(START_POSES_CCW['pos2']):
+    pose = START_POSES_CW['pos2']
+    print('Pos 2 CW -- outer walls in map frame:')
+    for w in outer_walls_map(pose):
         print(f"  alpha={np.degrees(w['alpha']):+7.1f} deg  d={w['d']:+.3f}  "
               f"p1=({w['p1'][0]:+.2f},{w['p1'][1]:+.2f})  "
               f"p2=({w['p2'][0]:+.2f},{w['p2'][1]:+.2f})")
+    print('Pos 2 CW -- inner walls in map frame (fixed 1x1):')
+    walls, corners = inner_walls_map(pose)
+    for i, w in enumerate(walls):
+        edge = float(np.hypot(*(w['p2'] - w['p1'])))
+        print(f"  alpha={np.degrees(w['alpha']):+7.1f} deg  d={w['d']:+.3f}  "
+              f"p1=({w['p1'][0]:+.2f},{w['p1'][1]:+.2f})  "
+              f"p2=({w['p2'][0]:+.2f},{w['p2'][1]:+.2f})  len={edge:.3f}")

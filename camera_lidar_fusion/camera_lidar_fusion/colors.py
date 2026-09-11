@@ -222,11 +222,45 @@ def sample_colors(image_bgr: np.ndarray, u: np.ndarray, v: np.ndarray, patch: in
     return bgr, hsv
 
 
+def rg_kennzahl(stack: np.ndarray):
+    """(G-R)/max(B,G,R) je Pixel, dazu max(B,G,R).
+
+    Positiv heisst gruenlich, negativ roetlich, um null herum farblos.
+
+    Warum nicht ueber den Farbton: am Aufbau gemessen (Rohbild + CSV, beide
+    Pylonen auf 0.85 m) liegt die ROTE Pylone bei H 5..9 mit S 156..219 --
+    bilderbuchmaessig. Die GRUENE dagegen bei H 33..67 mit S nur 64..133, also
+    quer ueber die untere Fenstergrenze (H=40) und dicht an der oberen (H=72).
+    Das ist kein Zufall: der Farbton wird bei niedriger Saettigung numerisch
+    instabil, und genau dort lebt gruen. Deshalb verliert ein Farbton-Fenster
+    gruen reihenweise und nimmt dafuer die dunkle Bande mit.
+
+    Das Verhaeltnis von Gruen- zu Rotkanal ist dagegen eindeutig getrennt
+    (Median, 5..95 Perzentil, dieselbe Messung):
+
+        rote Pylone     -0.60   (-0.63 .. -0.48)
+        gruene Pylone   +0.44   (+0.17 .. +0.52)
+        Holz und Moebel -0.08   (-0.16 .. +0.01)
+        Bande und Rest   0.00   (-0.07 .. +0.16)
+
+    Die Normierung auf den hellsten Kanal macht die Kennzahl unabhaengig von
+    Helligkeit und Belichtung -- eine im Schatten stehende Pylone hat dieselbe
+    Kennzahl wie eine in der Sonne, nur mit mehr Rauschen.
+    """
+    b = stack[..., 0].astype(np.int16)
+    g = stack[..., 1].astype(np.int16)
+    r = stack[..., 2].astype(np.int16)
+    mx = np.maximum(np.maximum(b, g), r)
+    return (g - r) / np.maximum(mx, 1).astype(np.float32), mx, (g - r)
+
+
 def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
                   r_aussen: np.ndarray, center, min_frac: float = 0.20,
                   ranges: dict = None, steps: int = 13, black_v_max: int = 45,
                   nutz_anteil: float = 1.0, adaptiv_faktor: float = 0.0,
-                  adaptiv_grad: float = 20.0):
+                  adaptiv_grad: float = 20.0,
+                  rg_z_min: float = 0.15, rg_s_min: int = 60,
+                  rg_d_min: int = 20):
     """Farbe je Punkt per Abstimmung ueber ein radiales Segment.
 
     Das Segment ist NICHT konstant breit, sondern wird je Punkt aus zwei
@@ -328,14 +362,31 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
             schwellen[name] = np.maximum(grund * adaptiv_faktor,
                                          float(spec['s_min']) * 0.5)
 
+    zz, _, dd = rg_kennzahl(stack)
+
     labels = np.full(phi.size, 'unbekannt', dtype=object)
     best = np.full(phi.size, float(min_frac) - 1e-9)
     hits = {}
     for name, spec in ranges.items():
-        hit = np.zeros(hh.shape, dtype=bool)
-        for lo, hi in spec['hue']:
-            hit |= (hh >= lo) & (hh <= hi)
-        hit &= (ss >= np.asarray(schwellen[name])) & (vv >= spec['v_min'])
+        if rg_z_min > 0.0 and name in ('rot', 'gruen'):
+            # Rot und Gruen ueber das Kanalverhaeltnis (siehe rg_kennzahl).
+            hit = (zz >= rg_z_min) if name == 'gruen' else (zz <= -rg_z_min)
+            hit &= ss >= rg_s_min
+            # ABSOLUTES Tor. Ohne das reicht ein Farbstich: ein dunkles,
+            # fast neutrales Bandenpixel BGR(30,35,25) hat S=73 und z=+0.29 --
+            # beide relativen Tore offen, obwohl der Kanalunterschied nur 10
+            # Zaehlwerte betraegt. Am Aufbau gemessen liegt die Bande bei
+            # |G-R| = 0 (5..95 Perzentil -2..+9), die gruene Pylone bei 38,
+            # die rote bei 110.
+            hit &= np.abs(dd) >= rg_d_min
+        else:
+            # magenta (Parkzone) bleibt auf dem Farbton-Weg: dort ist der
+            # Farbton eindeutig und es gibt keine Messreihe fuer eine bessere
+            # Kennzahl.
+            hit = np.zeros(hh.shape, dtype=bool)
+            for lo, hi in spec['hue']:
+                hit |= (hh >= lo) & (hh <= hi)
+            hit &= (ss >= np.asarray(schwellen[name])) & (vv >= spec['v_min'])
         hits[name] = hit
         frac = hit.mean(0)
         take = frac > best

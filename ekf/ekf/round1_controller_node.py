@@ -81,7 +81,29 @@ class Round1Controller(Node):
         'o_in':          ('o_in',          0.50,  float),
         'o_out':         ('o_out',         0.50,  float),
         'inner_clearance': ('inner_clearance', 0.25, float),  # target gap to the INNER band (lap 2+)
-        'v_start':       ('v_start',       0.4,  float),   # speed on the start straight (before direction latch)
+        'use_auto_offset': ('use_auto_offset', 1.0, lambda v: bool(float(v))),  # 0 -> use o_in_list/o_out_list
+        # obstacle avoidance
+        'obs_clear_before': ('obs_clear_before', 0.20, float),  # on the new offset this far BEFORE the block
+        'obs_clear_after':  ('obs_clear_after',  0.10, float),  # hold it this far AFTER (small -> swap earlier)
+        'obs_transition_pref': ('obs_transition_pref', 0.80, float),  # preferred lane-change length (caps the used room!)
+        'obs_transition_min':  ('obs_transition_min',  0.40, float),  # measured limit ~0.40 m @0.45 m/s
+        'obs_wall_margin':  ('obs_wall_margin',  0.12, float),  # never plan closer than this to a wall
+        'v_obstacle':       ('v_obstacle',       0.35, float),  # speed on straights with obstacles
+        'obs_slope_slow':   ('obs_slope_slow',   0.80, float),  # above this slope -> v_obstacle_steep
+        'v_obstacle_steep': ('v_obstacle_steep', 0.35, float),  # speed for steep lane changes
+        'parking_lot_present': ('parking_lot_present', 0.0, lambda v: bool(float(v))),
+        # planning against the ACTUAL pose (not the ideal line)
+        'arc_shrink':       ('arc_shrink',       1.0, lambda v: bool(float(v))),  # shrink R if the run-up is too short
+        'min_turn_radius':  ('min_turn_radius',  0.30, float),
+        'max_settle_slope': ('max_settle_slope', 0.80, float),  # lateral m per longitudinal m we trust
+        'turn_in_lat_warn': ('turn_in_lat_warn', 0.10, float),  # warn above this lateral error at turn-in
+        # scan pause at the end of each straight (lap 1 only -- after that the
+        # seat grid is filled and standing still would only cost time)
+        'scan_pause':       ('scan_pause',       1.0, lambda v: bool(float(v))),
+        'scan_pause_s':     ('scan_pause_s',     1.5, float),   # how long to stand still [s]
+        'scan_front_dist':  ('scan_front_dist',  1.20, float),  # trigger at this distance to the corner
+        'scan_pause_laps':  ('scan_pause_laps',  1,    int),    # pause only during the first N laps
+        'v_start':       ('v_start',       0.35,  float),   # speed on the start straight (before direction latch)
         'start_stop_gap': ('start_stop_gap', 0.50, float),  # stop this far from the front wall if direction never comes
         'start_lane_min': ('start_lane_min', 0.45, float),  # plausibility band for d_left+d_right
         'start_lane_max': ('start_lane_max', 1.30, float),
@@ -100,8 +122,8 @@ class Round1Controller(Node):
         'wheelbase':     ('wheelbase',     0.10,  float),
         'max_yaw_rate':  ('max_yaw_rate',  3.0,   float),
         # speed profile (distance-based)
-        'v_drive':       ('v_drive',       0.85,  float),   # straight cruise
-        'v_turn':        ('v_turn',        0.85,  float),   # through the arc
+        'v_drive':       ('v_drive',       0.35,  float),   # straight cruise
+        'v_turn':        ('v_turn',        0.35,  float),   # through the arc
         'accel_dist':    ('accel_dist',    0.2,   float),   # ramp v_turn->v_drive after a corner
         'brake_dist':    ('brake_dist',    0.2,   float),   # ramp v_drive->v_turn before T_A
         # lap / finish
@@ -120,7 +142,7 @@ class Round1Controller(Node):
         for name, (attr, default, conv) in self._PARAMS.items():
             self.declare_parameter(name, default)
         # structural (read once)
-        self.declare_parameter('require_button', True)
+        self.declare_parameter('require_button', False)
         self.declare_parameter('control_rate', 30.0)
         self.declare_parameter('odom_timeout', 0.5)   # bridge past short EKF gaps
 
@@ -152,6 +174,12 @@ class Round1Controller(Node):
         self.lane_width = None            # [m] * 4, per straight, from outer<->inner distance
         self.wall_dist = None             # (d_left, d_right) live, for the start straight
         self.start_center_y = None        # map-frame y of the lane centre, held once computed
+        self.obstacles = None             # full current stand from /obstacles
+        self.obs_path = None              # planned polyline [(x,y)] for this straight
+        self.obs_max_slope = 0.0          # steepest lane change in the current plan
+        self._path_idx = 0                # nearest-segment cursor for path following
+        self.scan_done_this_straight = False   # scan pause fires once per straight
+        self.scan_pause_t0 = 0.0
         self.last_odom_time = None
         self.button_pressed = False
         self.v_cmd = 0.0
@@ -173,6 +201,13 @@ class Round1Controller(Node):
                                  self.inner_cb, latched)
         self.create_subscription(Float64MultiArray, '/wall_distances',
                                  self.wall_dist_cb, 10)
+        try:
+            from robot_msgs.msg import ObstacleArray
+            self.create_subscription(ObstacleArray, '/obstacles',
+                                     self.obstacles_cb, latched)
+        except ImportError:
+            self.get_logger().warn("robot_msgs/ObstacleArray nicht verfuegbar -- "
+                                   "Hindernisplanung inaktiv.")
         if self.require_button:
             self.create_subscription(Header, '/esp_serial_bridge/button', self.button_cb, 10)
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -236,27 +271,65 @@ class Round1Controller(Node):
         """Wall index of the straight AFTER corner idx (the exit straight)."""
         return idx % 4 if self.dir_step() > 0 else (idx - 1) % 4
 
-    def _auto_offset_for_wall(self, wall_idx):
-        """Offset from the OUTER wall for a given straight, once the inner band is
-        known: keep a constant inner_clearance to the inner band of THAT straight.
-        Returns None while the inner band is unknown (lap 1 -> use the parameters)."""
+    def _lane_default_offset(self, wall_idx):
+        """Offset for a straight with NO obstacle on it.
+
+        Obstacle mode: the LANE CENTRE -- safest, and it keeps the corner entry
+        clean (no lateral settling needed on a short start straight).
+        Open mode: the racing line, inner_clearance from the inner band.
+        Discriminator: /obstacles is only published in obstacle mode.
+        """
         if self.lane_width is None or wall_idx >= len(self.lane_width):
             return None
-        o = self.lane_width[wall_idx] - self.inner_clearance
-        # never let the arc collapse onto the outer wall
-        return max(o, 0.05)
+        w = self.lane_width[wall_idx]
+        if self.obstacles is not None:
+            return 0.5 * w
+        return max(w - self.inner_clearance, 0.05)
+
+    def _obstacle_offset_near_corner(self, wall_idx, corner_pt):
+        """Pass-by offset for the obstacle on `wall_idx` CLOSEST to `corner_pt`.
+
+        Used twice: for o_out it is the FIRST obstacle after the corner, for o_in
+        the LAST one before it -- in both cases the one nearest that corner.
+        """
+        if not self.obstacles or self.lane_width is None or self.walls is None:
+            return None
+        mine = [o for o in self.obstacles if o['wall'] == wall_idx]
+        if not mine:
+            return None
+        nx, ny, d = self.walls[wall_idx]
+        near = min(mine, key=lambda o: (o['x'] - corner_pt[0]) ** 2
+                                       + (o['y'] - corner_pt[1]) ** 2)
+        q_block = (nx * near['x'] + ny * near['y']) - d
+        return self._obs_planner_for_wall(wall_idx).pass_offset(
+            q_block, near['color'], self.dir_step() > 0)
 
     def corner_o_in(self, idx):
-        auto = self._auto_offset_for_wall(self._entry_wall_idx(idx))
+        w = self._entry_wall_idx(idx)
+        if self.corners is not None:
+            q = self._obstacle_offset_near_corner(w, self.corners[idx])
+            if q is not None:
+                return q                      # last obstacle before the corner
+        auto = self._lane_default_offset(w) if self.use_auto_offset else None
         if auto is not None:
             return auto
         return self.o_in_list[idx] if idx < len(self.o_in_list) else self.o_in
 
     def corner_o_out(self, idx):
-        auto = self._auto_offset_for_wall(self._exit_wall_idx(idx))
+        w = self._exit_wall_idx(idx)
+        if self.corners is not None:
+            q = self._obstacle_offset_near_corner(w, self.corners[idx])
+            if q is not None:
+                return q                      # first obstacle after the corner
+        auto = self._lane_default_offset(w) if self.use_auto_offset else None
         if auto is not None:
             return auto
         return self.o_out_list[idx] if idx < len(self.o_out_list) else self.o_out
+
+    def _obs_planner_for_wall(self, wall_idx):
+        from ekf.obstacle_path import ObstaclePathPlanner
+        w = self.lane_width[wall_idx]
+        return ObstaclePathPlanner(lane_width=w, wall_margin=self.obs_wall_margin)
 
     def corner_R(self, idx):
         return self.R_list[idx] if idx < len(self.R_list) else self.R
@@ -286,6 +359,10 @@ class Round1Controller(Node):
             self._assert_edge_convention(corners, walls)
         self.corners = corners
         self.walls = walls
+        # inner band may have arrived FIRST (both topics are latched) -- then the
+        # widths could not be computed yet. Do it now.
+        if self.inner_walls is not None and self.lane_width is None:
+            self._compute_lane_widths()
 
     def inner_cb(self, msg):
         """Inner band from round-1 learning (open mode, once at lap 0->1).
@@ -298,13 +375,55 @@ class Round1Controller(Node):
         adapted to the real measured width (which is NOT rounded to 60/100 cm).
         """
         inner = [(w.nx, w.ny, w.d) for w in msg.walls]
+        self.inner_walls = inner
+        if self.debug:
+            self.get_logger().info(
+                "  [INNER] " + " | ".join(f"({nx:+.2f},{ny:+.2f},{d:+.2f})"
+                                          for nx, ny, d in inner))
+        # /corner_geometry and /inner_geometry are BOTH latched and arrive within
+        # milliseconds -- the order at the subscriber is NOT guaranteed. So never
+        # drop the inner band; just remember it and compute the widths as soon as
+        # the outer walls are there (see corner_cb).
         if self.walls is None:
-            self.get_logger().warn("/inner_geometry vor /corner_geometry -- ignoriert.")
+            self.get_logger().info("/inner_geometry empfangen (vor corner_geometry) "
+                                   "-- Breiten werden nachgerechnet.")
+            return
+        self._compute_lane_widths()
+
+    def _compute_lane_widths(self):
+        """Lane width per straight, outer wall i <-> the PARALLEL inner wall.
+
+        We do NOT trust the index convention here: pairing outer[i] with inner[i]
+        silently produced nonsense (perpendicular walls -> |d_i - d_o| is
+        meaningless, e.g. 1.95 m in a 1.0 m lane). Matching by parallelism is
+        unambiguous whatever the indexing does.
+        """
+        if self.walls is None or self.inner_walls is None:
             return
         widths = []
-        for i in range(4):
-            widths.append(self._wall_gap(self.walls[i], inner[i]))
-        self.inner_walls = inner
+        for i, (onx, ony, od) in enumerate(self.walls):
+            # For every outer wall there are TWO parallel inner walls (the near
+            # side of the inner box and the far one). Take the parallel one with
+            # the SMALLEST gap -- that is the inner band of THIS straight.
+            cands = []
+            for w in self.inner_walls:
+                if abs(onx * w[0] + ony * w[1]) > 0.9:        # parallel
+                    cands.append((self._wall_gap(self.walls[i], w), w))
+            if not cands:
+                self.get_logger().error(
+                    f"Keine parallele Innenwand zu Aussenwand {i}. Breiten verworfen.")
+                return
+            widths.append(min(cands)[0])
+
+        # plausibility: a lane is never wider than the box or narrower than the car
+        if not all(self.start_lane_min <= w <= self.start_lane_max for w in widths):
+            self.get_logger().error(
+                "Unplausible Gassenbreiten " +
+                ", ".join(f"{w:.3f}" for w in widths) +
+                f" (erwartet {self.start_lane_min:.2f}..{self.start_lane_max:.2f} m). "
+                "Verworfen -- fahre mit o_in/o_out-Parametern weiter.")
+            return
+
         self.lane_width = widths
         self.get_logger().info(
             "/inner_geometry empfangen. Gassenbreiten [m]: " +
@@ -338,6 +457,105 @@ class Round1Controller(Node):
             inx, iny, ind = -inx, -iny, -ind
         # both normals now point the same way; gap = |d_inner - d_outer|
         return abs(ind - od)
+
+    def obstacles_cb(self, msg):
+        """Full current obstacle stand (latched). Replan the current straight's
+        path -- also mid-drive, because a late detection MUST still be avoided."""
+        obs = []
+        for o in msg.obstacles:
+            obs.append(dict(id=int(o.id), x=float(o.position.x), y=float(o.position.y),
+                            color=int(o.color), wall=int(o.wall_idx)))
+        changed = (self.obstacles is None or
+                   {(o['id'], o['color']) for o in obs} !=
+                   {(o['id'], o['color']) for o in self.obstacles})
+        self.obstacles = obs
+        if changed:
+            self.get_logger().info(
+                f"/obstacles: {len(obs)} Hindernisse " +
+                ", ".join(f"id{o['id']}(w{o['wall']},"
+                          f"{'gruen' if o['color']==2 else 'rot'})" for o in obs))
+        if self.state in ('DRIVE', 'SCAN_PAUSE') and self.arc is not None:
+            self.plan_obstacle_path()
+
+    def plan_obstacle_path(self):
+        """Plan the (x,y) polyline for the straight we are currently driving.
+
+        Works in lane coordinates (s along the straight, q from the OUTER wall),
+        then maps to map frame using the entry wall's geometry. Handles late
+        detections by starting the plan at the robot's current position.
+        """
+        self.obs_path = None
+        self.obs_max_slope = 0.0
+        self._path_idx = 0
+        if self.arc is None or self.pose is None or self.obstacles is None:
+            return
+        if self.lane_width is None:
+            return                              # need the inner band for offsets
+
+        idx = self.corner_idx
+        w_entry = self._entry_wall_idx(idx)
+        mine = [o for o in self.obstacles if o['wall'] == w_entry]
+        if not mine:
+            return                              # no obstacle -> normal LA line
+
+        # lane frame: origin at the projection of the robot onto the entry wall,
+        # +s along travel, +q away from the outer wall (into the lane)
+        tx, ty = self.arc['travel']
+        nx, ny, d = self.walls[w_entry]          # outer wall, normal points INWARD
+        x, y, _ = self.pose
+
+        def to_lane(px, py):
+            s = (px - x) * tx + (py - y) * ty            # ahead of the robot
+            q = (nx * px + ny * py) - d                  # distance from outer wall
+            return s, q
+
+        def to_map(s, q):
+            # start from the robot's foot point on the wall, walk s along travel
+            # and q along the inward normal
+            fx = x - ((nx * x + ny * y) - d) * nx
+            fy = y - ((nx * x + ny * y) - d) * ny
+            return (fx + tx * s + nx * q, fy + ty * s + ny * q)
+
+        obs_lane = []
+        for o in mine:
+            s_o, q_o = to_lane(o['x'], o['y'])
+            obs_lane.append((s_o, q_o, o['color']))
+        # only what is still ahead of us (plus a little behind for hysteresis)
+        obs_lane = [t for t in obs_lane if t[0] > -0.10]
+        if not obs_lane:
+            return
+
+        _, q_now = to_lane(x, y)
+        # how far the straight still runs: up to the turn-in point T_A
+        tA = self.arc['T_A']
+        s_end = (tA[0] - x) * tx + (tA[1] - y) * ty
+        s_end = max(s_end, max(t[0] for t in obs_lane) + 0.3)
+
+        planner = self._obs_planner()
+        pts = planner.plan(obs_lane, s_end, self.dir_step() > 0,
+                           q_start=q_now, s_start=0.0,
+                           q_default=(self._lane_default_offset(w_entry)
+                                      or self.corner_o_in(idx)))
+        self.obs_max_slope = planner.max_slope(pts)
+        dense = planner.densify(pts, 0.05)
+        self.obs_path = [to_map(s, q) for (s, q) in dense]
+        self.get_logger().info(
+            f"Hindernis-Pfad geplant (Gerade w{w_entry}, {len(obs_lane)} Hindernisse, "
+            f"steilster Wechsel {self.obs_max_slope:.2f}, {len(self.obs_path)} Punkte).")
+
+    def _obs_planner(self):
+        from ekf.obstacle_path import ObstaclePathPlanner
+        w = self.lane_width[self._entry_wall_idx(self.corner_idx)]
+        # the start straight is 20 cm narrower when a parking lot is placed
+        if self.parking_lot_present and self.corner_count == 0:
+            w = max(w - 0.20, 0.40)
+        return ObstaclePathPlanner(
+            lane_width=w,
+            clear_before=self.obs_clear_before,
+            clear_after=self.obs_clear_after,
+            transition_pref=self.obs_transition_pref,
+            transition_min=self.obs_transition_min,
+            wall_margin=self.obs_wall_margin)
 
     def _assert_edge_convention(self, corners, walls):
         """Verify walls[i] lies on the line through corners[i]->corners[i+1]."""
@@ -404,7 +622,18 @@ class Round1Controller(Node):
         self.last_cmd = (0.0, 0.0)
 
     def publish_cmd(self, v, omega):
-        omega = max(-self.max_yaw_rate, min(self.max_yaw_rate, omega))
+        # Clamp by the STEERING ANGLE, not just the yaw rate: omega = v*tan(d)/L,
+        # so a fixed yaw-rate limit allows physically impossible steering at low
+        # speed (3 rad/s at 0.35 m/s would need 42 deg, mechanical limit is 25).
+        v_eff = max(abs(v), 0.05)
+        omega_steer_max = v_eff * math.tan(self.max_steer) / self.wheelbase
+        limit = min(self.max_yaw_rate, omega_steer_max)
+        if abs(omega) > limit:
+            self.get_logger().warn(
+                f"omega {omega:+.2f} auf {math.copysign(limit, omega):+.2f} begrenzt "
+                f"(Lenkwinkelgrenze {math.degrees(self.max_steer):.0f} deg bei v={v_eff:.2f}).",
+                throttle_duration_sec=1.0)
+        omega = max(-limit, min(limit, omega))
         cmd = Twist()
         cmd.linear.x = float(v)
         cmd.angular.z = float(omega)
@@ -491,6 +720,33 @@ class Round1Controller(Node):
         o_in = self.corner_o_in(idx) if o_in_override is None else o_in_override
         o_out = self.corner_o_out(idx)
         R = self.corner_R(idx)
+
+        # --- feasibility against the ACTUAL pose, not the ideal line ---------
+        # The turn-in point sits at (corner - o_out - R) along travel. If the robot
+        # is still far off the entry line, it needs longitudinal room to settle:
+        # lateral error / room must stay under the slope the car can actually do.
+        # Shrinking R moves T_A FORWARD and buys that room.
+        if self.pose is not None and self.arc_shrink:
+            for _ in range(12):
+                LA_t = (A[0], A[1], A[2] + o_in)
+                LB_t = (B[0], B[1], B[2] + o_out)
+                P_t = line_intersect(LA_t, LB_t)
+                if P_t is None:
+                    break
+                C_t = (P_t[0] + R * (A[0] + B[0]), P_t[1] + R * (A[1] + B[1]))
+                TA_t = (C_t[0] - R * A[0], C_t[1] - R * A[1])
+                px, py, _ = self.pose
+                room = (TA_t[0] - px) * tx + (TA_t[1] - py) * ty
+                lat_err = abs((A[0] * px + A[1] * py) - LA_t[2])
+                if room <= 0.01:
+                    break                      # already past it -- cannot help
+                if lat_err / room <= self.max_settle_slope or R <= self.min_turn_radius:
+                    break
+                R = max(R - 0.05, self.min_turn_radius)
+            if R < self.corner_R(idx) - 1e-6:
+                self.get_logger().warn(
+                    f"Anlauf zu kurz fuer Ecke {idx}: Radius {self.corner_R(idx):.2f} "
+                    f"-> {R:.2f} m verkleinert, um den Einlenkpunkt erreichbar zu machen.")
 
         LA = (A[0], A[1], A[2] + o_in)
         LB = (B[0], B[1], B[2] + o_out)
@@ -591,8 +847,47 @@ class Round1Controller(Node):
 
         if self.state == 'DRIVE':
             self._drive(x, y, theta)
+        elif self.state == 'SCAN_PAUSE':
+            self._scan_pause(x, y, theta)
         elif self.state == 'TURN':
             self._turn(x, y, theta)
+
+    def _scan_pause(self, x, y, theta):
+        """Stand still at the end of a straight so the perception can accumulate
+        scans without motion blur. Only during the first lap(s).
+
+        Afterwards the plan is REDONE: a block seen only during the pause changes
+        o_out of this corner (and the next straight's path). We keep the entry
+        line (we are on it) and hand back to DRIVE instead of turning in blindly --
+        DRIVE then either covers the remaining bit to T_A or turns in at once if
+        the new T_A already lies behind us.
+        """
+        self.publish_stop()
+        left = self.scan_pause_s - (self.now_s() - self.scan_pause_t0)
+        if left > 0.0:
+            self.get_logger().info(
+                f"SCAN-HALT ({left:.1f}s verbleibend) bei ({x:.2f},{y:.2f}).",
+                throttle_duration_sec=0.5)
+            return
+
+        keep_o_in = self.arc.get('o_in') if self.arc else None
+        old_TA = self.arc['T_A'] if self.arc else None
+        self.arc = None
+        self.plan_arc(theta, o_in_override=keep_o_in)
+        self.plan_obstacle_path()
+        if self.arc is not None and old_TA is not None:
+            tr = self.arc['travel']
+            new_TA = self.arc['T_A']
+            shift = ((new_TA[0] - old_TA[0]) * tr[0] + (new_TA[1] - old_TA[1]) * tr[1])
+            if abs(shift) > 0.02:
+                self.get_logger().info(
+                    f"Nach SCAN-HALT neu geplant: Einlenkpunkt um {shift:+.2f} m "
+                    f"verschoben (o_out={self.corner_o_out(self.corner_idx):.2f}).")
+        self.state = 'DRIVE'
+        self.get_logger().info("SCAN-HALT fertig, Plan aktualisiert.")
+
+    def now_s(self):
+        return self.get_clock().now().nanoseconds * 1e-9
 
     # ------------------------------------------------------------- states
     def _enter_drive(self, x, y, theta):
@@ -690,7 +985,12 @@ class Round1Controller(Node):
         tr = self.arc['travel']
         tA = self.arc['T_A']
         # hold the entry line of THIS straight (LA); Stanley keeps us centred
-        omega = self._stanley_steer(x, y, theta, self.arc['LA'], tr)
+        # follow the planned obstacle path if there is one, else the plain line
+        omega = None
+        if self.obs_path:
+            omega = self._stanley_follow_path(x, y, theta, self.obs_path)
+        if omega is None:
+            omega = self._stanley_steer(x, y, theta, self.arc['LA'], tr)
 
         # signed distance to T_A along travel (positive = T_A still ahead)
         to_TA = (tA[0] - x) * tr[0] + (tA[1] - y) * tr[1]
@@ -741,6 +1041,25 @@ class Round1Controller(Node):
                 f"to_TA={to_TA:+.2f} lat={lateral:+.2f} om={omega:+.2f}",
                 throttle_duration_sec=0.25)
 
+        # --- scan pause: stand still at the end of the straight ---------------
+        # Fires at the corner distance OR at the turn-in point, whichever comes
+        # first, once per straight, and ONLY in the first lap(s): from lap 2 the
+        # seat grid is already filled, so stopping would just cost time.
+        if (self.scan_pause and not self.scan_done_this_straight
+                and (self.corner_count // 4) < self.scan_pause_laps):
+            corner = self.corners[self.corner_idx]
+            front_dist = (corner[0] - x) * tr[0] + (corner[1] - y) * tr[1]
+            if front_dist <= self.scan_front_dist or to_TA <= 0.0:
+                self.scan_done_this_straight = True
+                self.scan_pause_t0 = self.now_s()
+                self.state = 'SCAN_PAUSE'
+                self.publish_stop()
+                self.get_logger().info(
+                    f"SCAN-HALT Start (Runde {self.corner_count // 4 + 1}): "
+                    f"{self.scan_pause_s:.1f}s, Ecke {front_dist:.2f} m, "
+                    f"to_TA {to_TA:+.2f} m.")
+                return
+
         # --- turn-in when pose crosses T_A ---
         if to_TA <= 0.0:
             if lateral > 0.6:
@@ -751,11 +1070,21 @@ class Round1Controller(Node):
                     f"Falsche Ecke? idx {self.corner_idx}.")
                 return
             self.state = 'TURN'
+            if lateral > self.turn_in_lat_warn:
+                self.get_logger().warn(
+                    f"Einlenken mit Querfehler {lateral:.2f} m (> {self.turn_in_lat_warn:.2f}) "
+                    f"-- dieser Fehler wandert durch die ganze Kurve.")
             self.get_logger().info(
                 f"TURN: Einlenken bei ({x:.2f},{y:.2f}, {math.degrees(theta):.1f}).")
             return
 
         v = self._speed_profile(to_TA, dsc)
+        if self.obs_path:
+            # safety before speed on obstacle straights; steeper swap -> slower
+            v_cap = (self.v_obstacle_steep
+                     if self.obs_max_slope >= self.obs_slope_slow
+                     else self.v_obstacle)
+            v = min(v, v_cap)
         self.publish_cmd(v, omega)
 
     def _turn(self, x, y, theta):
@@ -793,7 +1122,10 @@ class Round1Controller(Node):
             self.arc = None
             self.drive_start_xy = (x, y)
             self.ct_integral = 0.0        # fresh cross-track integrator for the new straight
+            self.obs_path = None          # new straight -> plan its obstacle path below
+            self.scan_done_this_straight = False
             self.plan_arc(theta)
+            self.plan_obstacle_path()     # obstacles of the NEW straight
             self.state = 'DRIVE'
             return
         if self.debug:
@@ -804,6 +1136,46 @@ class Round1Controller(Node):
         self.publish_cmd(self.v_turn, omega)
 
     # ------------------------------------------------------------- Stanley
+    def _stanley_follow_path(self, x, y, theta, path_xy):
+        """Follow a POLYLINE with the existing, verified Stanley controller.
+
+        Finds the nearest segment, turns it into a line (HNF + direction) and
+        hands that to _stanley_steer. So the path can bend around obstacles while
+        the proven line-following maths stays untouched.
+
+        path_xy: list of (x, y) in map frame, in driving order.
+        """
+        if not path_xy or len(path_xy) < 2:
+            return None
+        # nearest segment (search forward from the last index -- the robot only
+        # moves forward, so this stays cheap)
+        best_i, best_d2 = self._path_idx, float('inf')
+        n = len(path_xy) - 1
+        start = max(0, self._path_idx - 2)
+        for i in range(start, n):
+            ax, ay = path_xy[i]
+            bx, by = path_xy[i + 1]
+            dx, dy = bx - ax, by - ay
+            seg2 = dx * dx + dy * dy
+            if seg2 < 1e-12:
+                continue
+            t = ((x - ax) * dx + (y - ay) * dy) / seg2
+            t = max(0.0, min(1.0, t))
+            px, py = ax + t * dx, ay + t * dy
+            d2 = (x - px) ** 2 + (y - py) ** 2
+            if d2 < best_d2:
+                best_d2, best_i = d2, i
+        self._path_idx = best_i
+
+        ax, ay = path_xy[best_i]
+        bx, by = path_xy[best_i + 1]
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy) or 1e-9
+        ux, uy = dx / L, dy / L
+        nx, ny = -uy, ux                      # left normal of the segment
+        d = nx * ax + ny * ay
+        return self._stanley_steer(x, y, theta, (nx, ny, d), (ux, uy))
+
     def _stanley_steer(self, x, y, theta, target_line, u_dir):
         """Stanley path-following -> yaw rate.
 

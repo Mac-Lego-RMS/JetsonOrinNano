@@ -6,7 +6,6 @@ The robot itself needs none of this -- it is purely for visualisation, so the
 same layout (wro_overlay_layout.json) works live and on a recorded bag.
 
 Subscribes: /ekf/odom, /scan, /wall_matches, /esp_serial_bridge/speed,
-            /obstacles (latched),
             /corner_geometry (latched), /inner_geometry (latched),
             /viz/clear (std_msgs/String -- hide or show overlay groups)
 The Jetson telemetry is an add-on with the same idea: jetson-stats knows
@@ -20,7 +19,6 @@ Publishes:  /tf, /tf_static
             /viz/path          driven trajectory
             /viz/robot         body + heading
             /viz/scan_used     only the beams wall_extraction actually uses
-            /viz/obstacles     the detected pillars, drawn to scale
             /viz/run_timer     run clock as text over the field
             /viz/run_time      elapsed run time [s]
             /viz/run_state     idle / running / stopped
@@ -49,7 +47,7 @@ from std_msgs.msg import (ColorRGBA, Float32, Float32MultiArray,
 from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 
-from robot_msgs.msg import CornerGeometry, ObstacleArray, WallMatchArray
+from robot_msgs.msg import CornerGeometry, WallMatchArray
 
 # jetson-stats is a Jetson-only package: absent on a laptop and during bag
 # replay, so it must never be a hard dependency of the overlay.
@@ -66,11 +64,6 @@ LIDAR_Z = 0.10
 BLOCK_ANGLE = math.radians(60.0)
 MAX_RANGE = 4.0
 
-# obstacle_detection uses PILLAR_HALF_WIDTH = 0.022, i.e. 44 mm edge length.
-# The height is not in the detection code (the LiDAR only sees a slice), so it
-# is a parameter -- it only changes how the pillar looks, never the geometry.
-PILLAR_EDGE = 0.044
-
 PATH_STEP = 0.02        # m of travel between stored path points
 PATH_MAX = 6000
 
@@ -80,9 +73,6 @@ C_CORNER = (0.35, 0.75, 1.00, 1.0)
 C_MEAS = (0.20, 0.95, 0.45, 1.0)
 C_MAP = (0.30, 0.60, 1.00, 1.0)
 C_PATH = (1.00, 0.85, 0.20, 1.0)
-C_OBST = {1: (0.95, 0.20, 0.20, 0.95),      # Obstacle.COLOR_RED
-          2: (0.20, 0.90, 0.35, 0.95)}      # Obstacle.COLOR_GREEN
-C_OBST_UNKNOWN = (0.75, 0.75, 0.80, 0.75)   # seen, colour not yet certain
 
 
 def yaw_from_quaternion(q):
@@ -308,8 +298,6 @@ class FoxgloveOverlay(Node):
         self.sigma = self.declare_parameter('ellipse_sigma', 2.0).value
         # The ellipse is tiny (mm) next to a 3 m field -- blow it up to see it.
         self.sigma_gain = self.declare_parameter('ellipse_gain', 1.0).value
-        # WRO traffic signs are 100 mm tall -- cosmetic only, adjust freely.
-        self.pillar_h = self.declare_parameter('pillar_height', 0.10).value
 
         # Run timer thresholds, in deg/s of the drive wheel -- the unit
         # /esp_serial_bridge/speed reports (telemetry.speed_deg_s). Start and
@@ -328,10 +316,6 @@ class FoxgloveOverlay(Node):
 
         self.outer = None
         self.inner = None
-        # The full set is republished on every change, so the list is simply
-        # replaced -- but ids that vanished need an explicit DELETE.
-        self.obstacles = []
-        self.obstacle_ids = set()
         self.timer_state = 'idle'    # idle -> running -> stopped, reset by RUN RESET
         self.run_t0 = None
         self.last_moving = None
@@ -369,7 +353,6 @@ class FoxgloveOverlay(Node):
         self.pub_path = self.create_publisher(MarkerArray, '/viz/path', 1)
         self.pub_robot = self.create_publisher(MarkerArray, '/viz/robot', 1)
         self.pub_unc = self.create_publisher(MarkerArray, '/viz/uncertainty', 1)
-        self.pub_obst = self.create_publisher(MarkerArray, '/viz/obstacles', 1)
         self.pub_run_timer = self.create_publisher(MarkerArray, '/viz/run_timer', 1)
         self.pub_run_time = self.create_publisher(Float32, '/viz/run_time', 10)
         self.pub_run_state = self.create_publisher(String, '/viz/run_state', 10)
@@ -384,11 +367,8 @@ class FoxgloveOverlay(Node):
                             'path': self.pub_path,
                             'robot': self.pub_robot,
                             'uncertainty': self.pub_unc,
-                            'run_timer': self.pub_run_timer,
-                            'obstacles': self.pub_obst}
+                            'run_timer': self.pub_run_timer}
         self.create_subscription(String, '/viz/clear', self.clear_cb, 10)
-        self.create_subscription(ObstacleArray, '/obstacles',
-                                 self.obstacles_cb, latched)
 
         self.create_timer(1.0 / self.field_hz, self.field_timer)
         self.create_timer(1.0 / self.robot_hz, self.robot_timer)
@@ -470,14 +450,6 @@ class FoxgloveOverlay(Node):
             m.ns, m.id, m.action = ns, mid, Marker.DELETE
             arr.markers.append(m)
         pub.publish(arr)
-
-    def _obstacle_marker_ids(self, ids):
-        """The ns/id pairs one obstacle owns on /viz/obstacles."""
-        out = []
-        for i in ids:
-            out.append(('obstacles', int(i)))
-            out.append(('obstacle_labels', 100 + int(i)))
-        return out
 
     def _inner_marker_ids(self):
         """The ns/id pairs field_timer uses for the inner band."""
@@ -581,19 +553,6 @@ class FoxgloveOverlay(Node):
             text='%s  %s' % (format_clock(self.run_elapsed), self.timer_state)))
         self.pub_run_timer.publish(arr)
 
-    def _reset_obstacles(self):
-        """Drop the pillars -- the list, not just the markers on screen.
-
-        /obstacles is latched and only republished when the detection changes,
-        so clearing the markers alone would leave the node redrawing them from
-        its own list one field tick later. They come back with the next
-        ObstacleArray; until then the field stays empty on purpose.
-        """
-        self._delete_all(self.pub_obst)
-        self.obstacles = []
-        self.obstacle_ids = set()
-        self.get_logger().info('obstacles cleared')
-
     def _reset_wall_matches(self):
         """Wipe the wall-match overlay -- leftovers, not visibility.
 
@@ -609,15 +568,13 @@ class FoxgloveOverlay(Node):
     def clear_cb(self, msg):
         """Hide or show overlay groups, driven by the Foxglove buttons.
 
-        Payload is a group name -- 'field', 'inner', 'obstacles',
-        'wall_matches', 'path', 'robot', 'uncertainty', 'scan_used' -- or
-        'all'. A bare name toggles,
+        Payload is a group name -- 'field', 'inner', 'wall_matches', 'path',
+        'robot', 'uncertainty', 'scan_used' -- or 'all'. A bare name toggles,
         '+name' forces it visible and '-name' forces it hidden, so one button
         can be a toggle and another a fixed switch. The resets throw data
         away instead of only hiding it: 'reset_path' the recorded trajectory,
         'reset_inner' the latched inner geometry, 'reset_timer' the run clock,
-        'reset_obstacles' the detected pillars, 'reset_run' all of them
-        plus the wall matches -- the clean slate
+        'reset_run' all of them plus the wall matches -- the clean slate
         before another run.
         """
         name = msg.data.strip().lower()
@@ -630,10 +587,8 @@ class FoxgloveOverlay(Node):
         resets = {'reset_path': (self._reset_path,),
                   'reset_inner': (self._reset_inner,),
                   'reset_timer': (self._reset_timer,),
-                  'reset_obstacles': (self._reset_obstacles,),
                   'reset_run': (self._reset_path, self._reset_inner,
-                                self._reset_wall_matches, self._reset_timer,
-                                self._reset_obstacles)}
+                                self._reset_wall_matches, self._reset_timer)}
         if name in resets:
             for fn in resets[name]:
                 fn()
@@ -736,35 +691,6 @@ class FoxgloveOverlay(Node):
                     math.degrees(math.sqrt(max(cthth, 0.0))))))
         self.pub_unc.publish(arr)
 
-    def obstacles_cb(self, msg):
-        """The complete current set -- replace the list, erase what left it."""
-        ids = {int(o.id) for o in msg.obstacles}
-        gone = self.obstacle_ids - ids
-        self.obstacles = list(msg.obstacles)
-        self.obstacle_ids = ids
-        if gone:
-            self._delete_ns(self.pub_obst, self._obstacle_marker_ids(gone))
-        self.get_logger().info('obstacles: %d (%s)' % (
-            len(ids), ', '.join('#%d' % i for i in sorted(ids)) or '-'))
-
-    def _publish_obstacles(self):
-        """Redrawn on the field timer so a reconnecting Foxglove gets them."""
-        arr = MarkerArray()
-        for o in self.obstacles:
-            c = C_OBST.get(o.color, C_OBST_UNKNOWN)
-            x, y = o.position.x, o.position.y
-            arr.markers.append(self._marker(
-                'obstacles', int(o.id), Marker.CUBE, 'map',
-                scale=(PILLAR_EDGE, PILLAR_EDGE, self.pillar_h), color=c,
-                at=(x, y, self.pillar_h / 2.0)))
-            letter = {1: 'R', 2: 'G'}.get(o.color, '?')
-            arr.markers.append(self._marker(
-                'obstacle_labels', 100 + int(o.id), Marker.TEXT_VIEW_FACING,
-                'map', scale=(0, 0, 0.055), color=c,
-                at=(x, y, self.pillar_h + 0.05),
-                text='#%d %s w%d' % (o.id, letter, o.wall_idx)))
-        self.pub_obst.publish(arr)
-
     def outer_cb(self, msg):
         self.outer = msg
         self.get_logger().info('corner_geometry empfangen')
@@ -828,9 +754,6 @@ class FoxgloveOverlay(Node):
     # ------------------------------------------------------------------ #
 
     def field_timer(self):
-        if 'obstacles' not in self.hidden:
-            self._publish_obstacles()
-
         if self.outer is None:
             return
         arr = MarkerArray()

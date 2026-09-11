@@ -27,7 +27,6 @@ import heapq
 import numpy as np
 
 import rclpy
-from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
 from nav_msgs.msg import Odometry
@@ -44,10 +43,6 @@ GYRO_SCALE = -0.9674
 # Variance reported for states the filter does not estimate (z, roll, pitch,
 # lateral/vertical speed). ROS convention for "unknown", not a real number.
 UNKNOWN_VAR = 1e6
-
-# (ROS-Index, Filter-Index) fuer die Kovarianz-Abbildung
-POSE_MAP = ((0, 0), (1, 1), (5, 2))
-TWIST_MAP = ((0, 3), (5, 4))
 
 # How far a measurement may lag the last processed stamp and still be used.
 # Covers the ESP32-vs-Jetson clock skew (observed 6-10 ms, slowly growing over
@@ -85,35 +80,6 @@ class EKFNode(Node):
                                  self.enc_cb, 50)
         self.create_subscription(WallMatchArray, '/wall_matches', self.wall_cb, 10)
         self.pub = self.create_publisher(Odometry, '/ekf/odom', 10)
-
-        # Der Filter rechnet weiter mit jeder Messung (Gyro ~93 Hz, Encoder
-        # ~108 Hz) -- veroeffentlicht wird aber getaktet. Vorher ging je
-        # Messung eine Odometry raus, rund 200 Hz; am Aufbau gemessen kostete
-        # das den EKF-Knoten 1.27 von 6 Kernen, fast alles Nachrichtenbau und
-        # Serialisierung. Der Regler laeuft mit 30 Hz, der scan_processor mit
-        # der Scanrate, die esp-Bruecke merkt sich nur den letzten Skalarwert.
-        # 0 = wie frueher, bei jeder Messung senden.
-        self.declare_parameter('publish_rate_hz', 50.0,
-                               ParameterDescriptor(dynamic_typing=True))
-        self.publish_rate = float(self.get_parameter('publish_rate_hz').value)
-        # Nur senden, wenn seit dem letzten Mal wirklich gerechnet wurde. Sonst
-        # liefe die Odometrie bei ausgefallenen Sensoren einfach weiter und die
-        # Stale-Erkennung im Regler (odom_timeout) wuerde nie ausloesen.
-        self._dirty = False
-        if self.publish_rate > 0.0:
-            self.create_timer(1.0 / self.publish_rate, self._on_publish_timer)
-            self.get_logger().info(
-                f'/ekf/odom wird mit {self.publish_rate:.0f} Hz veroeffentlicht '
-                f'(Filter rechnet unveraendert mit jeder Messung).')
-
-        # Kovarianz-Puffer: die "unbekannt"-Diagonalen aendern sich nie, die
-        # werden einmal gesetzt statt 36 Werte je Nachricht neu aufzubauen.
-        self._pose_cov = np.zeros(36)
-        self._twist_cov = np.zeros(36)
-        for k in (2, 3, 4):
-            self._pose_cov[k * 6 + k] = UNKNOWN_VAR
-        for k in (1, 2, 3, 4):
-            self._twist_cov[k * 6 + k] = UNKNOWN_VAR
 
     # --- gyro / encoder: stamp-ordered queue ------------------------------
     def gyro_cb(self, msg):
@@ -159,7 +125,7 @@ class EKFNode(Node):
                 self.ekf.predict(dt)
                 self._apply(kind, z)
                 self.last_processed = t
-                self._mark(t)
+                self._publish(t)
             elif dt > -STALE_TOLERANCE:
                 # Clock skew, not a stale measurement: the value is valid, it
                 # just carries a stamp from the other clock. Update with it,
@@ -167,7 +133,7 @@ class EKFNode(Node):
                 # last_processed -- that would corrupt the state and break the
                 # queue ordering.
                 self._apply(kind, z)
-                self._mark(self.last_processed)
+                self._publish(self.last_processed)
                 self.n_skewed += 1
                 self.get_logger().info(
                     f'clock skew absorbed: {self.n_skewed} measurements '
@@ -185,21 +151,9 @@ class EKFNode(Node):
         for wm in msg.matches:
             self.ekf.update_wall(wm.alpha_meas, wm.d_meas, wm.alpha_map, wm.d_map)
         if msg.matches:
-            self._mark(stamp_to_sec(msg.header.stamp))
+            self._publish(stamp_to_sec(msg.header.stamp))
 
     # --- output -----------------------------------------------------------
-    def _on_publish_timer(self):
-        if self._dirty:
-            self._dirty = False
-            self._publish(self.last_processed)
-
-    def _mark(self, t):
-        """Zustand hat sich geaendert. Bei publish_rate_hz=0 sofort senden,
-        sonst uebernimmt das der Timer."""
-        self._dirty = True
-        if self.publish_rate <= 0.0:
-            self._publish(t)
-
     def _publish(self, t):
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -217,21 +171,24 @@ class EKFNode(Node):
         # [x, y, z, roll, pitch, yaw]; our state is [x, y, theta, v, omega, b_g].
         # Axes we do not estimate get a large variance (the ROS convention for
         # "unknown"), so consumers do not read a confident zero.
-        # Nur die Eintraege schreiben, die sich aendern -- die "unbekannt"-
-        # Diagonalen stehen seit __init__ und bleiben.
         P = self.ekf.P
-        pc, tc = self._pose_cov, self._twist_cov
-        for r, i in POSE_MAP:                    # (ROS index, filter index)
-            for c, j in POSE_MAP:
-                pc[r * 6 + c] = P[i, j]
-        for r, i in TWIST_MAP:                   # vx <- v, yaw rate <- omega
-            for c, j in TWIST_MAP:
-                tc[r * 6 + c] = P[i, j]
-        # .copy(): rclpy legt das numpy-Array per Referenz in die Nachricht.
-        # Ohne Kopie wuerde der naechste Publish den Puffer der vorigen
-        # Nachricht mit ueberschreiben.
-        msg.pose.covariance = pc.copy()
-        msg.twist.covariance = tc.copy()
+        pose_cov = [0.0] * 36
+        pose_map = ((0, 0), (1, 1), (5, 2))      # (ROS index, filter index)
+        for r, i in pose_map:
+            for c, j in pose_map:
+                pose_cov[r * 6 + c] = float(P[i, j])
+        for k in (2, 3, 4):                      # z, roll, pitch
+            pose_cov[k * 6 + k] = UNKNOWN_VAR
+        msg.pose.covariance = pose_cov
+
+        twist_cov = [0.0] * 36
+        twist_map = ((0, 3), (5, 4))             # vx <- v, yaw rate <- omega
+        for r, i in twist_map:
+            for c, j in twist_map:
+                twist_cov[r * 6 + c] = float(P[i, j])
+        for k in (1, 2, 3, 4):                   # vy, vz, roll rate, pitch rate
+            twist_cov[k * 6 + k] = UNKNOWN_VAR
+        msg.twist.covariance = twist_cov
 
         self.pub.publish(msg)
 

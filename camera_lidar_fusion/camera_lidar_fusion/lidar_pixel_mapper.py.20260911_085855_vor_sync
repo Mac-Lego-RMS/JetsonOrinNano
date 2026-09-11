@@ -6,8 +6,7 @@ projiziert, dort die Farbe ausgelesen und als rot/gruen/magenta/schwarz
 klassifiziert. Ergebnis geht raus als
 
   * CSV   (Hauptausgabe -- eine Zeile pro Lidar-Punkt),
-  * PointCloud2 mit RGB -- Eingang der Hinderniserkennung (scan_processor)
-    und zugleich Foxglove-Ansicht; eingefaerbt entweder in kraeftigen
+  * PointCloud2 mit RGB fuer Foxglove -- eingefaerbt entweder in kraeftigen
     Label-Farben (``cloud_color_mode: label``, Default) oder in der gemessenen
     Pixelfarbe (``raw``),
   * Debug-Bild mit den eingezeichneten Projektionen.
@@ -79,23 +78,17 @@ Start:
     ros2 run camera_lidar_fusion lidar_pixel_mapper
 """
 
-import collections
 import csv
 import datetime
 import math
 import os
-import threading
-import time
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 import rclpy
 from cv_bridge import CvBridge
-from rcl_interfaces.msg import ParameterDescriptor
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Empty, String
@@ -114,82 +107,10 @@ CLOUD_FIELDS = [
     PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1),
 ]
 
-# Sensor-QoS mit Tiefe 1 statt der ueblichen 5: bei einer Node, die langsamer
-# rechnet als das Lidar liefert, fuellt eine tiefe Queue nur einen Rueckstau.
-# Mit depth=1 liegt immer der NEUESTE Scan an -- lieber einen auslassen als alle
-# um fuenf Frames verspaetet zu faerben.
-SCAN_QOS = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
-                      reliability=ReliabilityPolicy.BEST_EFFORT)
-# Bilder brauchen etwas mehr Tiefe, damit der Ringpuffer auch bei Jitter
-# lueckenlos gefuellt wird -- gepuffert wird dann in der Node, nach Zeitstempel.
-IMAGE_QOS = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=5,
-                       reliability=ReliabilityPolicy.BEST_EFFORT)
-
 CSV_HEADER = [
     'stamp_sec', 'idx', 'angle_deg', 'range_m', 'x_m', 'y_m', 'z_m',
     'u_px', 'v_px', 'theta_deg', 'phi_deg', 'b', 'g', 'r', 'h', 's', 'v', 'label',
 ]
-
-
-_KREIS_CACHE = {}
-
-
-def _kreis_offsets(radius, ring):
-    """Pixel-Offsets eines Kreises, einmal von cv2 selbst gezeichnet.
-
-    So setzt die vektorisierte Variante exakt dieselben Pixel wie ein
-    ``cv2.circle`` je Punkt -- ein selbst gerechnetes Muster trifft besonders
-    den 1 px breiten Rand nicht genau.
-    """
-    schluessel = (int(radius), bool(ring))
-    if schluessel not in _KREIS_CACHE:
-        r = int(radius)
-        patch = np.zeros((2 * r + 3, 2 * r + 3), np.uint8)
-        cv2.circle(patch, (r + 1, r + 1), r, 255, 1 if ring else -1)
-        oy, ox = np.nonzero(patch)
-        _KREIS_CACHE[schluessel] = (ox.astype(np.int32) - (r + 1),
-                                    oy.astype(np.int32) - (r + 1))
-    return _KREIS_CACHE[schluessel]
-
-
-def _scheiben(canvas, u, v, farben, radius, ring=False):
-    """Kleine Scheiben (oder Ringe) an (u,v) in EINEM numpy-Zugriff setzen.
-
-    Ersetzt die Schleife mit einem ``cv2.circle`` je Punkt. Bei 2400 Punkten
-    kostete die am Aufbau 43 ms -- fast die gesamte Zeit eines Scans.
-
-    ``farben`` ist (N,3) in BGR, ``ring=True`` zeichnet nur den Rand.
-    """
-    n = len(u)
-    if n == 0:
-        return
-    hoehe, breite = canvas.shape[:2]
-    ox, oy = _kreis_offsets(radius, ring)
-    pu = np.rint(np.asarray(u)).astype(np.int32)[:, None] + ox[None, :]
-    pv = np.rint(np.asarray(v)).astype(np.int32)[:, None] + oy[None, :]
-    gut = (pu >= 0) & (pu < breite) & (pv >= 0) & (pv < hoehe)
-    farben = np.asarray(farben, dtype=np.uint8).reshape(n, 1, 3)
-    canvas[pv[gut], pu[gut]] = np.broadcast_to(farben, pu.shape + (3,))[gut]
-
-
-def _segmente(canvas, x0, y0, x1, y1, farbe, dicke=1):
-    """Viele gerade Strecken mit EINEM cv2.polylines-Aufruf statt cv2.line je
-    Strecke. polylines nimmt eine Liste von Polygonzuegen -- hier je Strecke
-    einer aus zwei Punkten."""
-    if len(x0) == 0:
-        return
-    pts = np.stack([np.column_stack([x0, y0]), np.column_stack([x1, y1])], axis=1)
-    cv2.polylines(canvas, np.rint(pts).astype(np.int32), False, farbe, dicke)
-
-
-def _stuecke(werte):
-    """Indexbloecke zusammenhaengender endlicher Werte (NaN trennt)."""
-    gut = np.isfinite(werte)
-    if not gut.any():
-        return []
-    kanten = np.flatnonzero(np.diff(gut.astype(np.int8)))
-    bloecke = np.split(np.arange(len(werte)), kanten + 1)
-    return [b for b in bloecke if gut[b[0]] and len(b) >= 2]
 
 
 class LidarPixelMapper(Node):
@@ -242,42 +163,6 @@ class LidarPixelMapper(Node):
         # Pylonen, weil die in S UND V mit der Bande ueberlappen.
         # Das Fenster muss breiter sein als eine Pylone, sonst hebt sie ihre
         # eigene Schwelle an.
-        # Rot/Gruen ueber das Kanalverhaeltnis (G-R)/max(B,G,R) statt ueber ein
-        # Farbton-Fenster. Am Aufbau gemessen trennt das die beiden Pylonen von
-        # Bande, Holz und Eigenaufbau vollstaendig -- ueber alle 151 Azimut-
-        # fenster des Vollkreises kein einziger Fehlalarm. Details und Zahlen in
-        # colors.rg_kennzahl. 0 schaltet zurueck auf das Farbton-Fenster.
-        # Harter innerer Radiusanschlag. Alles innerhalb davon ist im Fisheye
-        # der RAUM -- Decke, Wand, Moebel, Holz -- und hat im Abgriff nichts
-        # verloren. Am Rohbild gemessen (Radialprofil ueber alle Azimute):
-        #     r 279..390  V 108..200  heller Raum
-        #     r 397..419  V  38.. 84  die Bande
-        #     r 427..449  V 221..255  die Matte
-        # Der Uebergang Raum -> Bande liegt scharf bei r ~390. Beide Pylonen
-        # standen bei r 391..412. Der Anschlag ist eine KONSTANTE: die
-        # Bandenoberkante liegt auf Objektivhoehe, ihr Bildradius haengt also
-        # nicht von der Entfernung ab. 0 schaltet den Anschlag ab.
-        self.declare_parameter('sample_r_min_px', 0.0)
-        # FESTES Abgriffsfenster statt der gefitteten Kurve. Am Rohbild mit zwei
-        # Pylonen auf 0.85 m ausgemessen: beide belegen r 391..412 px, darunter
-        # (kleinerer Radius) ist heller Raum, darueber die helle Matte. Mit
-        # 394..412 und der G-R-Kennzahl: rot 28/28, gruen 26/27, NULL Fehlalarme
-        # ueber den ganzen Kreis -- gegen 17 Fehlalarme mit Kurve + Farbton.
-        #
-        # Physikalisch gerechtfertigt ist vor allem die INNERE Kante: sie liegt
-        # an der Bandenoberkante auf Objektivhoehe und haengt damit nicht von
-        # der Entfernung ab. Die aeussere Kante wandert eigentlich mit der
-        # Entfernung -- ob 412 auch auf 2..3 m traegt, ist noch nicht gemessen.
-        # Beide 0 -> wie bisher ueber _zone_radien.
-        self.declare_parameter('sample_r_fix_in', 0.0)
-        self.declare_parameter('sample_r_fix_out', 0.0)
-        self.declare_parameter('rg_z_min', 0.15)
-        # Zweites Tor: Mindestsaettigung. Bande liegt bei S~36 (p95 55), die
-        # gruene Pylone bei S 76..131, die rote bei 162..219.
-        self.declare_parameter('rg_s_min', 60)
-        # Absolutes Tor auf |G-R| in Zaehlwerten. Faengt den Farbstich ueber
-        # das Fischauge ab, gegen den die relativen Tore blind sind.
-        self.declare_parameter('rg_d_min', 20)
         self.declare_parameter('sample_zone_adaptiv', 0.0)
         self.declare_parameter('sample_zone_adaptiv_grad', 20.0)
         # Median-Blur ueber das GANZE Bild -- kostet auf 1280x960 rund 26 ms je
@@ -289,36 +174,12 @@ class LidarPixelMapper(Node):
         self.declare_parameter('range_min_m', 0.05)
         self.declare_parameter('range_max_m', 3.0)
         self.declare_parameter('max_sync_age_s', 0.5)
-        # Bilder werden mit Zeitstempel in einem Ringpuffer gehalten; zu jedem
-        # Scan wird das zeitlich naechstliegende gesucht statt blind das letzte
-        # zu nehmen. 8 Bilder sind bei 15 fps gut eine halbe Sekunde Historie.
-        self.declare_parameter('image_buffer_len', 8)
-        # Findet sich kein Bild innerhalb von max_sync_age_s, ist jede Faerbung
-        # geraten: der Scan wird dann verworfen statt falsch eingefaerbt. Auf
-        # false nur zum Debuggen, wenn man die schlechte Zuordnung sehen will.
-        self.declare_parameter('sync_drop', True)
-        # Alle n Sekunden eine Zeile mit Bildrate, Scanrate und dem tatsaechlich
-        # erreichten Zeitversatz. Ohne die sieht man im Feld nicht, ob die
-        # Zuordnung gerade gut ist. 0 schaltet sie ab.
-        self.declare_parameter('stats_period_s', 10.0)
-        # Die Fusion muss NICHT mit der Lidar-Rate laufen: Pylonen bewegen sich
-        # nicht, und die Farbe je Punkt ist nach ein paar Scans entschieden.
-        # Das Lidar liefert 15 Hz; jeder Scan kostet hier ~30 ms Rechenzeit, im
-        # Fahrbetrieb bei ausgelasteten Kernen deutlich mehr. Begrenzen entlastet
-        # genau die CPU, die sonst dem Kamerapfad fehlt.
-        # 0 = jeden Scan verarbeiten (altes Verhalten).
-        # dynamic_typing, damit auch "fusion_rate_hz:=0" durchgeht. Ohne das
-        # lehnt rclpy die 0 als INTEGER gegen den DOUBLE-Default ab und die Node
-        # startet gar nicht erst.
-        self.declare_parameter('fusion_rate_hz', 7.0,
-                               ParameterDescriptor(dynamic_typing=True))
         self.declare_parameter('csv_mode', 'trigger')
         self.declare_parameter('csv_dir', '/workspace/lidar_color_logs')
         self.declare_parameter('csv_only_labeled', False)
-        # debug schaltet NUR noch das Debug-Bild -- also das, was wirklich nur
-        # zum Anschauen da ist. Im Wettkampflauf auf false setzen: dann faellt
-        # das Zeichnen und Serialisieren weg, die Punktwolke bleibt aber, weil
-        # scan_processor_node daraus die Hindernisse baut.
+        # debug ist der Hauptschalter fuer alles, was nur zum Anschauen da ist:
+        # die eingefaerbte PointCloud2 und das Debug-Bild. Im Wettkampflauf auf
+        # false setzen, dann faellt das Zeichnen und Serialisieren komplett weg.
         self.declare_parameter('debug', True)
         self.declare_parameter('publish_cloud', True)
         # Womit die Punkte in /camera_lidar/colored_scan eingefaerbt werden:
@@ -378,38 +239,15 @@ class LidarPixelMapper(Node):
 
         self.calib = FisheyeCalib.load(self.calib_path, _packaged_default())
         self.bridge = CvBridge()
-        # Ringpuffer statt einem einzelnen "letztes Bild": zu jedem Scan wird
-        # das zeitlich passende Bild gesucht (siehe _bild_zum_scan). Der Puffer
-        # wird aus dem Bild-Thread beschrieben und aus dem Scan-Thread gelesen,
-        # deshalb die Sperre.
-        self.image_buf = collections.deque(
-            maxlen=max(2, int(self.get_parameter('image_buffer_len').value)))
-        self.image_lock = threading.Lock()
-        self.sync_stats = [0, 0]        # [gefaerbt, wegen Zeitversatz verworfen]
-        self.n_images = 0
-        self.versatz_log = collections.deque(maxlen=300)
-        self._stats_letzte = None
-        self._naechster_slot = 0.0
-        self._letzter_scan = 0.0
-        self._scan_periode = 0.0
-        self.n_rate_skip = 0
+        self.latest_image = None        # (cv_bild, stamp_sec)
         self.capture_pending = False
         self.continuous_writer = None   # (file, csv.writer) fuer csv_mode=continuous
         self.last_debug_stamp = 0.0
-        self._polar_map = None          # (schluessel, map_x, map_y) fuer _polar_view
-        self._capture_image = None      # Rohbild des Scans, den capture erwischt
-
-        # Eigene Callback-Gruppen: Scan und Bild laufen im MultiThreadedExecutor
-        # nebenlaeufig. Vorher hing beides am selben Thread -- solange on_scan
-        # rechnete (gemessen ~130 ms), konnte on_image nicht laufen, und das
-        # "letzte Bild" war entsprechend alt.
-        self.cbg_scan = MutuallyExclusiveCallbackGroup()
-        self.cbg_image = MutuallyExclusiveCallbackGroup()
 
         self.create_subscription(LaserScan, self.scan_topic, self.on_scan,
-                                 SCAN_QOS, callback_group=self.cbg_scan)
+                                 qos_profile_sensor_data)
         self.create_subscription(Image, self.image_topic, self.on_image,
-                                 IMAGE_QOS, callback_group=self.cbg_image)
+                                 qos_profile_sensor_data)
         self.create_subscription(Empty, '/camera_lidar/capture', self.on_capture, 10)
         # Nach einem "save" in der Kalibrier-Node hier neu einlesen, statt die
         # Node neu starten zu muessen.
@@ -418,10 +256,6 @@ class LidarPixelMapper(Node):
         self.pub_cloud = self.create_publisher(PointCloud2, '/camera_lidar/colored_scan', 5)
         self.pub_debug = self.create_publisher(Image, '/camera_lidar/debug_image', 2)
         self.pub_summary = self.create_publisher(String, '/camera_lidar/summary', 10)
-
-        periode = float(self.get_parameter('stats_period_s').value)
-        if periode > 0.0:
-            self.create_timer(periode, self._log_stats)
 
         if self.get_parameter('csv_mode').value == 'continuous':
             self._open_continuous_csv()
@@ -493,11 +327,7 @@ class LidarPixelMapper(Node):
             f'  debug={self.get_parameter("debug").value}, '
             f'cloud_color_mode={self.get_parameter("cloud_color_mode").value} '
             f'({"kraeftige Label-Farben" if self.get_parameter("cloud_color_mode").value == "label" else "gemessene Pixelfarbe"})\n'
-            + (f'  Fusionsrate: begrenzt auf {self.get_parameter("fusion_rate_hz").value:.1f} Hz'
-               ' (fusion_rate_hz:=0 -> jeden Scan)\n'
-               if float(self.get_parameter('fusion_rate_hz').value) > 0.0
-               else '  Fusionsrate: jeder Scan (fusion_rate_hz=0)\n')
-            + f'  -> Foxglove: /camera_lidar/colored_scan und /camera_lidar/debug_image'
+            f'  -> Foxglove: /camera_lidar/colored_scan und /camera_lidar/debug_image'
         )
 
     # ---------------------------------------------------------------- #
@@ -507,71 +337,11 @@ class LidarPixelMapper(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f'Bild nicht dekodierbar: {exc}')
             return
-        with self.image_lock:
-            self.image_buf.append((_stamp_sec(msg.header.stamp), image))
-            self.n_images += 1
-
-    def _log_stats(self):
-        """Wie gut passt die Zuordnung gerade? Eine Zeile alle stats_period_s.
-
-        Raten ueber time.monotonic(), nicht ueber die ROS-Uhr: die kann per NTP
-        springen, und dann stimmen die Hz-Angaben nicht mehr.
-        """
-        jetzt = time.monotonic()
-        with self.image_lock:
-            stand = (jetzt, self.n_images, self.sync_stats[0], self.sync_stats[1],
-                     self.n_rate_skip)
-            versatz = list(self.versatz_log)
-        if self._stats_letzte is None:
-            self._stats_letzte = stand
-            return
-        dt = stand[0] - self._stats_letzte[0]
-        if dt < 1e-3:
-            return
-        d_img = stand[1] - self._stats_letzte[1]
-        d_ok = stand[2] - self._stats_letzte[2]
-        d_weg = stand[3] - self._stats_letzte[3]
-        d_skip = stand[4] - self._stats_letzte[4]
-        self._stats_letzte = stand
-        # "zugeordnet" = Scan hat ein Bild innerhalb max_sync_age_s bekommen.
-        # Das ist nicht dasselbe wie die Rate von /camera_lidar/colored_scan:
-        # danach koennen noch Scans ohne Punkt im Sichtfeld herausfallen.
-        text = (f'Sync: Bilder {d_img / dt:.1f} Hz, zugeordnet {d_ok / dt:.1f} Hz, '
-                f'verworfen {d_weg / dt:.1f} Hz')
-        rate = float(self.get_parameter('fusion_rate_hz').value)
-        if rate > 0.0:
-            text += (f' | Drossel {rate:.1f} Hz: von {(d_ok + d_weg + d_skip) / dt:.1f} Hz '
-                     f'Scans {d_skip / dt:.1f} Hz uebersprungen')
-        if versatz:
-            v = np.abs(np.asarray(versatz)) * 1000.0
-            text += (f' | Versatz Bild-Scan: med {np.median(v):.0f} ms, '
-                     f'p90 {np.percentile(v, 90):.0f} ms, max {v.max():.0f} ms')
-        self.get_logger().info(text)
-
-    def _bild_zum_scan(self, scan_stamp):
-        """Das Bild aus dem Puffer, dessen Zeitstempel dem Scan am naechsten liegt.
-
-        Rueckgabe ``(bild, bild_stempel, versatz)`` oder ``(None, None, None)``,
-        wenn noch nichts da ist. ``versatz`` ist vorzeichenbehaftet:
-        positiv = das Bild ist NEUER als der Scan.
-
-        Warum ueberhaupt suchen: Lidar und Kamera laufen frei gegeneinander, und
-        beide Topics werden unabhaengig gepuffert. "Das zuletzt eingetroffene
-        Bild" ist deshalb mal 20 ms, mal 800 ms vom Scan entfernt -- und ein
-        fester Korrekturwert hilft nicht, weil der Versatz schwankt. Ueber den
-        Stempel gesucht ist die Zuordnung dagegen so gut, wie die Rate hergibt.
-        """
-        with self.image_lock:
-            if not self.image_buf:
-                return None, None, None
-            kandidaten = list(self.image_buf)
-        stempel, bild = min(kandidaten, key=lambda e: abs(e[0] - scan_stamp))
-        return bild, stempel, stempel - scan_stamp
+        self.latest_image = (image, _stamp_sec(msg.header.stamp))
 
     def on_capture(self, _msg: Empty):
         self.capture_pending = True
-        self.get_logger().info(
-            'Capture angefordert -- naechster Scan wird als CSV + Rohbild abgelegt.')
+        self.get_logger().info('Capture angefordert -- naechster Scan wird als CSV abgelegt.')
 
     def on_reload(self, _msg: Empty):
         self.calib = FisheyeCalib.load(self.calib_path, _packaged_default())
@@ -627,59 +397,17 @@ class LidarPixelMapper(Node):
         return r_innen, r_aussen
 
     def on_scan(self, msg: LaserScan):
-        # Ratenbegrenzung ZUERST -- vor der Bildsuche und vor jeder Rechnung,
-        # sonst spart der uebersprungene Scan nichts.
-        rate = float(self.get_parameter('fusion_rate_hz').value)
-        if rate > 0.0:
-            jetzt = time.monotonic()
-            # Naechster-Slot-Verfahren statt fester Mindestpause: es wird der
-            # Scan genommen, der dem Zielzeitpunkt am naechsten liegt. Eine
-            # feste Pause rastet sonst auf ein Vielfaches der EINGANGSperiode
-            # ein -- mit 0.75/rate kamen bei 15 Hz Eingang 7.5 Hz heraus, bei
-            # 10 Hz Eingang aber nur 5.0 Hz statt der gewuenschten 7.
-            if self._letzter_scan:
-                dt_in = jetzt - self._letzter_scan
-                if 0.0 < dt_in < 1.0:
-                    self._scan_periode = (dt_in if not self._scan_periode
-                                          else 0.8 * self._scan_periode + 0.2 * dt_in)
-            self._letzter_scan = jetzt
-            periode = 1.0 / rate
-            if not self._naechster_slot:
-                self._naechster_slot = jetzt
-            if jetzt < self._naechster_slot - 0.5 * self._scan_periode:
-                self.n_rate_skip += 1
-                return
-            self._naechster_slot += periode
-            if self._naechster_slot < jetzt:     # nach einer Luecke neu aufsetzen
-                self._naechster_slot = jetzt + periode
-
-        scan_stamp = _stamp_sec(msg.header.stamp)
-        image, image_stamp, versatz = self._bild_zum_scan(scan_stamp)
-        if image is None:
+        if self.latest_image is None:
             self.get_logger().warn('Noch kein Kamerabild empfangen.', throttle_duration_sec=5.0)
             return
-        # vor der Drop-Entscheidung mitschreiben, sonst zeigt die Statistik nur
-        # die gelungenen Zuordnungen und sieht kuenstlich gut aus
-        self.versatz_log.append(versatz)
 
-        age = abs(versatz)
+        image, image_stamp = self.latest_image
+        scan_stamp = _stamp_sec(msg.header.stamp)
+        age = abs(scan_stamp - image_stamp)
         if age > self.get_parameter('max_sync_age_s').value:
-            self.sync_stats[1] += 1
-            if self.get_parameter('sync_drop').value:
-                # Faerben waere hier geraten: bei 1 rad/s Drehrate sind 0.5 s
-                # bereits 29 Grad Peilfehler, die Farbe landet dann auf der
-                # Bande statt auf der Pylone. Lieber diesen Scan auslassen.
-                self.get_logger().warn(
-                    f'Kein Bild naeher als {age:.2f} s am Scan '
-                    f'({self.sync_stats[1]} von {sum(self.sync_stats) + 1} verworfen) '
-                    f'-- Scan uebersprungen.',
-                    throttle_duration_sec=5.0)
-                return
             self.get_logger().warn(
                 f'Bild ist {age:.2f} s vom Scan entfernt -- Zuordnung unsicher.',
                 throttle_duration_sec=5.0)
-        else:
-            self.sync_stats[0] += 1
 
         ranges = np.asarray(msg.ranges, dtype=float)
         r_min = max(float(msg.range_min), self.get_parameter('range_min_m').value)
@@ -724,17 +452,7 @@ class LidarPixelMapper(Node):
         if zone_high > zone_low or self.calib.zone_kalibriert:
             # Die beiden Zonengrenzen je Punkt in Bildradien umrechnen. Hoehere
             # Kante = kleinerer Radius (radial nach aussen heisst nach unten).
-            fix_in = float(self.get_parameter('sample_r_fix_in').value)
-            fix_out = float(self.get_parameter('sample_r_fix_out').value)
-            if fix_in > 0.0 and fix_out > fix_in:
-                r_innen = np.full(rho.shape, fix_in)
-                r_aussen = np.full(rho.shape, fix_out)
-            else:
-                r_innen, r_aussen = self._zone_radien(rho, zone_low, zone_high)
-            r_min = float(self.get_parameter('sample_r_min_px').value)
-            if r_min > 0.0:
-                r_innen = np.maximum(r_innen, r_min)
-                r_aussen = np.maximum(r_aussen, r_min + 2.0)
+            r_innen, r_aussen = self._zone_radien(rho, zone_low, zone_high)
             if self.get_parameter('zone_from_band').value:
                 r_innen, r_aussen = self._zone_aus_bande(image, phi, r_innen, r_aussen)
             labels, bgr, hsv = colors.classify_zone(
@@ -745,10 +463,7 @@ class LidarPixelMapper(Node):
                 steps=self.get_parameter('sample_zone_steps').value,
                 nutz_anteil=self.get_parameter('sample_zone_nutz').value,
                 adaptiv_faktor=self.get_parameter('sample_zone_adaptiv').value,
-                adaptiv_grad=self.get_parameter('sample_zone_adaptiv_grad').value,
-                rg_z_min=float(self.get_parameter('rg_z_min').value),
-                rg_s_min=int(self.get_parameter('rg_s_min').value),
-                rg_d_min=int(self.get_parameter('rg_d_min').value))
+                adaptiv_grad=self.get_parameter('sample_zone_adaptiv_grad').value)
         else:
             bgr, hsv = colors.sample_colors(
                 image, u, v, self.get_parameter('patch_px').value,
@@ -756,16 +471,11 @@ class LidarPixelMapper(Node):
                 band_count=self.get_parameter('sample_band_count').value)
             labels = colors.classify_hsv(hsv, self._aktive_ranges())
 
-        if self.capture_pending:
-            self._capture_image = image
         self._publish_summary(labels)
-        # Die Punktwolke haengt NICHT mehr an 'debug': scan_processor_node liest
-        # /camera_lidar/colored_scan und baut daraus die Hinderniserkennung.
-        # Mit debug:=false fiel sie vorher stillschweigend weg -- und damit die
-        # Hindernisse. Abschalten geht weiterhin gezielt ueber publish_cloud.
-        if self.get_parameter('publish_cloud').value:
+        debug = self.get_parameter('debug').value
+        if debug and self.get_parameter('publish_cloud').value:
             self._publish_cloud(msg.header, pts, bgr, labels)
-        if self.get_parameter('debug').value and self.get_parameter('publish_debug_image').value:
+        if debug and self.get_parameter('publish_debug_image').value:
             self._publish_debug(image, u, v, labels, bgr, rho)
 
         self._write_csv(scan_stamp, idx, angles, np.linalg.norm(pts[:, :2], axis=1),
@@ -788,10 +498,7 @@ class LidarPixelMapper(Node):
                   | (bgr[:, 1].astype(np.uint32) << 8)
                   | bgr[:, 0].astype(np.uint32))
         rgb = packed.view(np.float32)
-        # Direkt als numpy-Array uebergeben. Mit .tolist() landet create_cloud im
-        # Zweig "Cast python objects to structured NumPy array (slow)" und baut
-        # je Punkt ein Tupel -- am Aufbau gemessen 1.50 ms gegen 0.11 ms.
-        cloud_points = np.column_stack([pts.astype(np.float32), rgb]).astype(np.float32)
+        cloud_points = np.column_stack([pts.astype(np.float32), rgb]).tolist()
         self.pub_cloud.publish(point_cloud2.create_cloud(header, CLOUD_FIELDS, cloud_points))
 
     def _publish_debug(self, image, u, v, labels, bgr, rho):
@@ -839,27 +546,22 @@ class LidarPixelMapper(Node):
                     if len(teil) >= 2:
                         cv2.polylines(canvas, [teil.reshape(-1, 1, 2)], False, farbe, 1)
 
-        # Alles punktweise Gezeichnete vektorisiert: erst die Abgriffsegmente
-        # (ein polylines-Aufruf je Label), dann die Messfarbe als gefuellte
-        # Scheibe und die Labelfarbe als Ring -- je ein numpy-Zugriff.
-        labels_arr = np.asarray(labels)
-        if zone_an and len(u):
-            cosw, sinw = np.cos(winkel_pkt), np.sin(winkel_pkt)
-            for name in ('rot', 'gruen', 'magenta'):
-                m = labels_arr == name
-                if not m.any():
-                    continue
-                _segmente(canvas,
-                          self.calib.cx + r_innen[m] * cosw[m],
-                          self.calib.cy + r_innen[m] * sinw[m],
-                          self.calib.cx + r_aussen[m] * cosw[m],
-                          self.calib.cy + r_aussen[m] * sinw[m],
-                          colors.LABEL_BGR.get(name, (255, 255, 255)))
-        if len(u):
-            _scheiben(canvas, u, v, np.asarray(bgr), 4)
-            lab_farben = np.array([colors.LABEL_BGR.get(l, (255, 255, 255))
-                                   for l in labels], dtype=np.uint8)
-            _scheiben(canvas, u, v, lab_farben, 4, ring=True)
+        for i, (pu, pv, label, color) in enumerate(zip(u, v, labels, bgr)):
+            point = (int(round(pu)), int(round(pv)))
+            lab_bgr = colors.LABEL_BGR.get(label, (255, 255, 255))
+            # Bei zone das abgetastete Segment mitzeichnen -- daran sieht man,
+            # WOHER die Stimmen kamen und ob das Segment die Pylone trifft oder
+            # ueber sie hinweg auf Wand und Boden greift.
+            if zone_an and label in ('rot', 'gruen', 'magenta'):
+                w = winkel_pkt[i]
+                cv2.line(canvas,
+                         (int(round(self.calib.cx + r_innen[i] * math.cos(w))),
+                          int(round(self.calib.cy + r_innen[i] * math.sin(w)))),
+                         (int(round(self.calib.cx + r_aussen[i] * math.cos(w))),
+                          int(round(self.calib.cy + r_aussen[i] * math.sin(w)))),
+                         lab_bgr, 1)
+            cv2.circle(canvas, point, 4, tuple(int(c) for c in color), -1)
+            cv2.circle(canvas, point, 4, lab_bgr, 1)
 
         # Gefundene Bandenunterkante als durchgehende Linie. Loecher (NaN) sind
         # Stellen, an denen keine Kante gefunden wurde -- dort steht etwas davor
@@ -872,10 +574,19 @@ class LidarPixelMapper(Node):
                 if gute.any():
                     pu = self.calib.cx + band_kante * np.cos(band_winkel)
                     pv = self.calib.cy + band_kante * np.sin(band_winkel)
-                    zuege = [np.rint(np.column_stack([pu[b], pv[b]])).astype(np.int32)
-                             for b in _stuecke(band_kante)]
-                    if zuege:
-                        cv2.polylines(canvas, zuege, False, (255, 0, 255), 2)
+                    stueck = []
+                    for i in range(len(band_kante)):
+                        if gute[i]:
+                            stueck.append((pu[i], pv[i]))
+                        elif len(stueck) >= 2:
+                            cv2.polylines(canvas, [np.array(stueck, np.int32).reshape(-1, 1, 2)],
+                                          False, (255, 0, 255), 2)
+                            stueck = []
+                        else:
+                            stueck = []
+                    if len(stueck) >= 2:
+                        cv2.polylines(canvas, [np.array(stueck, np.int32).reshape(-1, 1, 2)],
+                                      False, (255, 0, 255), 2)
 
         # Kopfzeile: welcher Modus, und was ist dabei herausgekommen?
         zaehl = {}
@@ -1078,52 +789,42 @@ class LidarPixelMapper(Node):
         if r_hi - r_lo < 20.0:
             return None
 
-        # Direkt in der Zielgroesse abtasten statt warpPolar ueber den ganzen
-        # Bildkreis (Zwischenbild 1280 x r_hi) und anschliessend zu croppen,
-        # transponieren und zu skalieren. Die Abtasttabelle haengt nur an
-        # (r_lo, r_hi, Groesse) und wird deshalb wiederverwendet.
-        schluessel = (round(r_lo, 1), round(r_hi, 1), breite, hoehe,
-                      round(self.calib.cx, 1), round(self.calib.cy, 1))
-        if self._polar_map is None or self._polar_map[0] != schluessel:
-            winkel_sp = np.linspace(0.0, 2 * math.pi, breite, endpoint=False)
-            radius_sp = np.linspace(r_lo, r_hi, hoehe)
-            map_x = (self.calib.cx
-                     + radius_sp[:, None] * np.cos(winkel_sp)[None, :]).astype(np.float32)
-            map_y = (self.calib.cy
-                     + radius_sp[:, None] * np.sin(winkel_sp)[None, :]).astype(np.float32)
-            self._polar_map = (schluessel, map_x, map_y)
-        _, map_x, map_y = self._polar_map
-        streifen = cv2.remap(image, map_x, map_y, cv2.INTER_NEAREST,
-                             borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
-        skala = (hoehe - 1) / max(r_hi - r_lo, 1.0)
+        gross = cv2.warpPolar(image, (int(round(r_hi)), breite),
+                              (self.calib.cx, self.calib.cy), r_hi,
+                              cv2.WARP_POLAR_LINEAR)
+        streifen = cv2.transpose(gross[:, int(round(r_lo)):int(round(r_hi))])
+        streifen = np.ascontiguousarray(streifen)
+        if streifen.shape[0] < 10:
+            return None
+        # Auf die gewuenschte Hoehe strecken -- der Radiusbereich ist meist nur
+        # 60 bis 100 px breit, ungestreckt saehe man darin nichts.
+        streifen = cv2.resize(streifen, (breite, hoehe), interpolation=cv2.INTER_NEAREST)
+        skala = hoehe / max(r_hi - r_lo, 1.0)
 
         winkel = np.arctan2(np.asarray(v) - self.calib.cy,
                             np.asarray(u) - self.calib.cx) % (2 * math.pi)
-        x_sp = np.rint(winkel / (2 * math.pi) * breite).astype(np.int32) % breite
-        if r_innen is not None:
-            for rr, fb in ((r_innen, (0, 200, 255)), (r_aussen, (0, 140, 255))):
-                yy = np.rint((np.asarray(rr) - r_lo) * skala).astype(np.int32)
-                m = (yy >= 0) & (yy < hoehe)
-                streifen[yy[m], x_sp[m]] = fb
-        y_sp = np.rint((np.asarray(rad_pkt) - r_lo) * skala).astype(np.int32)
-        m = (y_sp >= 0) & (y_sp < hoehe)
-        if m.any():
-            farben = np.array([colors.LABEL_BGR.get(l, (255, 255, 255)) for l in labels],
-                              dtype=np.uint8)
-            _scheiben(streifen, x_sp[m], y_sp[m], farben[m], 1)
+        for i, (w, r, label) in enumerate(zip(winkel, rad_pkt, labels)):
+            x = int(round(w / (2 * math.pi) * breite)) % breite
+            y = int(round((r - r_lo) * skala))
+            farbe = colors.LABEL_BGR.get(label, (255, 255, 255))
+            if r_innen is not None:
+                for rr, fb in ((r_innen[i], (0, 200, 255)), (r_aussen[i], (0, 140, 255))):
+                    yy = int(round((rr - r_lo) * skala))
+                    if 0 <= yy < hoehe:
+                        streifen[yy, x] = fb
+            if 0 <= y < hoehe:
+                cv2.circle(streifen, (x, y), 1, farbe, -1)
 
         # Die gefundene Bandenunterkante -- im entzerrten Streifen laeuft sie als
         # Kurve, an der man sofort sieht, ob die Abgriffszone darauf sitzt.
         if band_kante is not None and band_winkel is not None:
-            gut = np.isfinite(band_kante)
-            if gut.any():
-                xb = (np.rint((np.asarray(band_winkel)[gut] % (2 * math.pi))
-                              / (2 * math.pi) * breite).astype(np.int32) % breite)
-                yb = np.rint((np.asarray(band_kante)[gut] - r_lo) * skala).astype(np.int32)
-                mb = (yb >= 0) & (yb < hoehe)
-                if mb.any():
-                    _scheiben(streifen, xb[mb], yb[mb],
-                              np.tile(np.uint8([255, 0, 255]), (int(mb.sum()), 1)), 1)
+            for w, r in zip(band_winkel, band_kante):
+                if not np.isfinite(r):
+                    continue
+                x = int(round((w % (2 * math.pi)) / (2 * math.pi) * breite)) % breite
+                y = int(round((r - r_lo) * skala))
+                if 0 <= y < hoehe:
+                    cv2.circle(streifen, (x, y), 1, (255, 0, 255), -1)
 
         # Radiusskala und die Marke fuer den Horizontring
         schritt = 10 if (r_hi - r_lo) < 120 else 20
@@ -1170,17 +871,6 @@ class LidarPixelMapper(Node):
         self.capture_pending = False
         os.makedirs(self.csv_dir, exist_ok=True)
         tag = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        # Das ROHBILD mit ablegen -- unveraendert, ohne Overlay. Ohne das laesst
-        # sich die radiale Abtastung nicht nachrechnen: die CSV enthaelt nur die
-        # bereits abgetastete Medianfarbe je Punkt, nicht das Profil dahinter.
-        if self._capture_image is not None:
-            bild = os.path.join(self.csv_dir, f'rohbild_{tag}.png')
-            try:
-                cv2.imwrite(bild, self._capture_image)
-                self.get_logger().info(f'Rohbild abgelegt -> {bild}')
-            except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(f'Rohbild nicht schreibbar: {exc}')
-            self._capture_image = None
         path = os.path.join(self.csv_dir, f'lidar_pixels_{tag}.csv')
         rows = list(self._rows(*args))
         with open(path, 'w', newline='') as handle:
@@ -1224,17 +914,11 @@ def _packaged_default() -> str:
 def main(args=None):
     rclpy.init(args=args)
     node = LidarPixelMapper()
-    # Drei Threads: Scan-Rechnung, Bildannahme und die kleinen Dienst-Topics
-    # laufen nebeneinander. Mit rclpy.spin() (ein Thread) blockierte die
-    # Scan-Rechnung die Bildannahme, wodurch das Bild zum Scan alterte.
-    executor = MultiThreadedExecutor(num_threads=3)
-    executor.add_node(node)
     try:
-        executor.spin()
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

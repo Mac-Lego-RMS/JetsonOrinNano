@@ -51,8 +51,8 @@ from ekf.wall_extraction import (
 )
 from ekf.field_map import (
     generate_map, start_map_3wall, outer_box_map, outer_walls_map,
-    inner_band_from_widths, obstacle_seats_map, seat_group_to_wall_index,
-    START_POSES_CW, START_POSES_CCW,
+    inner_walls_map, inner_band_from_widths, obstacle_seats_map,
+    seat_group_to_wall_index, START_POSES_CW, START_POSES_CCW,
 )
 from ekf.start_detection import detect_start_obstacle, detect_start_open
 
@@ -307,6 +307,8 @@ class ScanProcessor(Node):
             start_pose = self._start_pose_for_direction()
             self._publish_corner_geometry(start_pose)
             if self.race_mode == 'obstacle':
+                inner, corners = inner_walls_map(start_pose)
+                self._publish_inner_geometry(inner, corners)
                 self._init_obstacle_map(start_pose)
 
     def _start_pose_for_direction(self):

@@ -31,7 +31,7 @@ MAGENTA = (255, 0, 255)
 PILLAR_HALF_WIDTH = 0.022      # 44 mm pillars: LiDAR sees the front face
 CLUSTER_RADIUS = 0.04          # region growing: neighbour distance (m)
 MIN_OBSTACLE_POINTS = 5        # fewer points -> stray misclassification
-MAX_OBSTACLE_EXTENT = 0.09     # a pillar spans <= this; longer = noise on a wall
+MAX_OBSTACLE_EXTENT = 0.15     # Farblauf einer Pylone: auf 1.93 m am Rohbild 12.4 cm gemessen
 
 
 def colored_points(msg, colors=(RED, GREEN)):
