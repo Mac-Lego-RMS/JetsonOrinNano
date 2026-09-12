@@ -28,7 +28,8 @@ COLOR_UNKNOWN, COLOR_RED, COLOR_GREEN = 0, 1, 2
 
 class ObstaclePathPlanner:
     def __init__(self, lane_width=1.00, clear_before=0.20, clear_after=0.20,
-                 transition_pref=0.60, transition_min=0.40, wall_margin=0.12):
+                 transition_pref=0.60, transition_min=0.40, wall_margin=0.12,
+                 anchor_early=True):
         """
         lane_width      : outer wall -> inner wall [m]
         clear_before    : be ON the new offset this far BEFORE the obstacle [m]
@@ -43,6 +44,7 @@ class ObstaclePathPlanner:
         self.transition_pref = transition_pref
         self.transition_min = transition_min
         self.wall_margin = wall_margin
+        self.anchor_early = anchor_early   # start the swap right after the block
 
     # ---------------------------------------------------------------- offsets
     def pass_offset(self, obstacle_q, color, ccw):
@@ -108,17 +110,30 @@ class ObstaclePathPlanner:
             s_need = s_obs - self.clear_before
             if q_tgt != q_cur:
                 room = max(s_need - s_cur, 0.0)
-                length = min(self.transition_pref, room) if room > 0 else 0.0
-                if length < self.transition_min:
-                    # late detection: use whatever room is left, even if steep
-                    length = room
-                s_ramp_end = s_need
-                s_ramp_start = max(s_cur, s_need - length)
-                if s_ramp_start > s_cur:
-                    pts.append((s_ramp_start, q_cur))       # hold until ramp
-                pts.append((s_ramp_end, q_tgt))             # S-curve added later
+                if self.anchor_early:
+                    # Swap EARLY: start the ramp right where we are (just past the
+                    # previous block) and be settled well before the next one.
+                    # Anchoring at the end instead would push the whole movement
+                    # into the middle of the gap -- which looked like "pulls over
+                    # 0.3 m too late".
+                    length = min(self.transition_pref, room) if room > 0 else 0.0
+                    if length < self.transition_min:
+                        length = room                     # late detection: take what is left
+                    s_ramp_start = s_cur
+                    s_ramp_end = min(s_cur + length, s_need) if length > 0 else s_need
+                else:
+                    length = min(self.transition_pref, room) if room > 0 else 0.0
+                    if length < self.transition_min:
+                        length = room
+                    s_ramp_end = s_need
+                    s_ramp_start = max(s_cur, s_need - length)
+                    if s_ramp_start > s_cur:
+                        pts.append((s_ramp_start, q_cur))
+                pts.append((s_ramp_end, q_tgt))           # S-curve added in densify
+                if s_ramp_end < s_need:
+                    pts.append((s_need, q_tgt))           # hold the new line
                 q_cur = q_tgt
-                s_cur = s_ramp_end
+                s_cur = s_need
             # hold the offset past the obstacle
             s_hold = s_obs + self.clear_after
             pts.append((s_hold, q_cur))
@@ -144,10 +159,19 @@ class ObstaclePathPlanner:
 
     # ------------------------------------------------------------- smoothing
     @staticmethod
-    def densify(pts, step=0.05):
-        """Turn the corner points into a dense polyline with SMOOTH (cosine)
-        transitions -- a straight ramp would leave a kink that Stanley has to
-        absorb; the cosine blend is tangent-continuous at both ends."""
+    def densify(pts, step=0.05, skew=0.0):
+        """Turn the corner points into a dense polyline with smooth transitions.
+
+        skew = 0 : symmetric cosine -- tangent-continuous at BOTH ends, but flat
+                   at the start, so the lateral motion only becomes visible about
+                   a third into the ramp.
+        skew = 1 : quarter-sine -- maximum slope at the START, still tangential at
+                   the end. The robot pulls over immediately after the block.
+        In between the two are blended. A skew > 0 puts a small kink at the ramp
+        start (a heading step for Stanley to absorb) -- that is the price for
+        swapping earlier.
+        """
+        w = max(0.0, min(1.0, skew))
         out = []
         for i in range(len(pts) - 1):
             s0, q0 = pts[i]
@@ -160,7 +184,9 @@ class ObstaclePathPlanner:
                 if abs(q1 - q0) < 1e-9:
                     q = q0                                   # straight section
                 else:
-                    q = q0 + (q1 - q0) * 0.5 * (1.0 - math.cos(math.pi * t))
+                    sym = 0.5 * (1.0 - math.cos(math.pi * t))       # flat both ends
+                    front = math.sin(0.5 * math.pi * t)             # steep at start
+                    q = q0 + (q1 - q0) * ((1.0 - w) * sym + w * front)
                 out.append((s0 + (s1 - s0) * t, q))
         out.append(pts[-1])
         return out

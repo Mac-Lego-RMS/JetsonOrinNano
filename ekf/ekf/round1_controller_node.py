@@ -80,12 +80,16 @@ class Round1Controller(Node):
         'stop_gap':      ('stop_gap',      0.35,  float),
         'o_in':          ('o_in',          0.50,  float),
         'o_out':         ('o_out',         0.50,  float),
-        'inner_clearance': ('inner_clearance', 0.25, float),  # target gap to the INNER band (lap 2+)
+        'inner_clearance': ('inner_clearance', 0.25, float),  # target gap to the INNER band (racing line)
+        'racing_line':     ('racing_line',     0.0, lambda v: bool(float(v))),  # 0 = drive lane CENTRE when free
         'use_auto_offset': ('use_auto_offset', 1.0, lambda v: bool(float(v))),  # 0 -> use o_in_list/o_out_list
         # obstacle avoidance
         'obs_clear_before': ('obs_clear_before', 0.20, float),  # on the new offset this far BEFORE the block
-        'obs_clear_after':  ('obs_clear_after',  0.10, float),  # hold it this far AFTER (small -> swap earlier)
-        'obs_transition_pref': ('obs_transition_pref', 0.80, float),  # preferred lane-change length (caps the used room!)
+        'obs_clear_after':  ('obs_clear_after',  0.05, float),  # hold it this far AFTER (small -> swap earlier)
+        'obs_transition_pref': ('obs_transition_pref', 0.70, float),  # lane-change length
+        'obs_anchor_early': ('obs_anchor_early', 1.0, lambda v: bool(float(v))),  # swap right after the block
+        'obs_skew':         ('obs_skew',         0.7,  float),   # 0=smooth S, 1=front-loaded (kink at start)
+        'obs_freeze_lap':   ('obs_freeze_lap',   1,    int),     # ignore /obstacles after this many laps
         'obs_transition_min':  ('obs_transition_min',  0.40, float),  # measured limit ~0.40 m @0.45 m/s
         'obs_wall_margin':  ('obs_wall_margin',  0.12, float),  # never plan closer than this to a wall
         'v_obstacle':       ('v_obstacle',       0.35, float),  # speed on straights with obstacles
@@ -274,17 +278,18 @@ class Round1Controller(Node):
     def _lane_default_offset(self, wall_idx):
         """Offset for a straight with NO obstacle on it.
 
-        Obstacle mode: the LANE CENTRE -- safest, and it keeps the corner entry
-        clean (no lateral settling needed on a short start straight).
-        Open mode: the racing line, inner_clearance from the inner band.
-        Discriminator: /obstacles is only published in obstacle mode.
+        Default is the LANE CENTRE -- safest, and it keeps the corner entry clean
+        (no lateral settling needed). The tight racing line (inner_clearance from
+        the inner band) is opt-in via `racing_line`, because deriving it from
+        "have we seen /obstacles yet" was fragile: before the first obstacle
+        message arrives that test is false and the robot hugged the inner band.
         """
         if self.lane_width is None or wall_idx >= len(self.lane_width):
             return None
         w = self.lane_width[wall_idx]
-        if self.obstacles is not None:
-            return 0.5 * w
-        return max(w - self.inner_clearance, 0.05)
+        if self.racing_line:
+            return max(w - self.inner_clearance, 0.05)
+        return 0.5 * w
 
     def _obstacle_offset_near_corner(self, wall_idx, corner_pt):
         """Pass-by offset for the obstacle on `wall_idx` CLOSEST to `corner_pt`.
@@ -461,6 +466,17 @@ class Round1Controller(Node):
     def obstacles_cb(self, msg):
         """Full current obstacle stand (latched). Replan the current straight's
         path -- also mid-drive, because a late detection MUST still be avoided."""
+        # Freeze after the scanning lap(s): everything relevant was seen in lap 1
+        # (we stop at every corner for that). A "new" block appearing in lap 2 or 3
+        # can only be a false positive -- and acting on it would wreck a good run.
+        if (self.corner_count // 4) >= self.obs_freeze_lap:
+            if self.obstacles is not None and len(msg.obstacles) != len(self.obstacles):
+                self.get_logger().warn(
+                    f"/obstacles nach Runde {self.obs_freeze_lap} ignoriert "
+                    f"({len(msg.obstacles)} statt {len(self.obstacles)} gemeldet) "
+                    f"-- Hindernisse sind eingefroren.")
+            return
+
         obs = []
         for o in msg.obstacles:
             obs.append(dict(id=int(o.id), x=float(o.position.x), y=float(o.position.y),
@@ -537,7 +553,7 @@ class Round1Controller(Node):
                            q_default=(self._lane_default_offset(w_entry)
                                       or self.corner_o_in(idx)))
         self.obs_max_slope = planner.max_slope(pts)
-        dense = planner.densify(pts, 0.05)
+        dense = planner.densify(pts, 0.05, skew=self.obs_skew)
         self.obs_path = [to_map(s, q) for (s, q) in dense]
         self.get_logger().info(
             f"Hindernis-Pfad geplant (Gerade w{w_entry}, {len(obs_lane)} Hindernisse, "
@@ -555,7 +571,8 @@ class Round1Controller(Node):
             clear_after=self.obs_clear_after,
             transition_pref=self.obs_transition_pref,
             transition_min=self.obs_transition_min,
-            wall_margin=self.obs_wall_margin)
+            wall_margin=self.obs_wall_margin,
+            anchor_early=self.obs_anchor_early)
 
     def _assert_edge_convention(self, corners, walls):
         """Verify walls[i] lies on the line through corners[i]->corners[i+1]."""

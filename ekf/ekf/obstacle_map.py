@@ -5,13 +5,25 @@ Obstacle map accumulation (ROS-free).
 Detections from obstacle_detection are transformed into the map frame and
 SNAPPED to the nearest legal seat. Seats are 0.2 m apart across the lane and
 0.5 m along it, so snapping turns a noisy measurement into a discrete decision
-and a plausibility check in one step: anything that does not land near a seat
-is not an obstacle.
+and a plausibility check in one step.
 
-Votes are accumulated per (seat, colour) over the whole drive rather than
-decided per scan. This solves the occlusion case: when two pillars share a row
-(20 cm apart in depth) the near one hides the far one head-on, and only a later
+Votes accumulate per (seat, colour) over the whole drive rather than being
+decided per scan. That resolves occlusion: when two pillars share a row (0.2 m
+apart in depth) the near one hides the far one head-on, and only a later
 viewpoint reveals both.
+
+GHOST SUPPRESSION. Accumulating votes never forgets, so a single bad snap
+leaves a permanent mark: one pillar that snapped to both columns of its row at
+different times shows up as two obstacles 0.2 m apart, and a stray can push a
+straight to three. Two filters run before a seat is reported, both using only
+information already available:
+
+  1. Same-row competition. Two seats in one row are 0.2 m apart. Both CAN
+     legitimately hold a pillar (rules cards 28-36), so this is a ratio test,
+     not an exclusion: the weaker seat must reach a fair share of the stronger
+     one's votes, otherwise it is a snapping artefact of the same pillar.
+  2. Cap per straight. The rules allow exactly 1 or 2 obstacles per straight,
+     so only the two strongest seats of a straight are reported.
 """
 import numpy as np
 from collections import defaultdict
@@ -19,6 +31,9 @@ from collections import defaultdict
 SNAP_MAX_DIST = 0.12       # a detection further than this from any seat is
                            # not an obstacle (seats are 0.2 m apart)
 MIN_SEAT_VOTES = 3         # votes before a seat counts as occupied
+SIBLING_MIN_RATIO = 0.35   # weaker of two same-row seats must reach this share
+                           # of the stronger one's votes to be believed
+MAX_PER_STRAIGHT = 2       # rules: never more than 2 obstacles on a straight
 
 
 def robot_to_map(x, y, pose):
@@ -33,14 +48,18 @@ class ObstacleMap:
 
     def __init__(self, seats_by_straight, snap_max=SNAP_MAX_DIST):
         """seats_by_straight: output of obstacle_seats_map(start_pose)."""
-        self.seats = []            # flat list of (straight, index_in_straight, point)
+        self.seats = []            # flat: (straight, k, point, column, row)
         for si, straight in enumerate(seats_by_straight):
             for k, s in enumerate(straight):
                 self.seats.append((si, k, np.asarray(s['p'], dtype=float),
                                    s['column'], s['row']))
         self.snap_max = snap_max
-        self.votes = defaultdict(lambda: defaultdict(int))   # seat_id -> colour -> n
+        self.votes = defaultdict(lambda: defaultdict(int))   # seat -> colour -> n
         self.rejected = 0          # detections that matched no seat
+
+    # ------------------------------------------------------------------ #
+    # accumulation
+    # ------------------------------------------------------------------ #
 
     def add_detections(self, detections, pose, allowed=None):
         """Snap detections (robot frame) to seats using the current pose.
@@ -62,10 +81,12 @@ class ObstacleMap:
                 continue
             self.votes[best][det['color']] += 1
 
-    def occupied_seats(self, min_votes=MIN_SEAT_VOTES):
-        """Seats with enough votes, as a list of dicts:
-            {'straight', 'column', 'row', 'p', 'color', 'votes'}
-        Colour is the majority of that seat's votes."""
+    # ------------------------------------------------------------------ #
+    # evaluation
+    # ------------------------------------------------------------------ #
+
+    def _candidates(self, min_votes):
+        """Seats over the vote threshold, before ghost suppression."""
         out = []
         for sid, colours in self.votes.items():
             total = sum(colours.values())
@@ -73,13 +94,69 @@ class ObstacleMap:
                 continue
             color = max(colours.items(), key=lambda kv: kv[1])[0]
             si, k, sp, col, row = self.seats[sid]
-            out.append({'straight': si, 'column': col, 'row': row,
-                        'p': sp, 'color': color, 'votes': total})
+            out.append({'seat_id': sid, 'straight': si, 'column': col,
+                        'row': row, 'p': sp, 'color': color, 'votes': total})
+        return out
+
+    @staticmethod
+    def _resolve_row_conflicts(group, ratio=SIBLING_MIN_RATIO):
+        """Within one straight, drop a weak seat sitting next to a much stronger
+        one in the SAME ROW -- that is one pillar snapping to both columns, not
+        two pillars 0.2 m apart. A genuine same-row pair has comparable vote
+        counts and survives."""
+        by_row = defaultdict(list)
+        for c in group:
+            by_row[c['row']].append(c)
+
+        kept = []
+        for seats in by_row.values():
+            if len(seats) == 1:
+                kept.extend(seats)
+                continue
+            seats.sort(key=lambda c: -c['votes'])
+            strongest = seats[0]
+            kept.append(strongest)
+            for other in seats[1:]:
+                if other['votes'] >= ratio * strongest['votes']:
+                    kept.append(other)
+        return kept
+
+    def occupied_seats(self, min_votes=MIN_SEAT_VOTES):
+        """Seats believed to hold an obstacle, after ghost suppression.
+
+        Returns dicts:
+            {'seat_id', 'straight', 'column', 'row', 'p', 'color', 'votes'}
+        Colour is the majority of that seat's votes.
+        """
+        out = []
+        candidates = self._candidates(min_votes)
+        for si in {c['straight'] for c in candidates}:
+            group = [c for c in candidates if c['straight'] == si]
+            group = self._resolve_row_conflicts(group)
+            group.sort(key=lambda c: -c['votes'])
+            out.extend(group[:MAX_PER_STRAIGHT])     # rules: at most 2
         return out
 
     def straight_is_plausible(self, straight, min_votes=MIN_SEAT_VOTES):
-        """The rules allow exactly 1 or 2 obstacles per straight -- a useful
-        sanity check before trusting a straight's result."""
+        """The rules allow exactly 1 or 2 obstacles per straight. After
+        suppression the upper bound holds by construction, so this mainly
+        catches a straight where nothing was found."""
         n = len([s for s in self.occupied_seats(min_votes)
                  if s['straight'] == straight])
         return 1 <= n <= 2, n
+
+    # ------------------------------------------------------------------ #
+    # diagnostics
+    # ------------------------------------------------------------------ #
+
+    def vote_summary(self, min_votes=MIN_SEAT_VOTES):
+        """Raw votes per seat plus whether it survived suppression -- for
+        tuning SIBLING_MIN_RATIO against real runs."""
+        reported = {c['seat_id'] for c in self.occupied_seats(min_votes)}
+        lines = []
+        for sid in sorted(self.votes):
+            si, k, sp, col, row = self.seats[sid]
+            counts = dict(self.votes[sid])
+            mark = 'kept' if sid in reported else 'DROPPED'
+            lines.append(f'#{sid}(s{si} r{row} {col[0]}) {counts} -> {mark}')
+        return '; '.join(lines)
