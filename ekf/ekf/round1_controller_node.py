@@ -1061,16 +1061,28 @@ class Round1Controller(Node):
                 ist = wrap(theta - self.ausp_theta0)
                 gefahren = math.hypot(x - self.ausp_pose0[0],
                                       y - self.ausp_pose0[1])
+                if status != 0:
+                    # MOVE_OK/TIMEOUT/ABORTED aus esp_serial_bridge.py. Status 2
+                    # heisst: irgendetwas hat einen Motorbefehl geschickt und
+                    # die Fahrt damit abgeloest -- der haeufigste Fall ist eine
+                    # Bruecke ohne die move-Sperre in _velocity_control.
+                    bedeutung = {1: "Zeitueberschreitung im ESP",
+                                 2: "von einem Motorbefehl abgeloest -- laeuft "
+                                    "die Bruecke mit der move-Sperre?"}
+                    self.get_logger().error(
+                        "Ausparken Zug %d NICHT ausgefuehrt: Status %d (%s). "
+                        "%.1f cm ueber Grund statt %.1f cm."
+                        % (self.ausp_index + 1, status,
+                           bedeutung.get(status, "unbekannt"),
+                           gefahren * 100, abs(cm)))
+                    self._ausparken_abbruch(
+                        "Zug %d quittiert mit Status %d" % (self.ausp_index + 1, status))
+                    return
                 self.get_logger().info(
                     "Ausparken Zug %d fertig: Kurs %+.1f grad (geplant "
-                    "%+.1f), %.1f cm ueber Grund."
+                    "%+.1f), %.1f cm ueber Grund (geplant %.1f)."
                     % (self.ausp_index + 1, math.degrees(ist),
-                       math.degrees(soll), gefahren * 100))
-                if status != 0:
-                    self._ausparken_abbruch(
-                        "Zug %d quittiert mit Status %d (0 waere ok)"
-                        % (self.ausp_index + 1, status))
-                    return
+                       math.degrees(soll), gefahren * 100, abs(cm)))
                 self.ausp_index += 1
                 self.ausp_phase = 'lenken'
                 self.ausp_lenk_gesendet = False
