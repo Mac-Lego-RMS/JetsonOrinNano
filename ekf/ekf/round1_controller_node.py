@@ -426,10 +426,14 @@ class Round1Controller(Node):
                                      self.ausparken_move_done_cb, 10)
             self.create_subscription(LaserScan, '/scan',
                                      self.ausparken_scan_cb, 10)
-            # Latched: der scan_processor bekommt sie auch, wenn er spaeter
-            # startet oder neu gestartet wird.
+            # BEWUSST NICHT latched. Eine latched Nachricht ueberlebt den
+            # Lauf, der sie erzeugt hat: ein frisch gestarteter
+            # scan_processor bekam sie noch aus dem VORIGEN Lauf zugestellt
+            # und hat seine Startpositionserkennung entsperrt, bevor
+            # ueberhaupt ausgeparkt war. Stattdessen wird sie waehrend des
+            # ganzen Scan-Halts wiederholt -- wer dann zuhoert, bekommt sie.
             self.pub_park_dir = self.create_publisher(
-                String, '/parking_direction', latched)
+                String, '/parking_direction', 10)
 
         self.dt = 1.0 / self.control_rate
         self.create_timer(self.dt, self.control_loop)
@@ -1223,6 +1227,11 @@ class Round1Controller(Node):
             self.get_logger().info(
                 "ausparken_nur gesetzt -- Regler haelt hier an.")
             return
+        # Die Richtung JETZT bekanntgeben, nicht erst nach dem Halt: die
+        # Wahrnehmung braucht sie, um ueberhaupt mit der
+        # Startpositionserkennung anzufangen -- und die soll im Stillstand
+        # laufen, also genau waehrend des Halts.
+        self._ausparken_richtung_uebernehmen()
         if self.ausparken_halt_s > 0.0:
             self.state = 'AUSPARK_SCAN'
             self.ausp_t0 = self.now_s()
@@ -1241,6 +1250,10 @@ class Round1Controller(Node):
         Startgeraden sind jetzt besser zu sehen als spaeter im Lauf.
         """
         self.publish_stop()
+        # Wiederholen, solange gehalten wird: der Publisher ist nicht latched,
+        # und wer erst jetzt zuhoert, soll sie trotzdem bekommen.
+        if self.ausparken_setzt_richtung and self.ausp_richtung:
+            self.pub_park_dir.publish(String(data=self.ausp_richtung))
         rest = self.ausparken_halt_s - (self.now_s() - self.ausp_t0)
         if rest > 0.0:
             self.get_logger().info(
@@ -1294,8 +1307,11 @@ class Round1Controller(Node):
         self.race_direction = self.ausp_richtung
 
     def _ausparken_uebergeben(self):
-        """An die normale Zustandsmaschine abgeben."""
-        self._ausparken_richtung_uebernehmen()
+        """An die normale Zustandsmaschine abgeben.
+
+        Die Richtung ist zu diesem Zeitpunkt schon gesetzt und verschickt --
+        das passiert in _ausparken_fertig, vor dem Scan-Halt.
+        """
         # Der Taster ist bereits gedrueckt worden, sonst waeren wir nicht hier.
         self.button_pressed = True
         self.state = 'WAIT_INPUTS'

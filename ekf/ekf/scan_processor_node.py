@@ -135,6 +135,11 @@ class ScanProcessor(Node):
 
         self.direction = None
         self.dir_votes = []
+        # Pose des Roboters, als die Startposition erkannt wurde. Bei einem
+        # normalen Start (0,0,0); nach dem Ausparken die Pose in der Spur.
+        self.commit_pose = (0.0, 0.0, 0.0)
+        # Richtung aus der Parkluecke, solange die Karte noch nicht steht.
+        self.parking_direction = None
 
         # --- lane-width learning (open mode) ---
         self.lap_state = None        # [corner_idx, corner_count, lap]
@@ -165,9 +170,14 @@ class ScanProcessor(Node):
         self.create_subscription(PointCloud2, '/camera_lidar/colored_scan',
                                  self.colored_scan_cb, 10)
         # Fahrtrichtung aus der Parkluecke, falls dort ausgeparkt wird.
-        # Latched, damit sie auch ankommt, wenn dieser Knoten spaeter startet.
+        # BEWUSST NICHT latched, und der Regler sendet auch nicht latched:
+        # eine latched Nachricht ueberlebt den Lauf, der sie erzeugt hat, und
+        # hat diesen Knoten schon einmal mit der Richtung aus dem VORIGEN Lauf
+        # entsperrt. Der Regler wiederholt sie stattdessen waehrend des ganzen
+        # Scan-Halts. (Ausserdem passen TRANSIENT_LOCAL-Abonnent und
+        # VOLATILE-Publisher in DDS nicht zusammen -- sie faenden sich nicht.)
         self.create_subscription(String, '/parking_direction',
-                                 self.parking_direction_cb, latched)
+                                 self.parking_direction_cb, 10)
 
         self.pub = self.create_publisher(WallMatchArray, '/wall_matches', 10)
         self.wall_dist_pub = self.create_publisher(
@@ -213,12 +223,22 @@ class ScanProcessor(Node):
         self._publish_wall_distances(measured)
 
         if self.map_walls is None:
+            if self.wait_for_parking and self.parking_direction is None:
+                # Noch in der Parkluecke. Von dort aus misst die
+                # Startpositionserkennung Unsinn: in einem Lauf hat sie pos1
+                # gewaehlt (Frontwand 1,45 m), waehrend der Roboter 2 m
+                # entfernt stand -- also pos2. Die Karte haengt danach einen
+                # halben Meter daneben, und der Regler sieht im ERSTEN
+                # Regelschritt 1,67 m Querabweichung.
+                return
             res = self._detect(measured)
             if res['valid']:
                 self.votes.append((res['position'], res['front_dist'],
                                    res.get('left_d'), res.get('right_d')))
             if len(self.votes) >= START_VOTES:
                 self._commit()
+                if self.parking_direction and self.direction is None:
+                    self._latch_direction(self.parking_direction, 'parking')
             return
 
         matches = match_walls(measured, self.map_walls, self.pose, d_tol=0.12)
@@ -359,10 +379,29 @@ class ScanProcessor(Node):
         else:
             self._commit_obstacle(winner)
 
+    def _verankert(self, feldpose):
+        """Feldpose des Roboters JETZT -> Feldpose des ODOM-URSPRUNGS.
+
+        generate_map() und alles danach erwarten die Pose des Punktes, an dem
+        die Odometrie genullt wurde -- nicht die des Roboters. Bei einem
+        normalen Start ist das dasselbe: der Roboter steht still, bis erkannt
+        ist. Nach dem Ausparken liegen 50 cm dazwischen, und ohne diese
+        Verrechnung waere die Karte genau um die Ausparkstrecke versetzt.
+
+        Steht der Roboter beim Erkennen im Ursprung, liefert das exakt die
+        uebergebene Pose zurueck -- der normale Fall bleibt unveraendert.
+        """
+        xf, yf, thf = feldpose
+        xo, yo, tho = self.commit_pose
+        th0 = wrap(thf - tho)
+        c, sn = np.cos(th0), np.sin(th0)
+        return (xf - (c * xo - sn * yo), yf - (sn * xo + c * yo), th0)
+
     def _commit_obstacle(self, position):
         self.position = position
         self.lane_width = 1.0
-        start_pose = START_POSES_CW[f'pos{position}']
+        self.commit_pose = self.pose
+        start_pose = self._verankert(START_POSES_CW[f'pos{position}'])
         self.map_walls = generate_map(start_pose)
         self.front_wall_x = self._front_wall_x_from_map(self.map_walls)
         self.get_logger().info(
@@ -372,6 +411,7 @@ class ScanProcessor(Node):
 
     def _commit_open(self, position, front_d, left_d, right_d):
         self.position = position
+        self.commit_pose = self.pose
         self.lane_width = left_d + right_d
         self.left_d = left_d
         self.right_d = right_d
@@ -426,6 +466,17 @@ class ScanProcessor(Node):
             self.get_logger().warn(
                 f'/parking_direction: "{msg.data}" ist weder CW noch CCW')
             return
+        self.parking_direction = richtung
+        if self.map_walls is None:
+            # Die Karte steht noch nicht -- sie wartet ja gerade auf diese
+            # Nachricht. Erst die Startposition erkennen (jetzt darf sie das,
+            # der Roboter ist aus der Luecke heraus), dann latchen; siehe
+            # scan_cb. Andersherum ginge es nicht: _start_pose_for_direction
+            # braucht self.position aus dem Commit.
+            self.get_logger().info(
+                f'Parkrichtung {richtung} vorgemerkt -- erst die Startposition '
+                f'erkennen, dann latchen.')
+            return
         if self.direction is None:
             aus_ecken = (self.dir_votes[0]
                          if len(self.dir_votes) == DIRECTION_VOTES
@@ -464,7 +515,9 @@ class ScanProcessor(Node):
         if self.race_mode == 'open':
             return self._open_start_pose()
         poses = START_POSES_CW if self.direction == 'CW' else START_POSES_CCW
-        return poses[f'pos{self.position}']
+        # Dieselbe Verankerung wie beim Commit, sonst laegen Eckengeometrie,
+        # Innenband und Sitzraster gegenueber der Matching-Karte versetzt.
+        return self._verankert(poses[f'pos{self.position}'])
 
     def _map_switch_limit(self):
         """How far along the straight the map may still be switched: up to just

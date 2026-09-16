@@ -301,6 +301,8 @@ for _ in range(4000):
     if f.state == 'AUSPARK_SCAN':
         break
 pruefe('nach dem letzten Zug wird gehalten', f.state == 'AUSPARK_SCAN')
+pruefe('die Richtung ist schon VOR dem Halt raus',
+       'CW' in [w for n, w in f.protokoll if n == 'park_dir'])
 halte_vorher = f.stopps
 f.takt(5)
 pruefe('waehrend des Halts bleibt er stehen',
@@ -320,8 +322,11 @@ pruefe('halt_s = 0 schaltet die Pause ab', f.state == 'WAIT_INPUTS')
 f = Attrappe(race_direction='CCW')      # Ausparken misst CW
 f.durchfahren()
 pruefe('das Parken setzt die Richtung durch', f.race_direction == 'CW')
+# Nicht latched, also wird sie waehrend des Halts wiederholt -- geprueft wird
+# der Inhalt, nicht die Anzahl.
+gesendet = [w for n, w in f.protokoll if n == 'park_dir']
 pruefe('... und schickt sie an den scan_processor',
-       [w for n, w in f.protokoll if n == 'park_dir'] == ['CW'])
+       gesendet and set(gesendet) == {'CW'}, '%dx' % len(gesendet))
 pruefe('... und sagt, dass es dem Latch widerspricht',
        any('/race_direction meldet' in t for t in f._log.stufen('warn')))
 pruefe('... und der Lauf geht weiter', f.state == 'WAIT_INPUTS')
@@ -331,8 +336,9 @@ f.durchfahren()
 pruefe('passende Richtung erzeugt keine Warnung',
        not any('meldet' in t for t in f._log.stufen('warn')
                if 'Richtung' in t or 'race_direction' in t))
+gesendet = [w for n, w in f.protokoll if n == 'park_dir']
 pruefe('... wird aber trotzdem veroeffentlicht',
-       [w for n, w in f.protokoll if n == 'park_dir'] == ['CW'])
+       gesendet and set(gesendet) == {'CW'}, '%dx' % len(gesendet))
 
 # Schalter aus: die Eckengeometrie behaelt das Wort.
 f = Attrappe(race_direction='CCW', ausparken_setzt_richtung=False)
