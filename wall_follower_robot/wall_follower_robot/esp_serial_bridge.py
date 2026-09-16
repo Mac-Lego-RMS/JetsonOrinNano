@@ -434,8 +434,14 @@ class EspLink:
         move_id = self._next_move_id
         self._next_move_id = self._next_move_id % 255 + 1   # 0 vermeiden
         deg10 = int(round(degrees * 10.0))
-        self.send(CMD_MOVE, bytes([move_id]) + struct.pack(">i", deg10))
+        # VOR dem Senden setzen. Der Knoten laeuft mit ReentrantCallbackGroup
+        # in einem MultiThreadedExecutor; stuende die Zeile danach, saehe der
+        # Geschwindigkeitsregler im anderen Thread noch "keine Fahrt", schickte
+        # duty 0 hinterher und der ESP quittierte die eben erst gestartete
+        # Fahrt sofort als abgebrochen. Genau das war am Roboter zu sehen:
+        # 14 ms zwischen CMD_MOVE und MOVE_ABORTED.
         self._move_active = True
+        self.send(CMD_MOVE, bytes([move_id]) + struct.pack(">i", deg10))
         return move_id
 
     def move_abort(self) -> None:
@@ -738,6 +744,10 @@ def _build_node_class():
             self._v_ist = 0.0
             self._v_ramp = 0.0
             self._last_odom = 0.0
+            # Serialisiert alles, was den Motorbefehl schreibt. Ohne das
+            # reicht die Sperre auf move_active nicht: zwischen Pruefung und
+            # Senden kann der andere Thread die Fahrt starten.
+            self._motor_lock = threading.Lock()
             self._vel_integral = 0.0
             self._ctrl_dt = 1.0 / (float(self._p("vel_control_rate")) or 50.0)
 
@@ -1024,7 +1034,14 @@ def _build_node_class():
             """Fester Takt: Feedforward + PI auf v_soll - v_ist -> duty.
             Alleiniger Schreiber des Motorbefehls."""
             now = monotonic()
+            if not self._motor_lock.acquire(blocking=False):
+                return                      # jemand startet gerade eine Fahrt
+            try:
+                self._velocity_control_gesperrt(now)
+            finally:
+                self._motor_lock.release()
 
+        def _velocity_control_gesperrt(self, now: float) -> None:
             # Eine laufende Positionsfahrt gehoert dem ESP. JEDER Motorbefehl
             # von hier loest sie ab -- auch die duty 0 aus dem Timeout-Zweig
             # gleich darunter, denn EspLink.motor() setzt _move_active
@@ -1086,7 +1103,8 @@ def _build_node_class():
             self.link.motor(int(round(_clamp(duty, -DUTY_MAX, DUTY_MAX))))
 
         def _on_move(self, msg: Float32) -> None:
-            move_id = self.link.move(float(msg.data))
+            with self._motor_lock:
+                move_id = self.link.move(float(msg.data))
             self.get_logger().info(f"Fahrt {move_id}: {msg.data:+.1f} grad (relativ)")
 
         def _on_emergency(self) -> None:
@@ -1268,14 +1286,18 @@ def _build_node_class():
             den Motorbefehl dort ohnehin zurueck, weil der ESP die Fahrt
             selbst zu Ende regelt -- ein motor_coast() von hier wuerde sie
             abbrechen."""
-            if (self._cmd_vel_timeout > 0 and self._last_cmd_vel
-                    and not self.link.move_active
-                    and monotonic() - self._last_cmd_vel > self._cmd_vel_timeout):
-                self._last_cmd_vel = 0.0
-                self.link.motor_coast()
-                self.get_logger().warn(
-                    f"kein /cmd_vel seit {self._cmd_vel_timeout:.1f} s - Motor aus")
-            self.link.tick(float(self._p("heartbeat_period")))
+            with self._motor_lock:
+                if (self._cmd_vel_timeout > 0 and self._last_cmd_vel
+                        and not self.link.move_active
+                        and monotonic() - self._last_cmd_vel > self._cmd_vel_timeout):
+                    self._last_cmd_vel = 0.0
+                    self.link.motor_coast()
+                    self.get_logger().warn(
+                        f"kein /cmd_vel seit {self._cmd_vel_timeout:.1f} s - Motor aus")
+                # tick() schickt den letzten Motorbefehl nach und pruefen dabei
+                # selbst auf move_active -- dieselbe Pruefung-dann-Senden-Luecke,
+                # also gehoert sie unter dasselbe Schloss.
+                self.link.tick(float(self._p("heartbeat_period")))
 
         def _resync(self) -> None:
             self.link.resync()
@@ -1420,6 +1442,23 @@ def _selftest() -> int:
     check("Fahrt negativ",
           link.sent[-1][3:] == struct.pack(">i", -450), link.sent[-1].hex(" "))
     check("move_id zaehlt", link.sent[-1][2] == move_id % 255 + 1)
+
+    # Reihenfolge in move(): die Sperre muss stehen, BEVOR der Rahmen rausgeht.
+    # Andersherum sieht der Geschwindigkeitsregler im anderen Thread noch
+    # "keine Fahrt" und schickt duty 0 hinterher -- der ESP quittiert die eben
+    # gestartete Fahrt dann als abgebrochen. Am Roboter gemessen: 14 ms.
+    gesehen = {}
+    echtes_send = link.send
+
+    def _spion(cmd, payload=b""):
+        gesehen[cmd] = link.move_active
+        return echtes_send(cmd, payload)
+
+    link.send = _spion
+    link._move_active = False
+    link.move(90.0)
+    link.send = echtes_send
+    check("Sperre steht schon beim Senden", gesehen.get(CMD_MOVE) is True)
 
     # Der haeufigste Fehler laut Spec: die x1000-Kodierung gilt auch fuer die
     # ganzzahligen Parameter. maxDuty=700 muss als 700000 rausgehen.
