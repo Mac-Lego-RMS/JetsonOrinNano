@@ -247,12 +247,26 @@ class Round1Controller(Node):
         # Ohne Begrenzung steht der Stellwert bei mehreren hundert Grad
         # Sollweg bis kurz vors Ziel am Anschlag -- in einer 26 cm langen
         # Luecke ist das zu schnell.
-        # 4 = maxduty, 8 = minduty. minduty ist der wichtige Wert: ohne ihn
-        # faellt der Stellwert auf den letzten Millimetern unter die
-        # Losbrechschwelle (pwm_deadband 0.076, also rund 78 duty) und das
-        # Rad steht, obwohl der Regler noch etwas will. Der ESP laeuft dann
-        # in seine Zeitgrenze.
-        self.declare_parameter('ausparken_pid', [4.0, 300.0, 8.0, 90.0], arr)
+        # 4 = maxduty, 8 = minduty. Das Paar ist bewusst ENG gewaehlt.
+        #
+        # Der ESP kennt keine Anlauframpe -- in PID_PARAMS gibt es keinen
+        # solchen Wert. Am Anfang jedes Zuges ist der Regelfehler riesig (Zug 1
+        # sind 225 Grad Welle), kp mal Fehler also weit ueber jeder Grenze, und
+        # der Stellwert springt in einem einzigen Takt auf maxduty. Bei 300
+        # drehen die Raeder durch, erst recht bei vollem Lenkeinschlag, wo sie
+        # zusaetzlich radieren.
+        #
+        # Fuers Ausparken wollen wir aber gar kein Geschwindigkeitsprofil,
+        # sondern gleichmaessiges Kriechen ueber wenige Zentimeter. Liegt
+        # maxduty nur knapp ueber minduty, laeuft der Motor die ganze Strecke
+        # auf fast konstantem niedrigem Stellwert: kein Sprung am Anfang, und
+        # unten haelt minduty ihn ueber der Losbrechschwelle (pwm_deadband
+        # 0.076, also rund 78 duty), damit die letzten Millimeter nicht
+        # liegenbleiben und der ESP nicht in seine Zeitgrenze laeuft.
+        #
+        # Zu langsam? minduty und maxduty gemeinsam anheben, den Abstand
+        # zwischen beiden aber klein lassen.
+        self.declare_parameter('ausparken_pid', [4.0, 140.0, 8.0, 90.0], arr)
         self.declare_parameter('ausparken_pid_nachher', [4.0, 1023.0], arr)
 
         self._load_params()
