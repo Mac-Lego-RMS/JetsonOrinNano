@@ -1025,6 +1025,16 @@ def _build_node_class():
             Alleiniger Schreiber des Motorbefehls."""
             now = monotonic()
 
+            # Eine laufende Positionsfahrt gehoert dem ESP. JEDER Motorbefehl
+            # von hier loest sie ab -- auch die duty 0 aus dem Timeout-Zweig
+            # gleich darunter, denn EspLink.motor() setzt _move_active
+            # zurueck. Ohne diese Sperre ist ~/move nach spaetestens
+            # cmd_vel_timeout (0,5 s) tot, egal wie lang die Fahrt ist.
+            if self.link.move_active:
+                self._vel_integral = 0.0
+                self._v_ramp = 0.0
+                return
+
             # kein aktuelles /cmd_vel -> anhalten, Integrator zuruecksetzen
             if (self._cmd_vel_timeout > 0 and
                     (self._last_cmd_vel == 0.0 or
@@ -1252,8 +1262,14 @@ def _build_node_class():
         # --- Timer --------------------------------------------------------
 
         def _heartbeat(self) -> None:
-            """Motor am Leben halten und bei ausbleibendem /cmd_vel stoppen."""
+            """Motor am Leben halten und bei ausbleibendem /cmd_vel stoppen.
+
+            Waehrend einer Positionsfahrt wird NICHT gestoppt: tick() haelt
+            den Motorbefehl dort ohnehin zurueck, weil der ESP die Fahrt
+            selbst zu Ende regelt -- ein motor_coast() von hier wuerde sie
+            abbrechen."""
             if (self._cmd_vel_timeout > 0 and self._last_cmd_vel
+                    and not self.link.move_active
                     and monotonic() - self._last_cmd_vel > self._cmd_vel_timeout):
                 self._last_cmd_vel = 0.0
                 self.link.motor_coast()
@@ -1428,7 +1444,8 @@ def _selftest() -> int:
           link.sent[-1].hex(" "))
     actual = link.set_telemetry_rate(0.001)
     check("Takt auf Minimum begrenzt",
-          link.sent[-1] == bytes([0xA5, 0xC0, 0x00, 0x14]) and actual == 0.020,
+          link.sent[-1] == bytes([0xA5, 0xC0, 0x00, TELEMETRY_MS_MIN])
+          and actual == TELEMETRY_MS_MIN / 1000.0,
           f"{actual * 1e3:.0f} ms")
     actual = link.set_telemetry_rate(0)
     check("Telemetrie abschaltbar",
