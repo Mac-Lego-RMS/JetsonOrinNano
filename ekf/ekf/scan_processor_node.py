@@ -111,6 +111,16 @@ class ScanProcessor(Node):
             'race_mode', 'obstacle').get_parameter_value().string_value
         self.parking_lot_present = self.declare_parameter(
             'parking_lot_present', False).get_parameter_value().bool_value
+        # Wird aus der Parkluecke gestartet? Dann NICHT selbst latchen: aus der
+        # Luecke heraus ist keine brauchbare Ecke zu sehen, die Erkennung
+        # liefert trotzdem ein Ergebnis, und das war in einem Lauf falsch
+        # herum. Die Richtung kommt stattdessen auf /parking_direction.
+        #
+        # Warum ein Parameter und kein Topic: dieser Knoten startet beim
+        # Hochfahren, der Regler Minuten spaeter von Hand. Ein "warte mal" von
+        # ihm kaeme grundsaetzlich zu spaet -- gelatcht waere laengst.
+        self.wait_for_parking = self.declare_parameter(
+            'wait_for_parking', False).get_parameter_value().bool_value
 
         self.pose = (0.0, 0.0, 0.0)
         self.map_walls = None
@@ -173,6 +183,12 @@ class ScanProcessor(Node):
         self.get_logger().info(
             f'start detection running (mode={self.race_mode}, '
             f'parking_lot={self.parking_lot_present})...')
+        if self.wait_for_parking:
+            self.get_logger().info(
+                'wait_for_parking: die Fahrtrichtung kommt aus der Parkluecke '
+                'ueber /parking_direction. Die Eckengeometrie latcht NICHT '
+                'von selbst -- ohne diese Nachricht bleibt der Knoten ohne '
+                'Richtung und damit ohne Sitzraster.')
 
     # ------------------------------------------------------------------ #
     # callbacks
@@ -382,6 +398,15 @@ class ScanProcessor(Node):
         if len(self.dir_votes) > DIRECTION_VOTES:
             self.dir_votes.pop(0)
         if len(self.dir_votes) == DIRECTION_VOTES and len(set(self.dir_votes)) == 1:
+            if self.wait_for_parking:
+                # Stimmen weiter sammeln, aber nicht festnageln. Sobald
+                # /parking_direction kommt, wird verglichen -- so faellt auf,
+                # wenn die beiden Quellen sich widersprechen.
+                self.get_logger().info(
+                    f'corner geometry would say {self.dir_votes[0]}, '
+                    f'waiting for /parking_direction',
+                    throttle_duration_sec=5.0)
+                return
             self._latch_direction(self.dir_votes[0], 'corner geometry')
 
     def parking_direction_cb(self, msg):
@@ -402,6 +427,14 @@ class ScanProcessor(Node):
                 f'/parking_direction: "{msg.data}" ist weder CW noch CCW')
             return
         if self.direction is None:
+            aus_ecken = (self.dir_votes[0]
+                         if len(self.dir_votes) == DIRECTION_VOTES
+                         and len(set(self.dir_votes)) == 1 else None)
+            if aus_ecken and aus_ecken != richtung:
+                self.get_logger().warn(
+                    f'/parking_direction sagt {richtung}, die Eckengeometrie '
+                    f'haette {aus_ecken} gesagt. Das Parken gilt -- aus der '
+                    f'Luecke heraus ist keine brauchbare Ecke zu sehen.')
             self._latch_direction(richtung, 'parking')
             return
         if self.direction != richtung:

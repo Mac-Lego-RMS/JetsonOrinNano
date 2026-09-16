@@ -115,8 +115,24 @@ SCAN_TOPIC=/scan
 RACE_MODE=obstacle
 
 # Wie viele Ecken der Regler faehrt, bevor er anhaelt. 12 sind drei
-# Runden. Nur fuer die vorbereitete Zeile in Fenster 10.
+# Runden. Nur fuer die vorbereitete Zeile in Fenster 6.
 N_CORNERS=12
+
+# Startet der Roboter in der Parkluecke?
+#
+# EIN Schalter fuer zwei Knoten, absichtlich: er setzt den Regler auf
+# Ausparken UND sagt dem scan_processor, dass er seine Fahrtrichtung nicht
+# selbst latchen soll. Aus der Luecke heraus sieht der naemlich keine
+# brauchbare Ecke, liefert aber trotzdem ein Ergebnis -- in einem Lauf stand
+# dort CCW, waehrend das Ausparken CW gemessen hatte. Wer sich irrt, faehrt
+# die ganze Runde andersherum.
+#
+# Warum der scan_processor das als PARAMETER braucht und nicht per Topic
+# erfaehrt: er startet hier beim Hochfahren, der Regler erst, wenn du in
+# Fenster 6 Enter drueckst. Ein "warte mal" von ihm kaeme immer zu spaet.
+# Die Richtung selbst kommt dann sehr wohl ueber ein Topic
+# (/parking_direction), nur eben das Warten nicht.
+AUSPARKEN=true
 
 # Kalibrier-Node nur auf Wunsch (--calib). Im normalen Lauf nicht gebraucht.
 START_CALIB=0
@@ -397,7 +413,7 @@ fi
 # Beide erst nach der Hardware starten -- ekf_node will Radstellungen von
 # der Bruecke und Drehraten von der IMU, scan_processor den Lidar.
 run_window 8 ekf   "sleep 10 && ros2 run ekf ekf_node"
-run_window 9 scan  "sleep 12 && ros2 run ekf scan_processor --ros-args -p race_mode:=$RACE_MODE"
+run_window 9 scan  "sleep 12 && ros2 run ekf scan_processor --ros-args -p race_mode:=$RACE_MODE -p wait_for_parking:=$AUSPARKEN"
 
 # ------------------------------------------------------------------ #
 # Fenster 6: der Regler -- vorbereitet, aber NICHT gestartet
@@ -407,7 +423,7 @@ run_window 9 scan  "sleep 12 && ros2 run ekf scan_processor --ros-args -p race_m
 # richtig steht, dann Enter. Einstellige Fensternummer, damit Strg-b 6
 # hinfuehrt.
 arm_window 6 round1 \
-    "ros2 run ekf round1_controller --ros-args -p n_corners:=$N_CORNERS"
+    "ros2 run ekf round1_controller --ros-args -p n_corners:=$N_CORNERS -p ausparken:=$AUSPARKEN"
 
 # ------------------------------------------------------------------ #
 # Optionale Fahr-Nodes -- bei Bedarf einkommentieren
