@@ -27,6 +27,7 @@ Command convention: REP 103 (linear.x m/s fwd, angular.z rad/s CCW=left). The
 esp_bridge does the calibrated Ackermann inverse and speed control.
 """
 
+import collections
 import math
 
 import rclpy
@@ -37,6 +38,13 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, Float64, String, Int32MultiArray, Float64MultiArray
 from std_msgs.msg import Header
+
+
+# Farbcodes aus robot_msgs/Obstacle.msg und die halbe Klotzbreite aus
+# obstacle_path.py -- hier gespiegelt, damit der Startgeraden-Zweig ohne
+# zusaetzlichen Import auskommt.
+OBST_UNBEKANNT, OBST_ROT, OBST_GRUEN = 0, 1, 2
+BLOCK_HALB = 0.022          # 44 mm / 2
 
 
 def yaw_from_quaternion(q):
@@ -88,7 +96,7 @@ class Round1Controller(Node):
         'obs_clear_after':  ('obs_clear_after',  0.05, float),  # hold it this far AFTER (small -> swap earlier)
         'obs_transition_pref': ('obs_transition_pref', 0.70, float),  # lane-change length
         'obs_anchor_early': ('obs_anchor_early', 1.0, lambda v: bool(float(v))),  # swap right after the block
-        'obs_skew':         ('obs_skew',         0.7,  float),   # 0=smooth S, 1=front-loaded (kink at start)
+        'obs_skew':         ('obs_skew',         0.0,  float),   # 0=smooth S, 1=front-loaded (kink at start)
         'obs_freeze_lap':   ('obs_freeze_lap',   1,    int),     # ignore /obstacles after this many laps
         'obs_transition_min':  ('obs_transition_min',  0.40, float),  # measured limit ~0.40 m @0.45 m/s
         'obs_wall_margin':  ('obs_wall_margin',  0.12, float),  # never plan closer than this to a wall
@@ -101,16 +109,37 @@ class Round1Controller(Node):
         'min_turn_radius':  ('min_turn_radius',  0.30, float),
         'max_settle_slope': ('max_settle_slope', 0.80, float),  # lateral m per longitudinal m we trust
         'turn_in_lat_warn': ('turn_in_lat_warn', 0.10, float),  # warn above this lateral error at turn-in
+        # do not start the arc while still correcting laterally (0.2 s steering dead time)
+        'turn_in_lat_gate': ('turn_in_lat_gate', 0.03, float),  # settled below this lateral error
+        'turn_in_om_gate':  ('turn_in_om_gate',  0.50, float),  # ... and below this commanded omega
+        'turn_in_delay_max':('turn_in_delay_max',0.25, float),  # max distance to wait past T_A
         # scan pause at the end of each straight (lap 1 only -- after that the
         # seat grid is filled and standing still would only cost time)
         'scan_pause':       ('scan_pause',       1.0, lambda v: bool(float(v))),
         'scan_pause_s':     ('scan_pause_s',     1.5, float),   # how long to stand still [s]
-        'scan_front_dist':  ('scan_front_dist',  1.20, float),  # trigger at this distance to the corner
+        'scan_front_dist':  ('scan_front_dist',  1.18, float),  # ALWAYS stop this far from the front wall (pose)
         'scan_pause_laps':  ('scan_pause_laps',  1,    int),    # pause only during the first N laps
         'v_start':       ('v_start',       0.35,  float),   # speed on the start straight (before direction latch)
         'start_stop_gap': ('start_stop_gap', 0.50, float),  # stop this far from the front wall if direction never comes
         'start_lane_min': ('start_lane_min', 0.45, float),  # plausibility band for d_left+d_right
         'start_lane_max': ('start_lane_max', 1.30, float),
+        # --- Ausweichen auf der Startgeraden ---------------------------------
+        # Das Sitzraster und die Eckengeometrie gibt es erst beim Richtungs-
+        # Latch, und der kann nicht frueher kommen: bis zum Ende des Innen-
+        # blocks bei x=0.95 messen beide Wandabstaende 0.50 -- die Fahrtrichtung
+        # ist bis dahin geometrisch nicht bestimmbar (Lauf 22: rechts oeffnet
+        # bei x=0.84, Latch bei x=1.02, Pylone steht bei x=0.95). Gepuffert
+        # wurde alles korrekt, es kommt nur zu spaet. /obstacles_live liefert
+        # die Pylone dagegen schon 0.5 s VOR dem Losfahren, durchgehend und in
+        # der richtigen Farbe -- und die Regel "rot rechts vorbei, gruen links
+        # vorbei" gilt im ROBOTERframe ohne jede Fahrtrichtung.
+        'start_dodge':      ('start_dodge',      1.0, lambda v: bool(float(v))),
+        'start_dodge_look': ('start_dodge_look', 1.20, float),  # nur Hindernisse so weit voraus [m]
+        'start_dodge_back': ('start_dodge_back', 0.25, float),  # Versatz noch so weit dahinter halten [m]
+        'start_dodge_lane': ('start_dodge_lane', 0.35, float),  # seitliches Fenster um die Spurmitte [m]
+        'start_dodge_margin': ('start_dodge_margin', 0.12, float),  # nie naeher an eine Wand planen [m]
+        'start_dodge_votes': ('start_dodge_votes', 3, int),     # Sichtungen, bevor gelenkt wird
+        'start_dodge_window_s': ('start_dodge_window_s', 1.0, float),  # ueber diesen Zeitraum gezaehlt
         'turn_radius':   ('R',             0.50,  float),
         'sweep_tol_deg': ('sweep_tol',     3.0,   lambda v: math.radians(float(v))),
         'ff_blend_deg':  ('ff_blend',      7.0,  lambda v: math.radians(float(v))),
@@ -178,9 +207,16 @@ class Round1Controller(Node):
         self.lane_width = None            # [m] * 4, per straight, from outer<->inner distance
         self.wall_dist = None             # (d_left, d_right) live, for the start straight
         self.start_center_y = None        # map-frame y of the lane centre, held once computed
+        # Rohdetektionen der Startgeraden: (t, map_x, map_y, farbe). Im MAP-Frame
+        # abgelegt, damit die Eigenbewegung zwischen zwei Meldungen die Abstimmung
+        # nicht verfaelscht.
+        self.live_obs = collections.deque(maxlen=60)
+        self.start_dodge_aktiv = None     # zuletzt gewaehlter Versatz, nur fuer das Log
+        self._start_halt = None           # (obst_x, ziel_y, info) bis zum Passieren
         self.obstacles = None             # full current stand from /obstacles
         self.obs_path = None              # planned polyline [(x,y)] for this straight
         self.obs_max_slope = 0.0          # steepest lane change in the current plan
+        self.obs_path_end_q = None        # lateral offset the path ends on (= corner entry)
         self._path_idx = 0                # nearest-segment cursor for path following
         self.scan_done_this_straight = False   # scan pause fires once per straight
         self.scan_pause_t0 = 0.0
@@ -209,6 +245,12 @@ class Round1Controller(Node):
             from robot_msgs.msg import ObstacleArray
             self.create_subscription(ObstacleArray, '/obstacles',
                                      self.obstacles_cb, latched)
+            # Rohdetektionen, ungerastert und ohne Fahrtrichtung. Genau das
+            # braucht die Startgerade: das Sitzraster und die Eckengeometrie
+            # entstehen erst beim Richtungs-Latch, und der kann geometrisch
+            # nicht frueher kommen (siehe _start_ausweich_y).
+            self.create_subscription(ObstacleArray, '/obstacles_live',
+                                     self.obstacles_live_cb, 10)
         except ImportError:
             self.get_logger().warn("robot_msgs/ObstacleArray nicht verfuegbar -- "
                                    "Hindernisplanung inaktiv.")
@@ -501,6 +543,7 @@ class Round1Controller(Node):
         detections by starting the plan at the robot's current position.
         """
         self.obs_path = None
+        self.obs_path_end_q = None
         self.obs_max_slope = 0.0
         self._path_idx = 0
         if self.arc is None or self.pose is None or self.obstacles is None:
@@ -555,9 +598,24 @@ class Round1Controller(Node):
         self.obs_max_slope = planner.max_slope(pts)
         dense = planner.densify(pts, 0.05, skew=self.obs_skew)
         self.obs_path = [to_map(s, q) for (s, q) in dense]
+        self.obs_path_end_q = dense[-1][1]
         self.get_logger().info(
             f"Hindernis-Pfad geplant (Gerade w{w_entry}, {len(obs_lane)} Hindernisse, "
-            f"steilster Wechsel {self.obs_max_slope:.2f}, {len(self.obs_path)} Punkte).")
+            f"steilster Wechsel {self.obs_max_slope:.2f}, {len(self.obs_path)} Punkte, "
+            f"Ende bei q={self.obs_path_end_q:.2f}).")
+
+        # --- reconcile the two planners -------------------------------------
+        # The obstacle path holds its pass-by offset to the end of the straight;
+        # the arc was planned with its own o_in. If they disagree, the robot
+        # arrives somewhere the turn-in point is not -- that is exactly the
+        # "lat=0.65 -> NOTSTOP" case. Re-plan the arc onto the path's END offset
+        # so the corner starts where the robot really is.
+        arc_o_in = self.arc.get('o_in')
+        if arc_o_in is not None and abs(arc_o_in - self.obs_path_end_q) > 0.03:
+            self.get_logger().info(
+                f"Bogen an Pfadende angeglichen: o_in {arc_o_in:.2f} -> "
+                f"{self.obs_path_end_q:.2f} (Hindernis am Geradenende).")
+            self.plan_arc(self.pose[2], o_in_override=self.obs_path_end_q)
 
     def _obs_planner(self):
         from ekf.obstacle_path import ObstaclePathPlanner
@@ -614,6 +672,117 @@ class Round1Controller(Node):
         lx, ly = -math.sin(th), math.cos(th)
         # centre point = robot position shifted by e_lat to the LEFT
         self.start_center_y = (x + e_lat * lx, y + e_lat * ly)
+
+    def obstacles_live_cb(self, msg):
+        """Rohdetektionen (Roboterframe) fuer die Startgerade sammeln.
+
+        Sofort in den MAP-Frame umgerechnet und mit Zeitstempel abgelegt: der
+        Roboter faehrt zwischen zwei Meldungen rund 6 cm, im Roboterframe waere
+        dieselbe Pylone also jedes Mal woanders und liesse sich nicht abstimmen.
+        Nach dem Latch wird der Puffer nicht mehr gebraucht -- dann planen
+        /obstacles und der Hindernispfad.
+        """
+        if self.pose is None or self.geometry_ready():
+            return
+        x, y, th = self.pose
+        c, s = math.cos(th), math.sin(th)
+        jetzt = self.get_clock().now().nanoseconds * 1e-9
+        for o in msg.obstacles:
+            self.live_obs.append((jetzt,
+                                  x + c * o.position.x - s * o.position.y,
+                                  y + s * o.position.x + c * o.position.y,
+                                  int(o.color)))
+
+    def _start_ausweich_y(self, cy, breite):
+        """Ziel-y auf der Startgeraden, wenn ein Hindernis davor steht.
+
+        Gibt ``(ziel_y, info)`` zurueck; ``ziel_y`` ist ``cy``, wenn nichts zu
+        umfahren ist. Braucht KEINE Fahrtrichtung: die Regel lautet im
+        Roboterframe "rot rechts vorbei, gruen links vorbei", und die
+        Startgerade zeigt per Definition nach map +x, links ist also +y.
+
+        Gefahren wird -- wie im Rennbetrieb, siehe ObstaclePathPlanner.
+        pass_offset -- mittig zwischen Klotz und der Wand, an der vorbeigefahren
+        wird. Fuer die gruene Pylone auf (0.95,-0.10) ergibt das y=+0.21, exakt
+        den Wert, den der Hindernispfad spaeter selbst plant.
+        """
+        if not self.start_dodge or self.pose is None:
+            return cy, None
+        x, y, _th = self.pose
+        jetzt = self.get_clock().now().nanoseconds * 1e-9
+        frisch = [o for o in self.live_obs
+                  if jetzt - o[0] <= self.start_dodge_window_s]
+        if not frisch:
+            return self._start_ausweich_halten(x, cy)
+
+        # Kandidaten: voraus im Fenster und seitlich in der Gasse. Der Bereich
+        # reicht bewusst ein Stueck nach HINTEN, damit der Versatz beim
+        # Vorbeifahren gehalten und nicht mitten neben dem Klotz zurueck-
+        # geschnappt wird.
+        kand = [o for o in frisch
+                if -self.start_dodge_back <= (o[1] - x) <= self.start_dodge_look
+                and abs(o[2] - cy) <= self.start_dodge_lane]
+        if not kand:
+            return self._start_ausweich_halten(x, cy)
+
+        # Abstimmen: raeumlich gruppieren und die naechstliegende Gruppe nehmen,
+        # die genug Sichtungen hat. Eine einzelne Fehldetektion lenkt so nicht.
+        kand.sort(key=lambda o: o[1] - x)
+        gruppe, farben = [], []
+        for o in kand:
+            if not gruppe or abs(o[1] - gruppe[0][1]) < 0.12:
+                if not gruppe or abs(o[2] - gruppe[0][2]) < 0.12:
+                    gruppe.append(o)
+                    farben.append(o[3])
+                    continue
+            if len(gruppe) >= self.start_dodge_votes:
+                break
+            gruppe, farben = [o], [o[3]]
+        if len(gruppe) < self.start_dodge_votes:
+            return self._start_ausweich_halten(x, cy)
+
+        ox = sum(o[1] for o in gruppe) / len(gruppe)
+        oy = sum(o[2] for o in gruppe) / len(gruppe)
+        farbe = max(set(farben), key=farben.count)
+
+        y_links = cy + 0.5 * breite
+        y_rechts = cy - 0.5 * breite
+        if farbe == OBST_GRUEN:
+            ziel = 0.5 * ((oy + BLOCK_HALB) + y_links)      # links am Klotz vorbei
+            seite = 'links'
+        elif farbe == OBST_ROT:
+            ziel = 0.5 * (y_rechts + (oy - BLOCK_HALB))     # rechts vorbei
+            seite = 'rechts'
+        else:
+            # Farbe unklar: nicht raten, sondern auf die Seite mit mehr Platz.
+            if (y_links - oy) >= (oy - y_rechts):
+                ziel = 0.5 * ((oy + BLOCK_HALB) + y_links)
+                seite = 'links (Farbe unklar)'
+            else:
+                ziel = 0.5 * (y_rechts + (oy - BLOCK_HALB))
+                seite = 'rechts (Farbe unklar)'
+        ziel = min(max(ziel, y_rechts + self.start_dodge_margin),
+                   y_links - self.start_dodge_margin)
+        info = (ox - x, oy, farbe, seite, ziel, len(gruppe))
+        # Festhalten, bis der Klotz sicher hinter uns ist. Ohne das faellt
+        # der Versatz genau beim Vorbeifahren weg -- dort verliert
+        # /obstacles_live die Pylone, weil unter 0.17 m Laserentfernung
+        # range_min_m greift -- und der Roboter zoege mitten neben dem
+        # Klotz zurueck zur Spurmitte.
+        self._start_halt = (ox, ziel, info)
+        return ziel, info
+
+    def _start_ausweich_halten(self, x, cy):
+        """Den zuletzt bestimmten Versatz halten, solange der Klotz noch
+        nicht passiert ist. Danach zurueck auf die Spurmitte."""
+        halt = self._start_halt
+        if halt is None:
+            return cy, None
+        ox, ziel, info = halt
+        if x > ox + self.start_dodge_back:
+            self._start_halt = None
+            return cy, None
+        return ziel, info
 
     def publish_lap_state(self):
         """Publish [corner_idx, corner_count, lap] for the perception side.
@@ -952,16 +1121,29 @@ class Round1Controller(Node):
 
         # virtual line: through the lane centre, along the start heading (theta~0).
         cx, cy = self.start_center_y
+        # Steht eine Pylone davor, wird die Ziellinie zur Seite geschoben --
+        # gleiche Regel und gleicher Abstand wie spaeter im Hindernispfad.
+        dl, dr = self.wall_dist if self.wall_dist else (float('nan'), float('nan'))
+        breite = dl + dr if self.wall_dist else 1.0
+        ziel_y, info = self._start_ausweich_y(cy, breite)
+        if info is not None and self.start_dodge_aktiv is None:
+            self.get_logger().info(
+                f"Startgerade: Hindernis {info[3]} vorbei "
+                f"({'gruen' if info[2] == OBST_GRUEN else 'rot' if info[2] == OBST_ROT else 'Farbe unklar'}, "
+                f"{info[0]:.2f} m voraus, {info[5]} Sichtungen) -- "
+                f"Ziellinie {cy:+.3f} -> {ziel_y:+.3f} m.")
+        self.start_dodge_aktiv = info
+
         ux, uy = math.cos(0.0), math.sin(0.0)     # start straight = map +x by definition
         nx, ny = -uy, ux                           # left normal
-        d = nx * cx + ny * cy
+        d = nx * cx + ny * ziel_y
         omega = self._stanley_steer(x, y, theta, (nx, ny, d), (ux, uy))
 
         if self.debug:
-            dl, dr = self.wall_dist if self.wall_dist else (float('nan'), float('nan'))
+            aus = f" AUSWEICH->{ziel_y:+.3f}" if info is not None else ""
             self.get_logger().info(
                 f"[START] pos=({x:+.2f},{y:+.2f}) th={math.degrees(theta):+.1f} "
-                f"links={dl:.2f} rechts={dr:.2f} mitte_y={cy:+.3f} "
+                f"links={dl:.2f} rechts={dr:.2f} mitte_y={cy:+.3f}{aus} "
                 f"front={front_dist:.2f} om={omega:+.2f}",
                 throttle_duration_sec=0.3)
 
@@ -1059,26 +1241,29 @@ class Round1Controller(Node):
                 throttle_duration_sec=0.25)
 
         # --- scan pause: stand still at the end of the straight ---------------
-        # Fires at the corner distance OR at the turn-in point, whichever comes
-        # first, once per straight, and ONLY in the first lap(s): from lap 2 the
-        # seat grid is already filled, so stopping would just cost time.
-        if (self.scan_pause and not self.scan_done_this_straight
-                and (self.corner_count // 4) < self.scan_pause_laps):
+        # ALWAYS at the same distance to the front wall, so every scan is taken
+        # from the same geometry. The turn-in is SUPPRESSED until the pause has
+        # happened -- otherwise T_A (which moves with o_out and R) would trigger
+        # first and the stopping distance would vary from corner to corner.
+        # Only in the first lap(s); from lap 2 the seat grid is filled.
+        scan_pending = (self.scan_pause and not self.scan_done_this_straight
+                        and (self.corner_count // 4) < self.scan_pause_laps)
+        if scan_pending:
             corner = self.corners[self.corner_idx]
             front_dist = (corner[0] - x) * tr[0] + (corner[1] - y) * tr[1]
-            if front_dist <= self.scan_front_dist or to_TA <= 0.0:
+            if front_dist <= self.scan_front_dist:
                 self.scan_done_this_straight = True
                 self.scan_pause_t0 = self.now_s()
                 self.state = 'SCAN_PAUSE'
                 self.publish_stop()
                 self.get_logger().info(
                     f"SCAN-HALT Start (Runde {self.corner_count // 4 + 1}): "
-                    f"{self.scan_pause_s:.1f}s, Ecke {front_dist:.2f} m, "
-                    f"to_TA {to_TA:+.2f} m.")
+                    f"{self.scan_pause_s:.1f}s, Frontwand {front_dist:.2f} m "
+                    f"(Soll {self.scan_front_dist:.2f}), to_TA {to_TA:+.2f} m.")
                 return
 
-        # --- turn-in when pose crosses T_A ---
-        if to_TA <= 0.0:
+        # --- turn-in when pose crosses T_A (never before the scan pause) ---
+        if to_TA <= 0.0 and not scan_pending:
             if lateral > 0.6:
                 self.state = 'DONE'
                 self.publish_stop()
@@ -1086,6 +1271,38 @@ class Round1Controller(Node):
                     f"NOTSTOP: Einlenkpunkt seitlich verfehlt (lat={lateral:.2f}). "
                     f"Falsche Ecke? idx {self.corner_idx}.")
                 return
+
+            # Do NOT start the arc while Stanley is still fighting a lateral error:
+            # the steering has ~0.2 s dead time, so a counter-steer commanded just
+            # before turn-in keeps acting INTO the first part of the arc and throws
+            # the heading the wrong way. Wait until the car runs settled -- but only
+            # for a limited distance, then commit anyway (geometry must not run away).
+            om_last = abs(self.last_cmd[1])
+            unsettled = (lateral > self.turn_in_lat_gate
+                         or om_last > self.turn_in_om_gate)
+            overshoot = -to_TA
+            if unsettled and overshoot < self.turn_in_delay_max:
+                self.get_logger().info(
+                    f"Einlenken verzoegert: lat={lateral:.3f} om={om_last:.2f} "
+                    f"(ueber T_A hinaus {overshoot:.2f}/{self.turn_in_delay_max:.2f} m).",
+                    throttle_duration_sec=0.3)
+                v = self._speed_profile(0.0, dsc)     # creep at turn speed
+                self.publish_cmd(v, omega)
+                return
+
+            if unsettled:
+                self.get_logger().warn(
+                    f"Einlenken trotz Unruhe (lat={lateral:.3f}, om={om_last:.2f}) "
+                    f"-- Verzoegerungsfenster {self.turn_in_delay_max:.2f} m aufgebraucht.")
+            if overshoot > 0.03:
+                # we drifted past T_A while settling -> re-plan the arc from HERE
+                keep_o_in = self.arc.get('o_in')
+                self.arc = None
+                self.plan_arc(theta, o_in_override=keep_o_in)
+                self.get_logger().info(
+                    f"Bogen nach {overshoot:.2f} m Verzoegerung neu geplant.")
+                if self.arc is None:
+                    return
             self.state = 'TURN'
             if lateral > self.turn_in_lat_warn:
                 self.get_logger().warn(

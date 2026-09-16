@@ -96,6 +96,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image, LaserScan, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Empty, String
@@ -124,6 +125,12 @@ SCAN_QOS = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
 # lueckenlos gefuellt wird -- gepuffert wird dann in der Node, nach Zeitstempel.
 IMAGE_QOS = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=5,
                        reliability=ReliabilityPolicy.BEST_EFFORT)
+# Die Odometrie traegt die Bewegungskompensation. Hier ZUVERLAESSIG und mit
+# Tiefe, denn eine Luecke im Posenpuffer kostet die Korrektur fuer alle Scans,
+# die in die Luecke fallen. /ekf/odom sendet mit dem Standardprofil (RELIABLE),
+# ein RELIABLE-Abonnent passt also dazu.
+ODOM_QOS = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=50,
+                      reliability=ReliabilityPolicy.RELIABLE)
 
 CSV_HEADER = [
     'stamp_sec', 'idx', 'angle_deg', 'range_m', 'x_m', 'y_m', 'z_m',
@@ -297,6 +304,27 @@ class LidarPixelMapper(Node):
         # geraten: der Scan wird dann verworfen statt falsch eingefaerbt. Auf
         # false nur zum Debuggen, wenn man die schlechte Zuordnung sehen will.
         self.declare_parameter('sync_drop', True)
+        # BEWEGUNGSKOMPENSATION. Das Bild zum Scan ist im Fahrbetrieb 100 bis
+        # 700 ms alt (Kamera faellt unter Last von 15 auf 3 Hz). In dieser Zeit
+        # hat sich der Roboter gedreht und bewegt -- der Abgriff-Azimut aus dem
+        # Lidarstrahl zeigt dann im BILD woanders hin. Gemessen in Lauf 20:
+        # Farbausbeute auf einer Pylone 38 Prozent im Stand, 6 Prozent ab
+        # 0.5 rad/s, 2 Prozent ab 1 rad/s. Eine Pylone ist bei 1.6 m nur 1.6
+        # Grad breit, 0.5 rad/s mal 0.3 s sind 8.6 Grad -- also glatt daneben.
+        # Hier werden die Lidarpunkte deshalb in den Roboter-Frame ZUM
+        # BILDZEITPUNKT zurueckgerechnet, bevor sie projiziert werden. Die
+        # veroeffentlichte Punktwolke bleibt unveraendert bei der Scangeometrie.
+        self.declare_parameter('motion_compensation', True)
+        self.declare_parameter('odom_topic', '/ekf/odom')
+        # Wie weit die Pose extrapoliert werden darf, wenn der Puffer den
+        # Bildzeitpunkt nicht ganz abdeckt. 0 = gar nicht (dann keine Korrektur).
+        self.declare_parameter('pose_extrapolate_s', 0.05)
+        self.declare_parameter('pose_buffer_len', 400)
+        # Lidar im base_link: der Punkt, um den sich das Lidar beim Gieren
+        # dreht. Nur fuer den kleinen Translationsanteil r*dtheta noetig.
+        self.declare_parameter('lidar_offset_x', 0.110)
+        self.declare_parameter('lidar_offset_y', 0.0)
+        self.declare_parameter('lidar_yaw_deg', 180.0)
         # Alle n Sekunden eine Zeile mit Bildrate, Scanrate und dem tatsaechlich
         # erreichten Zeitversatz. Ohne die sieht man im Feld nicht, ob die
         # Zuordnung gerade gut ist. 0 schaltet sie ab.
@@ -388,6 +416,14 @@ class LidarPixelMapper(Node):
         self.sync_stats = [0, 0]        # [gefaerbt, wegen Zeitversatz verworfen]
         self.n_images = 0
         self.versatz_log = collections.deque(maxlen=300)
+        # Posenpuffer fuer die Bewegungskompensation: (stempel, x, y, yaw).
+        # 400 Eintraege sind bei 50 Hz acht Sekunden -- reicht auch fuer die
+        # seltenen 1.9-s-Ausreisser im Bildversatz.
+        self.pose_buf = collections.deque(
+            maxlen=max(2, int(self.get_parameter('pose_buffer_len').value)))
+        self.pose_lock = threading.Lock()
+        self.komp_log = collections.deque(maxlen=300)   # (|dyaw| rad, |dt| m)
+        self.n_komp_ohne_pose = 0
         self._stats_letzte = None
         self._naechster_slot = 0.0
         self._letzter_scan = 0.0
@@ -405,11 +441,17 @@ class LidarPixelMapper(Node):
         # "letzte Bild" war entsprechend alt.
         self.cbg_scan = MutuallyExclusiveCallbackGroup()
         self.cbg_image = MutuallyExclusiveCallbackGroup()
+        # Eigene Gruppe fuer die Odometrie: on_scan rechnet rund 30 ms, und der
+        # Posenpuffer darf in dieser Zeit keine Luecke bekommen.
+        self.cbg_odom = MutuallyExclusiveCallbackGroup()
 
         self.create_subscription(LaserScan, self.scan_topic, self.on_scan,
                                  SCAN_QOS, callback_group=self.cbg_scan)
         self.create_subscription(Image, self.image_topic, self.on_image,
                                  IMAGE_QOS, callback_group=self.cbg_image)
+        self.create_subscription(Odometry, self.get_parameter('odom_topic').value,
+                                 self.on_odom, ODOM_QOS,
+                                 callback_group=self.cbg_odom)
         self.create_subscription(Empty, '/camera_lidar/capture', self.on_capture, 10)
         # Nach einem "save" in der Kalibrier-Node hier neu einlesen, statt die
         # Node neu starten zu muessen.
@@ -522,6 +564,10 @@ class LidarPixelMapper(Node):
             stand = (jetzt, self.n_images, self.sync_stats[0], self.sync_stats[1],
                      self.n_rate_skip)
             versatz = list(self.versatz_log)
+        with self.pose_lock:
+            komp = list(self.komp_log)
+            ohne_pose = self.n_komp_ohne_pose
+            self.n_komp_ohne_pose = 0
         if self._stats_letzte is None:
             self._stats_letzte = stand
             return
@@ -546,6 +592,19 @@ class LidarPixelMapper(Node):
             v = np.abs(np.asarray(versatz)) * 1000.0
             text += (f' | Versatz Bild-Scan: med {np.median(v):.0f} ms, '
                      f'p90 {np.percentile(v, 90):.0f} ms, max {v.max():.0f} ms')
+        if not self.get_parameter('motion_compensation').value:
+            text += ' | Bewegungskompensation AUS'
+        elif komp:
+            k = np.asarray(komp)
+            gier = np.degrees(k[:, 0])
+            text += (f' | Kompensiert: Gier med {np.median(gier):.1f} Grad, '
+                     f'p90 {np.percentile(gier, 90):.1f} Grad, max {gier.max():.1f} Grad; '
+                     f'Versatz med {np.median(k[:, 1]) * 100:.0f} cm')
+            if ohne_pose:
+                text += f'; {ohne_pose} Scans ohne Pose (unkorrigiert)'
+        else:
+            text += (' | Bewegungskompensation ohne Wirkung: keine Pose empfangen '
+                     f'({self.get_parameter("odom_topic").value} da?)')
         self.get_logger().info(text)
 
     def _bild_zum_scan(self, scan_stamp):
@@ -567,6 +626,75 @@ class LidarPixelMapper(Node):
             kandidaten = list(self.image_buf)
         stempel, bild = min(kandidaten, key=lambda e: abs(e[0] - scan_stamp))
         return bild, stempel, stempel - scan_stamp
+
+    # ---------------------------------------------------------------- #
+    # Bewegungskompensation
+    # ---------------------------------------------------------------- #
+    def on_odom(self, msg: Odometry):
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        with self.pose_lock:
+            self.pose_buf.append((_stamp_sec(msg.header.stamp),
+                                  msg.pose.pose.position.x,
+                                  msg.pose.pose.position.y, yaw))
+
+    def _pose_bei(self, t, puffer):
+        """Pose zum Zeitpunkt t, linear interpoliert. None, wenn zu weit weg.
+
+        Der Gierwinkel wird ueber die DIFFERENZ interpoliert, sonst springt er
+        beim Ueberlauf von +pi nach -pi mitten in der Kurve.
+        """
+        if len(puffer) < 2:
+            return None
+        rand = float(self.get_parameter('pose_extrapolate_s').value)
+        if t < puffer[0][0] - rand or t > puffer[-1][0] + rand:
+            return None
+        # Puffer ist nach Zeit sortiert (Odometrie kommt monoton an).
+        lo, hi = 0, len(puffer) - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if puffer[mid][0] <= t:
+                lo = mid
+            else:
+                hi = mid
+        t0, x0, y0, th0 = puffer[lo]
+        t1, x1, y1, th1 = puffer[hi]
+        if t1 <= t0:
+            return x0, y0, th0
+        f = (t - t0) / (t1 - t0)
+        dth = math.atan2(math.sin(th1 - th0), math.cos(th1 - th0))
+        return x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, th0 + dth * f
+
+    def _auf_bildzeit(self, pts, scan_stamp, image_stamp):
+        """Lidarpunkte vom Scan- in den Lidar-Frame zum BILDzeitpunkt drehen.
+
+        Der Abgriff im Bild haengt allein am Azimut (``phi`` aus ``project``).
+        Zwischen Bild und Scan hat sich der Roboter aber gedreht und bewegt, das
+        Bild zeigt die Welt also aus einer anderen Lage. Wer den Azimut aus dem
+        Scan nimmt, greift entsprechend daneben ab.
+
+        Rueckgabe ``(pts_bild, dyaw, dtrans)``. Fehlt die Pose, kommen die
+        unveraenderten Punkte und ``(0.0, 0.0)`` zurueck -- die Node laeuft dann
+        wie vorher, statt mit geratenen Werten zu rechnen.
+        """
+        if not self.get_parameter('motion_compensation').value:
+            return pts, 0.0, 0.0
+        with self.pose_lock:
+            puffer = list(self.pose_buf)
+        p_s = self._pose_bei(scan_stamp, puffer)
+        p_i = self._pose_bei(image_stamp, puffer)
+        if p_s is None or p_i is None:
+            self.n_komp_ohne_pose += 1
+            return pts, 0.0, 0.0
+
+        out, dth, dtrans = auf_bildzeit(
+            pts, p_s, p_i,
+            float(self.get_parameter('lidar_offset_x').value),
+            float(self.get_parameter('lidar_offset_y').value),
+            math.radians(float(self.get_parameter('lidar_yaw_deg').value)))
+        self.komp_log.append((abs(dth), dtrans))
+        return out, dth, dtrans
 
     def on_capture(self, _msg: Empty):
         self.capture_pending = True
@@ -699,7 +827,13 @@ class LidarPixelMapper(Node):
                                      self._sample_z(rho))
         pts, angles, rho = pts[keep], angles[keep], rho[keep]
 
-        u, v, theta, phi, in_fov = project(self.calib, pts)
+        # Projiziert wird die BILDZEIT-Geometrie, veroeffentlicht die des Scans:
+        # das Bild zeigt die Welt aus der Lage von vor bis zu 0.7 s, die Wolke
+        # soll aber dort liegen, wo das Lidar gerade gemessen hat.
+        pts_bild, _dyaw, _dtrans = self._auf_bildzeit(pts, scan_stamp, image_stamp)
+        u, v, theta, phi, in_fov = project(self.calib, pts_bild)
+        rho_bild = np.hypot(pts_bild[:, 0] - self.calib.cam_x,
+                            pts_bild[:, 1] - self.calib.cam_y)
         height, width = image.shape[:2]
         on_image = in_fov & (u >= 0) & (u < width) & (v >= 0) & (v < height)
         if not on_image.any():
@@ -709,6 +843,7 @@ class LidarPixelMapper(Node):
             return
 
         idx, pts, angles, rho = idx[on_image], pts[on_image], angles[on_image], rho[on_image]
+        rho_bild = rho_bild[on_image]
         u, v, theta, phi = u[on_image], v[on_image], theta[on_image], phi[on_image]
 
         # Bandbreite in px: +-sample_band_m Pylonenhoehe, aus der Entfernung
@@ -717,7 +852,7 @@ class LidarPixelMapper(Node):
         band_m = self.get_parameter('sample_band_m').value
         band_px = None
         if band_m > 0.0:
-            band_px = self.calib.focal_px * np.arctan(band_m / np.maximum(rho, 1e-3))
+            band_px = self.calib.focal_px * np.arctan(band_m / np.maximum(rho_bild, 1e-3))
 
         zone_low = self.get_parameter('sample_zone_low_m').value
         zone_high = self.get_parameter('sample_zone_high_m').value
@@ -727,10 +862,10 @@ class LidarPixelMapper(Node):
             fix_in = float(self.get_parameter('sample_r_fix_in').value)
             fix_out = float(self.get_parameter('sample_r_fix_out').value)
             if fix_in > 0.0 and fix_out > fix_in:
-                r_innen = np.full(rho.shape, fix_in)
-                r_aussen = np.full(rho.shape, fix_out)
+                r_innen = np.full(rho_bild.shape, fix_in)
+                r_aussen = np.full(rho_bild.shape, fix_out)
             else:
-                r_innen, r_aussen = self._zone_radien(rho, zone_low, zone_high)
+                r_innen, r_aussen = self._zone_radien(rho_bild, zone_low, zone_high)
             r_min = float(self.get_parameter('sample_r_min_px').value)
             if r_min > 0.0:
                 r_innen = np.maximum(r_innen, r_min)
@@ -766,7 +901,7 @@ class LidarPixelMapper(Node):
         if self.get_parameter('publish_cloud').value:
             self._publish_cloud(msg.header, pts, bgr, labels)
         if self.get_parameter('debug').value and self.get_parameter('publish_debug_image').value:
-            self._publish_debug(image, u, v, labels, bgr, rho)
+            self._publish_debug(image, u, v, labels, bgr, rho_bild)
 
         self._write_csv(scan_stamp, idx, angles, np.linalg.norm(pts[:, :2], axis=1),
                         pts, u, v, theta, phi, bgr, hsv, labels)
@@ -1212,6 +1347,55 @@ def _stamp_sec(stamp) -> float:
     return stamp.sec + stamp.nanosec * 1e-9
 
 
+def auf_bildzeit(pts, pose_scan, pose_bild, off_x=0.110, off_y=0.0,
+                 lidar_yaw=math.pi):
+    """Punkte aus dem Lidar-Frame der Scanzeit in den der Bildzeit drehen.
+
+    ``pose_*`` sind ``(x, y, yaw)`` von base_link in der Welt. ``off_*`` ist der
+    Lidar-Ursprung in base_link, ``lidar_yaw`` seine Verdrehung (Sensor haengt
+    um 180 Grad gedreht, daher der Default).
+
+    Herleitung: der Punkt steht in der Welt fest.
+        W        = o_s + R(a_s) * P_scan
+        P_bild   = R(a_i)^T * (W - o_i)
+                 = R(a_s - a_i) * P_scan + R(a_i)^T * (o_s - o_i)
+    mit ``o`` dem Lidar-Ursprung in der Welt und ``a = yaw + lidar_yaw``. Der
+    Versatz base_link -> Lidar dreht beim Gieren mit, deshalb steckt er in ``o``
+    und nicht einfach in der base_link-Verschiebung.
+
+    Rueckgabe ``(pts_bild, dyaw, dtrans)``; ``dyaw`` ist die Drehung des
+    Roboters zwischen Bild und Scan, ``dtrans`` der Betrag der Verschiebung im
+    Lidar-Frame.
+    """
+    xs, ys, th_s = pose_scan
+    xi, yi, th_i = pose_bild
+    dth = math.atan2(math.sin(th_s - th_i), math.cos(th_s - th_i))
+
+    ox_s = xs + math.cos(th_s) * off_x - math.sin(th_s) * off_y
+    oy_s = ys + math.sin(th_s) * off_x + math.cos(th_s) * off_y
+    ox_i = xi + math.cos(th_i) * off_x - math.sin(th_i) * off_y
+    oy_i = yi + math.sin(th_i) * off_x + math.cos(th_i) * off_y
+
+    # R(a_i)^T * R(a_s) = R(a_s - a_i), und a_s - a_i ist genau dyaw: dreht sich
+    # der Roboter zwischen Bild und Scan um +dyaw, dann lag derselbe Weltpunkt
+    # im Bild um +dyaw weiter herum.
+    a_i = th_i + lidar_yaw
+    ca, sa = math.cos(dth), math.sin(dth)
+
+    wx, wy = ox_s - ox_i, oy_s - oy_i
+    ci, si = math.cos(a_i), math.sin(a_i)
+    tx = ci * wx + si * wy
+    ty = -si * wx + ci * wy
+
+    pts = np.asarray(pts, dtype=float)
+    out = np.empty_like(pts)
+    out[:, 0] = ca * pts[:, 0] - sa * pts[:, 1] + tx
+    out[:, 1] = sa * pts[:, 0] + ca * pts[:, 1] + ty
+    if out.shape[1] > 2:
+        out[:, 2] = pts[:, 2]
+    return out, dth, math.hypot(tx, ty)
+
+
 def _packaged_default() -> str:
     try:
         from ament_index_python.packages import get_package_share_directory
@@ -1224,10 +1408,11 @@ def _packaged_default() -> str:
 def main(args=None):
     rclpy.init(args=args)
     node = LidarPixelMapper()
-    # Drei Threads: Scan-Rechnung, Bildannahme und die kleinen Dienst-Topics
-    # laufen nebeneinander. Mit rclpy.spin() (ein Thread) blockierte die
-    # Scan-Rechnung die Bildannahme, wodurch das Bild zum Scan alterte.
-    executor = MultiThreadedExecutor(num_threads=3)
+    # Vier Threads: Scan-Rechnung, Bildannahme, Odometrie und die kleinen
+    # Dienst-Topics laufen nebeneinander. Mit rclpy.spin() (ein Thread)
+    # blockierte die Scan-Rechnung die Bildannahme, wodurch das Bild zum Scan
+    # alterte -- dasselbe wuerde sonst dem Posenpuffer passieren.
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
