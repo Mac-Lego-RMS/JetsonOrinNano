@@ -197,6 +197,13 @@ class Round1Controller(Node):
         # sonst faehrt der erste Zentimeter mit halbem Einschlag.
         'ausparken_lenk_wartezeit': ('ausparken_lenk_wartezeit', 0.6, float),
         'ausparken_zug_timeout':  ('ausparken_zug_timeout',  15.0, float),
+        # Wieviel der ESP am Sollweg fehlen darf, bevor eine
+        # Zeitueberschreitung als Fehler gilt. Der ESP meldet Status 1, wenn
+        # er nicht einschwingt -- die letzten Millimeter schafft er oft nicht,
+        # weil der Stellwert dort unter die Losbrechschwelle faellt. Fuer uns
+        # zaehlt der gefahrene Weg, nicht das Einschwingen: 2 mm bei 8 mm
+        # Reserve sind kein Grund, die Sequenz abzubrechen.
+        'ausparken_weg_toleranz_cm': ('ausparken_weg_toleranz_cm', 1.0, float),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
     }
 
@@ -240,7 +247,12 @@ class Round1Controller(Node):
         # Ohne Begrenzung steht der Stellwert bei mehreren hundert Grad
         # Sollweg bis kurz vors Ziel am Anschlag -- in einer 26 cm langen
         # Luecke ist das zu schnell.
-        self.declare_parameter('ausparken_pid', [4.0, 300.0], arr)
+        # 4 = maxduty, 8 = minduty. minduty ist der wichtige Wert: ohne ihn
+        # faellt der Stellwert auf den letzten Millimetern unter die
+        # Losbrechschwelle (pwm_deadband 0.076, also rund 78 duty) und das
+        # Rad steht, obwohl der Regler noch etwas will. Der ESP laeuft dann
+        # in seine Zeitgrenze.
+        self.declare_parameter('ausparken_pid', [4.0, 300.0, 8.0, 90.0], arr)
         self.declare_parameter('ausparken_pid_nachher', [4.0, 1023.0], arr)
 
         self._load_params()
@@ -1057,16 +1069,32 @@ class Round1Controller(Node):
             quittung = self.ausp_move_done
             if quittung is not None and quittung[0] >= self.ausp_gesendet_t:
                 _t, _mid, status, _pos = quittung
-                soll = bahn((0.0, 0.0, 0.0), [(lenk, cm)])[-1][0][2]
+                plan = bahn((0.0, 0.0, 0.0), [(lenk, cm)])[-1][0]
+                soll = plan[2]
+                erwartet = math.hypot(plan[0], plan[1])
                 ist = wrap(theta - self.ausp_theta0)
                 gefahren = math.hypot(x - self.ausp_pose0[0],
                                       y - self.ausp_pose0[1])
-                if status != 0:
+                # Gegen die SEHNE vergleichen, nicht gegen die Bogenlaenge:
+                # ueber Grund misst die Pose den direkten Abstand, und bei
+                # 37 cm Vollkreisbogen sind das schon 2 cm Unterschied.
+                fehlt = abs(gefahren - erwartet)
+
+                if status == 1 and fehlt <= self.ausparken_weg_toleranz_cm / 100.0:
+                    # Der ESP hat nicht eingeschwungen, ist aber weit genug
+                    # gekommen. Fuer uns zaehlt der Weg.
+                    self.get_logger().warn(
+                        "Ausparken Zug %d: ESP meldet Zeitueberschreitung, "
+                        "Weg stimmt aber (%.1f statt %.1f cm) -- weiter. "
+                        "Wenn das bei jedem Zug passiert, minduty erhoehen."
+                        % (self.ausp_index + 1, gefahren * 100, erwartet * 100))
+                elif status != 0:
                     # MOVE_OK/TIMEOUT/ABORTED aus esp_serial_bridge.py. Status 2
                     # heisst: irgendetwas hat einen Motorbefehl geschickt und
                     # die Fahrt damit abgeloest -- der haeufigste Fall ist eine
                     # Bruecke ohne die move-Sperre in _velocity_control.
-                    bedeutung = {1: "Zeitueberschreitung im ESP",
+                    bedeutung = {1: "Zeitueberschreitung im ESP, und der Weg "
+                                    "fehlt auch",
                                  2: "von einem Motorbefehl abgeloest -- laeuft "
                                     "die Bruecke mit der move-Sperre?"}
                     self.get_logger().error(
@@ -1074,15 +1102,16 @@ class Round1Controller(Node):
                         "%.1f cm ueber Grund statt %.1f cm."
                         % (self.ausp_index + 1, status,
                            bedeutung.get(status, "unbekannt"),
-                           gefahren * 100, abs(cm)))
+                           gefahren * 100, erwartet * 100))
                     self._ausparken_abbruch(
                         "Zug %d quittiert mit Status %d" % (self.ausp_index + 1, status))
                     return
-                self.get_logger().info(
-                    "Ausparken Zug %d fertig: Kurs %+.1f grad (geplant "
-                    "%+.1f), %.1f cm ueber Grund (geplant %.1f)."
-                    % (self.ausp_index + 1, math.degrees(ist),
-                       math.degrees(soll), gefahren * 100, abs(cm)))
+                else:
+                    self.get_logger().info(
+                        "Ausparken Zug %d fertig: Kurs %+.1f grad (geplant "
+                        "%+.1f), %.1f cm ueber Grund (geplant %.1f)."
+                        % (self.ausp_index + 1, math.degrees(ist),
+                           math.degrees(soll), gefahren * 100, erwartet * 100))
                 self.ausp_index += 1
                 self.ausp_phase = 'lenken'
                 self.ausp_lenk_gesendet = False

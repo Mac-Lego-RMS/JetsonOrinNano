@@ -8,6 +8,7 @@ Uhr, Logger und Publisher. Geprueft wird der ABLAUF: erst lenken, dann fahren,
 auf die Quittung warten, Zug fuer Zug -- und was passiert, wenn etwas schief
 geht. Genau das soll man nicht am Roboter herausfinden.
 """
+import math
 import types
 
 from ekf.round1_controller_node import Round1Controller
@@ -55,6 +56,7 @@ class Attrappe:
 
     def __init__(self, **kw):
         self.t = 100.0
+        self.x = self.y = self.th = 0.0     # Attrappe der Pose
         self.state = 'AUSPARK_BUTTON'
         self.require_button = False
         self.button_pressed = False
@@ -68,6 +70,7 @@ class Attrappe:
         self.ausparken_richtung_timeout = 8.0
         self.ausparken_lenk_wartezeit = 0.6
         self.ausparken_zug_timeout = 15.0
+        self.ausparken_weg_toleranz_cm = 1.0
         self.ausp_stimmen = ['CW'] * 5
         self.ausp_letzter_grund = 'links 0.14 m, rechts 0.87 m'
         self.ausp_schritte = None
@@ -100,19 +103,28 @@ class Attrappe:
     # --- Hilfen fuer die Tests ---
     def takt(self, n=1, dt=0.1):
         for _ in range(n):
-            self._ausparken_schritt(0.0, 0.0, 0.0)
+            self._ausparken_schritt(self.x, self.y, self.th)
             self.t += dt
 
     def quittiere(self, status=0, pos_zehntelgrad=0):
         self.ausparken_move_done_cb(
             types.SimpleNamespace(data=[1, status, pos_zehntelgrad]))
 
-    def durchfahren(self, status=0, grenze=4000):
+    def durchfahren(self, status=0, weg_stimmt=True, grenze=4000):
+        """Die Folge abfahren. weg_stimmt=True laesst die Attrappen-Pose dem
+        Plan folgen -- dann ist eine Zeitueberschreitung des ESP harmlos."""
         for _ in range(grenze):
             vorher = len(self.pub_move.werte)
-            self._ausparken_schritt(0.0, 0.0, 0.0)
+            self._ausparken_schritt(self.x, self.y, self.th)
             self.t += 0.1
             if len(self.pub_move.werte) > vorher:
+                if weg_stimmt:
+                    lenk, cm = self.ausp_schritte[self.ausp_index]
+                    ex, ey, eth = A.bahn((0.0, 0.0, 0.0), [(lenk, cm)])[-1][0]
+                    c, si = math.cos(self.th), math.sin(self.th)
+                    self.x += c * ex - si * ey
+                    self.y += si * ex + c * ey
+                    self.th += eth
                 self.t += 0.5
                 self.quittiere(status)
             if self.state in ('WAIT_INPUTS', 'DONE'):
@@ -220,10 +232,28 @@ pruefe('nur_ausparken haelt an', f.state == 'DONE')
 pruefe('nur_ausparken faehrt trotzdem die ganze Folge',
        len(f.pub_move.werte) == len(f.ausp_schritte))
 
+# Status 2 heisst: etwas anderes hat den Motor uebernommen. Immer fatal.
 f = Attrappe()
-f.durchfahren(status=1)                      # 1 = Zeitueberschreitung im ESP
-pruefe('schlechter Status bricht ab', f.state == 'DONE')
+f.durchfahren(status=2)
+pruefe('abgeloeste Fahrt bricht ab', f.state == 'DONE')
 pruefe('Abbruch nach dem ERSTEN schlechten Zug', len(f.pub_move.werte) == 1)
+
+# Status 1 heisst nur "nicht eingeschwungen". Entscheidend ist der Weg.
+f = Attrappe()
+f.durchfahren(status=1, weg_stimmt=True)
+pruefe('Zeitueberschreitung mit richtigem Weg laeuft weiter',
+       f.state == 'WAIT_INPUTS' and len(f.pub_move.werte) == len(f.ausp_schritte),
+       '%d Fahrten' % len(f.pub_move.werte))
+pruefe('... wird aber bei jedem Zug gewarnt',
+       len([t for t in f._log.stufen('warn') if 'Zeitueberschreitung' in t])
+       == len(f.ausp_schritte))
+pruefe('... und die Warnung nennt den Ausweg',
+       any('minduty' in t for t in f._log.stufen('warn')))
+
+f = Attrappe()
+f.durchfahren(status=1, weg_stimmt=False)
+pruefe('Zeitueberschreitung OHNE Weg bricht ab', f.state == 'DONE')
+pruefe('... nach dem ersten Zug', len(f.pub_move.werte) == 1)
 
 print('\nHaenger')
 f = Attrappe()
