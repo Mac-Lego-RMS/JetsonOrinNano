@@ -50,6 +50,9 @@ class SpeedCalib(Node):
 
     def js_cb(self, msg):
         if msg.velocity:
+            # MOVE_DONE und PROGRESS_RSP der Bruecke lassen velocity leer.
+            if not msg.velocity:
+                return
             self.vel_rad = float(msg.velocity[0])
 
     def publish_pwm(self, pwm):

@@ -122,6 +122,16 @@ class EKFNode(Node):
         self._drain(t)
 
     def enc_cb(self, msg):
+        # Die Bruecke schickt auf diesem Topic DREI Sorten Nachrichten. Nur
+        # CMD_TELEMETRY traegt eine Geschwindigkeit; MOVE_DONE und
+        # PROGRESS_RSP kennen nur die Position und lassen velocity absichtlich
+        # leer ("nicht gemessen" statt einer hingeschriebenen Null, siehe
+        # _publish_joint in esp_serial_bridge.py). Waehrend einer
+        # Positionsfahrt kommen genau solche Nachrichten -- ohne diese Zeile
+        # stirbt der Knoten an der ersten davon, und damit die ganze
+        # Zustandsschaetzung.
+        if not msg.velocity:
+            return
         t = stamp_to_sec(msg.header.stamp)
         v = msg.velocity[0] * self.r_eff     # rad/s -> m/s
         self._push(t, 'enc', v)

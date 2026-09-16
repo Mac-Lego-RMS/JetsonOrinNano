@@ -143,6 +143,9 @@ class DriveSpeedTest(Node):
         # ueberhaupt eine mitbringt (MOVE_DONE/PROGRESS tun das nicht).
         if (not self.finished and msg.velocity and self._measuring()
                 and index < len(msg.velocity)):
+            # MOVE_DONE und PROGRESS_RSP tragen nur die Position.
+            if index >= len(msg.velocity):
+                return
             self.samples.append(float(msg.velocity[index]))
 
     def _stop(self) -> None:
