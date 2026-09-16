@@ -22,11 +22,22 @@ def pruefe(name, bedingung, zusatz=''):
 
 
 class Sammler:
-    def __init__(self):
+    """Publisher-Attrappe. Schreibt zusaetzlich in ein gemeinsames Protokoll,
+    damit die REIHENFOLGE ueber alle Topics hinweg pruefbar ist."""
+
+    def __init__(self, name='?', protokoll=None, abonnenten=1):
+        self.name = name
         self.werte = []
+        self.protokoll = protokoll if protokoll is not None else []
+        self.abonnenten = abonnenten
 
     def publish(self, msg):
         self.werte.append(msg)
+        wert = msg.data if not isinstance(msg.data, (list, tuple)) else list(msg.data)
+        self.protokoll.append((self.name, wert))
+
+    def get_subscription_count(self):
+        return self.abonnenten
 
 
 class Logbuch:
@@ -63,7 +74,7 @@ class Attrappe:
         self.nur_ausparken = False
         self.ausparken_richtung_invertieren = False
         self.ausparken_schritte = list(A.SCHRITTE_STANDARD)
-        self.ausparken_pid = [4.0, 300.0]
+        self.ausparken_pid = [4.0, 140.0, 8.0, 90.0]   # wie der echte Standard
         self.ausparken_pid_nachher = [4.0, 1023.0]
         self.ausparken_scans = 5
         self.ausparken_sektor_grad = 20.0
@@ -83,10 +94,11 @@ class Attrappe:
         self.ausp_move_done = None
         self.ausp_theta0 = 0.0
         self.ausp_pose0 = None
-        self.pub_steer = Sammler()
-        self.pub_move = Sammler()
-        self.pub_pid = Sammler()
-        self.pub_motor = Sammler()
+        self.protokoll = []
+        self.pub_steer = Sammler('steer', self.protokoll)
+        self.pub_move = Sammler('move', self.protokoll)
+        self.pub_pid = Sammler('pid', self.protokoll)
+        self.pub_motor = Sammler('motor', self.protokoll)
         self.stopps = 0
         self._log = Logbuch()
         self.__dict__.update(kw)
@@ -156,6 +168,29 @@ pruefe('Abbruch stellt die Regelparameter zurueck',
        [list(m.data) for m in f.pub_pid.werte] == [[4.0, 1023.0]])
 pruefe('Abbruch wird als Fehler protokolliert', f._log.stufen('error'))
 
+# Solange die Bruecke die Topics nicht abonniert hat, darf nichts rausgehen:
+# die ersten Nachrichten auf einer frischen Verbindung verschluckt die
+# DDS-Erkennung, und das waeren ausgerechnet maxduty und der erste Lenkbefehl.
+f = Attrappe()
+f.pub_steer.abonnenten = 0
+f.takt(4)
+pruefe('ohne Abonnent wird nicht geplant',
+       f.state == 'AUSPARK_RICHTUNG' and not f.pub_pid.werte
+       and not f.pub_steer.werte)
+f.pub_steer.abonnenten = 1
+f.takt(1)
+pruefe('sobald die Bruecke da ist, geht es weiter',
+       f.state == 'AUSPARK_FAHREN' and len(f.pub_pid.werte) == 2)
+
+f = Attrappe()
+f.pub_move.abonnenten = 0
+f.takt(2)
+f.t += f.ausparken_richtung_timeout + 1.0
+f.takt(1)
+pruefe('bleibt die Bruecke weg, wird abgebrochen', f.state == 'DONE')
+pruefe('... und die Meldung nennt das fehlende Topic',
+       'move' in f._log.text() and 'esp_serial_bridge' in f._log.text())
+
 print('\nPlanung')
 f = Attrappe()
 f.takt(2)
@@ -165,7 +200,7 @@ pruefe('CW spiegelt die Tabelle nach rechts',
 pruefe('Strecken bleiben unveraendert',
        [cm for _l, cm in f.ausp_schritte] == list(A.SCHRITTE_STANDARD[1::2]))
 pruefe('Regelparameter werden vor der Sequenz gesetzt',
-       [list(m.data) for m in f.pub_pid.werte] == [[4.0, 300.0]])
+       [list(m.data) for m in f.pub_pid.werte] == [[4.0, 140.0], [8.0, 90.0]])
 pruefe('Trockenlauf steht im Log', 'Trockenlauf' in f._log.text())
 
 f2 = Attrappe(ausp_stimmen=['CCW'] * 5)
@@ -219,8 +254,23 @@ pruefe('ueber die ganze Sequenz nur der Schlusshalt', f.stopps == 1,
 pruefe('vollstaendige Sequenz laeuft durch',
        len(f.pub_move.werte) == len(f.ausp_schritte),
        '%d Fahrten' % len(f.pub_move.werte))
-pruefe('jede Fahrt hat ihre Lenkung davor',
-       len(f.pub_steer.werte) == len(f.ausp_schritte))
+# Der Lenkbefehl wird waehrend der Wartezeit wiederholt, also nicht zaehlen,
+# sondern die Reihenfolge pruefen: vor JEDEM move muss zuletzt der Lenkwert
+# genau dieses Zuges gesendet worden sein.
+zuletzt_gelenkt, gesehen = None, []
+for name, wert in f.protokoll:
+    if name == 'steer':
+        zuletzt_gelenkt = wert
+    elif name == 'move':
+        gesehen.append(zuletzt_gelenkt)
+pruefe('vor jeder Fahrt steht der richtige Lenkwert',
+       all(a is not None and abs(a - b) < 1e-6
+           for a, b in zip(gesehen, [l for l, _cm in f.ausp_schritte]))
+       and len(gesehen) == len(f.ausp_schritte),
+       '%s' % ['%+.0f' % g for g in gesehen])
+pruefe('die Regelparameter kommen VOR der ersten Fahrt',
+       [n for n, _w in f.protokoll].index('pid')
+       < [n for n, _w in f.protokoll].index('move'))
 pruefe('danach weiter zum Rennen', f.state == 'WAIT_INPUTS')
 pruefe('Taster gilt als gedrueckt', f.button_pressed is True)
 pruefe('Regelparameter am Ende zurueckgestellt',

@@ -103,21 +103,49 @@ r = A.richtung_aus_scan(pts)
 pruefe('Magenta-Waende vorn/hinten bleiben draussen',
        r['links_n'] == 0 and r['rechts_n'] == 0)
 
+print('\nFlaechen')
+# Der Trennachsensatz muss den Fall koennen, der Eckenvergleiche schlagen
+# laesst: ein duenner Balken quer durch den Roboter, ohne dass eine Ecke von
+# beiden im jeweils anderen liegt. Genau diese Lage entsteht beim Ausparken.
+roboter = A.rechteck(-0.05, 0.12, -0.055, 0.055)
+quer = A.rechteck(0.02, 0.04, -0.20, 0.20)
+pruefe('Balken quer durch den Roboter wird erkannt',
+       A.ueberlappen(roboter, quer))
+pruefe('keine Ecke liegt dabei im anderen Rechteck',
+       not any(-0.05 <= px <= 0.12 and -0.055 <= py <= 0.055 for px, py in quer)
+       and not any(0.02 <= px <= 0.04 and -0.20 <= py <= 0.20 for px, py in roboter))
+daneben = A.rechteck(0.30, 0.32, -0.20, 0.20)
+pruefe('sauber getrennt ist nicht ueberlappend',
+       not A.ueberlappen(roboter, daneben))
+pruefe('Abstand stimmt', abs(A.abstand(roboter, daneben) - 0.18) < 1e-9,
+       '%.3f m' % A.abstand(roboter, daneben))
+pruefe('Ueberlappung hat Abstand 0', A.abstand(roboter, quer) == 0.0)
+beruehrt = A.rechteck(0.12, 0.14, -0.20, 0.20)
+pruefe('Beruehrung zaehlt nicht als Ueberlappung',
+       not A.ueberlappen(roboter, beruehrt)
+       and A.abstand(roboter, beruehrt) < 1e-9,
+       '%.1e m' % A.abstand(roboter, beruehrt))
+
 print('\nTrockenlauf')
-std = A.schritte_aus_flach(A.SCHRITTE_STANDARD)
-e = A.simuliere(A.spiegeln(std, True), A.startpose(laengsspiel=0.010))
-pruefe('Standardfolge setzt nirgends auf', not e['kollision'])
-pruefe('Standardfolge haelt 8 mm Reserve', not e['knapp'],
+# Bewusst NICHT gegen SCHRITTE_STANDARD: die Folge wird an der echten Luecke
+# eingestellt, deren Masse von den Sollmassen des Reglements abweichen. Hier
+# soll der Mechanismus geprueft werden, nicht die eingestellten Zahlen.
+REFERENZ = [100.0, 5.9, -100.0, -4.4, 100.0, 4.6,
+            -100.0, -3.9, 100.0, 17.7, -100.0, 37.1]
+ref = A.schritte_aus_flach(REFERENZ)
+e = A.simuliere(A.spiegeln(ref, True), A.startpose(laengsspiel=0.010))
+pruefe('Referenzfolge setzt nirgends auf', not e['kollision'])
+pruefe('Referenzfolge haelt 8 mm Reserve', not e['knapp'],
        '%.0f mm' % (e['magenta_abstand_m'] * 1000))
-pruefe('Standardfolge kommt heraus', e['frei'])
-pruefe('Standardfolge endet auf Bahnkurs',
+pruefe('Referenzfolge kommt heraus', e['frei'])
+pruefe('Referenzfolge endet auf Bahnkurs',
        abs(math.degrees(e['endpose'][2])) < 3.0,
        '%.1f grad' % math.degrees(e['endpose'][2]))
-pruefe('Standardfolge endet in der Spur', 0.25 < e['endpose'][1] < 0.75,
+pruefe('Referenzfolge endet in der Spur', 0.25 < e['endpose'][1] < 0.75,
        'y = %.3f m' % e['endpose'][1])
-# gespiegelt muss es genauso gut gehen, nur andersherum
+
 gespiegelt = A.simuliere(
-    A.spiegeln(std, False),
+    A.spiegeln(ref, False),
     (A.startpose(laengsspiel=0.010)[0], -A.startpose(laengsspiel=0.010)[1], 0.0),
     tiefe=-A.LUECKE_TIEFE)
 # Nicht exakt spiegelbildlich: die Lenkung ist es auch nicht (R = 0.306 m
@@ -131,8 +159,23 @@ pruefe('gespiegelte Folge kommt gleich weit',
 pruefe('gespiegelte Folge endet ebenfalls auf Bahnkurs',
        abs(math.degrees(gespiegelt['endpose'][2])) < 3.0,
        '%.1f grad' % math.degrees(gespiegelt['endpose'][2]))
-# blind geradeaus muss auffallen
+
 e2 = A.simuliere(A.spiegeln([(0.0, 30.0)], True), A.startpose(laengsspiel=0.010))
-pruefe('geradeaus laeuft in die vordere Wand', e2['kollision'], 'Zug %s' % e2['bei_schritt'])
+pruefe('geradeaus laeuft in die vordere Wand', e2['kollision'],
+       'Zug %s' % e2['bei_schritt'])
+
+print('\nDie eingestellte Standardfolge')
+std = A.schritte_aus_flach(A.SCHRITTE_STANDARD)
+pruefe('ist wohlgeformt', len(std) >= 1)
+pruefe('laesst sich in beide Richtungen spiegeln',
+       len(A.spiegeln(std, True)) == len(A.spiegeln(std, False)) == len(std))
+pruefe('bleibt im Lenkbereich',
+       all(abs(l) <= 100.0 + 1e-9 for l, _c in A.spiegeln(std, True)))
+vor = max([cm for _l, cm in std if cm > 0], default=0.0)
+zurueck = -min([cm for _l, cm in std if cm < 0], default=0.0)
+print('      braucht %.1f cm nach vorn und %.1f cm nach hinten, also mindestens'
+      % (vor, zurueck))
+print('      %.1f cm Laengsspiel -- die Luecke muss dafuer %.1f cm lang sein.'
+      % (vor + zurueck, A.FZ_LAENGE * 100 + vor + zurueck))
 
 print('\nalle Tests bestanden')

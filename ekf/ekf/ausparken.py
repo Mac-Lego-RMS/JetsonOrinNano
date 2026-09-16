@@ -49,6 +49,11 @@ FZ_HECK = FZ_NASE - FZ_LAENGE        # = -0.035
 # --- Luecke --------------------------------------------------------------
 LUECKE_LAENGE = 1.5 * FZ_LAENGE      # 0.2625 m, Vorgabe aus dem Reglement
 LUECKE_TIEFE = 0.200                 # wie weit die Magenta-Waende ins Feld ragen
+# Dicke der Magenta-Waende. Entscheidend, auch wenn sie klein ist: die
+# Waende sind BALKEN, keine Mauern. Sobald der Roboter an einer vorbei
+# ist, ist er frei -- er muss sie nicht seitlich umfahren. Wer sie als
+# Halbebene rechnet, verbietet Folgen, die in Wirklichkeit passen.
+LUECKE_WANDDICKE = 0.020
 
 # --- Lenkung -------------------------------------------------------------
 # Gemessene Kennlinie aus wall_follower_robot/steer_calib.json bei v=0,35 m/s,
@@ -261,20 +266,89 @@ def startpose(rueckstand=0.0, laengsspiel=0.004,
               tiefe=LUECKE_TIEFE, breite=FZ_BREITE):
     """Abstellpose in der Luecke.
 
-    Nullpunkt: Aussenwall bei y=0, hintere Magenta-Wand bei x=0, Kurs +x
-    (also entlang der Bahn). ``rueckstand`` ist der Abstand der Innenflanke
-    von den Wandspitzen, ``laengsspiel`` die Luft zwischen Heck und hinterer
-    Wand.
+    Nullpunkt: Aussenwall bei y=0, INNENKANTE der hinteren Magenta-Wand bei
+    x=0, Kurs +x (also entlang der Bahn). ``rueckstand`` ist der Abstand der
+    Innenflanke von den Wandspitzen, ``laengsspiel`` die Luft zwischen Heck
+    und hinterer Wand.
     """
     return (-FZ_HECK + laengsspiel, tiefe - breite / 2.0 - rueckstand, 0.0)
 
 
+# --- Flaechen und ihre Ueberschneidung -----------------------------------
+
+def rechteck(x0, x1, y0, y1):
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+def hindernisse(laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
+                dicke=LUECKE_WANDDICKE):
+    """Die beiden Magenta-Balken als Rechtecke, links und rechts der Luecke."""
+    return [rechteck(-dicke, 0.0, 0.0, tiefe),
+            rechteck(laenge, laenge + dicke, 0.0, tiefe)]
+
+
+def schlitz(laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE):
+    """Der Raum ZWISCHEN den Waenden. Wer ihn verlassen hat, ist ausgeparkt."""
+    return rechteck(0.0, laenge, 0.0, tiefe)
+
+
+def ueberlappen(a, b):
+    """Schneiden sich zwei konvexe Vierecke? Trennachsensatz.
+
+    Eckenvergleiche allein reichen hier NICHT: ein 2 cm dicker Balken kann
+    quer durch den Roboter gehen, ohne dass eine Ecke von beiden im jeweils
+    anderen liegt -- genau die Lage, die beim Ausparken entsteht.
+    """
+    for poly in (a, b):
+        n = len(poly)
+        for i in range(n):
+            (x1, y1), (x2, y2) = poly[i], poly[(i + 1) % n]
+            achse = (-(y2 - y1), x2 - x1)
+            betrag = math.hypot(*achse)
+            if betrag < 1e-12:
+                continue
+            achse = (achse[0] / betrag, achse[1] / betrag)
+            amin = min(px * achse[0] + py * achse[1] for px, py in a)
+            amax = max(px * achse[0] + py * achse[1] for px, py in a)
+            bmin = min(px * achse[0] + py * achse[1] for px, py in b)
+            bmax = max(px * achse[0] + py * achse[1] for px, py in b)
+            if amax <= bmin + 1e-12 or bmax <= amin + 1e-12:
+                return False
+    return True
+
+
+def _punkt_strecke(p, a, b):
+    px, py = p
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    laenge2 = dx * dx + dy * dy
+    if laenge2 < 1e-18:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / laenge2))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def abstand(a, b):
+    """Kleinster Abstand zweier konvexer Vierecke. 0 bei Ueberschneidung."""
+    if ueberlappen(a, b):
+        return 0.0
+    kleinster = float('inf')
+    for erst, zweit in ((a, b), (b, a)):
+        n = len(zweit)
+        for punkt in erst:
+            for i in range(n):
+                kleinster = min(kleinster,
+                                _punkt_strecke(punkt, zweit[i], zweit[(i + 1) % n]))
+    return kleinster
+
+
 def simuliere(schritte, start=None, tiefe=LUECKE_TIEFE,
-              laenge=LUECKE_LAENGE, rand=0.008):
+              laenge=LUECKE_LAENGE, rand=0.008, dicke=LUECKE_WANDDICKE):
     """Trockenlauf gegen die Lueckenmasse.
 
-    Die Magenta-Waende sind als Halbebenen x<=0 bzw. x>=laenge modelliert,
-    jeweils nur bis zur Hoehe ``tiefe`` -- darueber ist frei.
+    Die Magenta-Waende sind Rechtecke der Dicke ``dicke`` -- Balken, keine
+    Mauern. Der Aussenwall bei y=0 ist eine harte Grenze.
 
     ``kollision`` meint ECHTES Ueberlappen, nicht "zu wenig Reserve". Die
     Reserve steht getrennt in den Abstaenden: wer den Roboter mit dem Heck an
@@ -290,22 +364,24 @@ def simuliere(schritte, start=None, tiefe=LUECKE_TIEFE,
          'posen'}
     """
     if start is None:
-        start = startpose()
+        start = startpose(tiefe=tiefe)
     posen = bahn(start, schritte)
+    balken = hindernisse(laenge, tiefe, dicke)
+    raum = schlitz(laenge, tiefe)
     wand = float('inf')
     magenta = float('inf')
     bei = None
 
     for pose, nr in posen:
-        for (px, py) in ecken(pose):
-            wand = min(wand, py)
-            if py < tiefe:                       # auf Hoehe der Magenta-Waende
-                magenta = min(magenta, min(px, laenge - px))
-        if bei is None and (wand < 0.0 or magenta < 0.0):
+        auto = ecken(pose)
+        wand = min(wand, min(py for (_px, py) in auto))
+        d = min(abstand(auto, b) for b in balken)
+        magenta = min(magenta, d)
+        if bei is None and (wand < 0.0 or d <= 0.0):
             bei = nr
 
     ende = posen[-1][0]
-    frei = all(py > tiefe for (_px, py) in ecken(ende))
+    frei = not ueberlappen(ecken(ende), raum)
     return {'frei': frei, 'kollision': bei is not None,
             'knapp': magenta < rand or wand < rand, 'endpose': ende,
             'wand_abstand_m': wand, 'magenta_abstand_m': magenta,
@@ -324,17 +400,14 @@ def simuliere(schritte, start=None, tiefe=LUECKE_TIEFE,
 #
 # Positive Lenkung heisst ZUR OFFENEN SEITE, negative Strecke rueckwaerts.
 SCHRITTE_STANDARD = [
-     100.0,   5.9,     # vorwaerts, voll zur offenen Seite
-    -100.0,  -4.4,     # rueckwaerts, voll zur Wandseite
-     100.0,   4.6,
-    -100.0,  -3.9,
-     100.0,  17.7,     # Bogen aus der Luecke heraus
-    -100.0,  37.1,     # Gegenbogen zurueck auf Bahnkurs
+     100.0,   6.9,     # vorwaerts, voll zur offenen Seite
+    -100.0,  -6.4,     # rueckwaerts, voll zur Wandseite
+     100.0,   9.6,     # Bogen aus der Luecke heraus    # Gegenbogen zurueck auf Bahnkurs
 ]
 
 
 def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
-                 spalt=0.004):
+                 spalt=0.004, dicke=LUECKE_WANDDICKE):
     """Tabelle im Kopf fahren und das Ergebnis ausgeben.
 
     laenge/tiefe sind die gemessenen Lueckenmasse, spalt die Luft zwischen
@@ -345,8 +418,11 @@ def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
     # faehrt damit genau die Lenkwerte, die spaeter auf die Leitung gehen.
     schritte = spiegeln(schritte_aus_flach(flach or SCHRITTE_STANDARD), True)
     start = startpose(laengsspiel=spalt, tiefe=tiefe)
-    print('Luecke %.1f cm lang, Waende %.0f cm tief, Fahrzeug %.1f x %.1f cm.'
-          % (laenge * 100, tiefe * 100, FZ_BREITE * 100, FZ_LAENGE * 100))
+    balken = hindernisse(laenge, tiefe, dicke)
+    print('Luecke %.1f cm lang, Waende %.0f cm tief und %.1f cm dick, '
+          'Fahrzeug %.1f x %.1f cm.'
+          % (laenge * 100, tiefe * 100, dicke * 100,
+             FZ_BREITE * 100, FZ_LAENGE * 100))
     print('Start base_link (%.3f, %.3f), %.0f mm Luft nach hinten.'
           % (start[0], start[1], spalt * 1000))
     print()
@@ -354,18 +430,17 @@ def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
     for i, (lenk, cm) in enumerate(schritte, 1):
         # Engste Stelle NUR in diesem Zug -- so sieht man, welcher Zug die
         # Grenze setzt und wo noch Luft ist.
-        eng = min((min(px, laenge - px)
-                   for (p, _nr) in bahn(pose, [(lenk, cm)])
-                   for (px, py) in ecken(p) if py < tiefe),
-                  default=float('inf'))
+        eng = min(abstand(ecken(p), b)
+                  for (p, _nr) in bahn(pose, [(lenk, cm)])
+                  for b in balken)
         pose = bahn(pose, [(lenk, cm)])[-1][0]
         R = wenderadius(lenk)
         print('  %d. Lenkung %+6.1f %% (R %s)  %+6.1f cm = %+7.0f grad Welle'
               '  -> Kurs %+6.1f grad, y=%.3f   Rand %s'
               % (i, lenk, '%.2f m' % R if R else 'gerade', cm, cm_zu_grad(cm),
                  math.degrees(pose[2]), pose[1],
-                 'frei' if eng == float('inf') else '%3.0f mm' % (eng * 1000)))
-    e = simuliere(schritte, start, tiefe=tiefe, laenge=laenge)
+                 'beruehrt' if eng <= 0.0 else '%3.0f mm' % (eng * 1000)))
+    e = simuliere(schritte, start, tiefe=tiefe, laenge=laenge, dicke=dicke)
     print()
     print('  Gesamtweg %.1f cm, %d Positionsfahrten.'
           % (sum(abs(cm) for _l, cm in schritte), len(schritte)))
@@ -389,24 +464,27 @@ if __name__ == '__main__':
 
     HILFE = """Trockenlauf einer Ausparkfolge.
 
-  python3 ausparken.py [luecke=CM] [tiefe=CM] [spalt=MM] [lenk cm lenk cm ...]
+  python3 ausparken.py [luecke=CM] [tiefe=CM] [dicke=CM] [spalt=MM] [lenk cm ...]
 
 Ohne Zahlen wird SCHRITTE_STANDARD gefahren. Die Masse sind die GEMESSENEN
 der echten Luecke -- stimmen sie nicht, sagt der Trockenlauf das Falsche.
 
   luecke  Abstand zwischen den beiden Magenta-Waenden (Standard %.2f cm)
   tiefe   wie weit sie vom Aussenwall ins Feld ragen (Standard %.0f cm)
+  dicke   Dicke der Balken laengs der Bahn (Standard %.1f cm) -- sie sind
+          BALKEN, keine Mauern: hinter ihnen ist wieder frei
   spalt   Luft zwischen Heck und hinterer Wand beim Abstellen (Standard 4 mm)
 
 Beispiel:
   python3 ausparken.py luecke=32 100 9 -100 -6 100 7 -100 -5 100 18 -100 37
-""" % (LUECKE_LAENGE * 100, LUECKE_TIEFE * 100)
+""" % (LUECKE_LAENGE * 100, LUECKE_TIEFE * 100, LUECKE_WANDDICKE * 100)
 
     if '-h' in sys.argv or '--help' in sys.argv:
         print(HILFE)
         raise SystemExit(0)
 
-    masse = {'luecke': LUECKE_LAENGE, 'tiefe': LUECKE_TIEFE, 'spalt': 0.004}
+    masse = {'luecke': LUECKE_LAENGE, 'tiefe': LUECKE_TIEFE,
+             'dicke': LUECKE_WANDDICKE, 'spalt': 0.004}
     zahlen = []
     for arg in sys.argv[1:]:
         if '=' in arg:
@@ -421,4 +499,5 @@ Beispiel:
             zahlen.append(float(arg))
 
     raise SystemExit(_trockenlauf(zahlen or None, laenge=masse['luecke'],
-                                  tiefe=masse['tiefe'], spalt=masse['spalt']))
+                                  tiefe=masse['tiefe'], spalt=masse['spalt'],
+                                  dicke=masse['dicke']))

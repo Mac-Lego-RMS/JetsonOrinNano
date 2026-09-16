@@ -955,9 +955,16 @@ class Round1Controller(Node):
                 "Ausparken: PID-Liste braucht Paare aus Index und Wert, "
                 "bekam %d Werte -- uebersprungen." % len(werte))
             return
+        namen = {0: 'kp', 1: 'ki', 2: 'kd', 3: 'ilimit', 4: 'maxduty',
+                 5: 'tol_deg', 6: 'settle_ms', 7: 'timeout_ms', 8: 'minduty'}
+        gesetzt = []
         for i in range(0, len(werte), 2):
             self.pub_pid.publish(
                 Float32MultiArray(data=[float(werte[i]), float(werte[i + 1])]))
+            gesetzt.append('%s=%g' % (namen.get(int(werte[i]), '?%d' % werte[i]),
+                                      werte[i + 1]))
+        self.get_logger().info("Ausparken: Regelparameter %s"
+                               % ', '.join(gesetzt))
 
     def _ausparken_abbruch(self, grund):
         """Fahrt abbrechen, Regelparameter zuruecksetzen, stehen bleiben."""
@@ -1046,6 +1053,26 @@ class Round1Controller(Node):
                            self.ausp_letzter_grund or 'warte auf /scan'),
                         throttle_duration_sec=1.0)
                 return
+            # Erst senden, wenn die Bruecke die Topics auch abonniert hat.
+            # Die allerersten Nachrichten auf einer frisch angelegten
+            # Verbindung gehen in der DDS-Erkennung verloren -- und das sind
+            # hier ausgerechnet pid_set (maxduty, also das Tempo) und der
+            # erste Lenkbefehl. Ohne diese Pruefung faehrt Zug 1 ungebremst
+            # und ohne Lenkeinschlag.
+            fehlt = [name for name, pub in (
+                ('steer', self.pub_steer), ('move', self.pub_move),
+                ('pid_set', self.pub_pid), ('motor', self.pub_motor))
+                if pub.get_subscription_count() == 0]
+            if fehlt:
+                if jetzt - self.ausp_t0 > self.ausparken_richtung_timeout:
+                    self._ausparken_abbruch(
+                        "Bruecke hoert nicht zu (%s ohne Abonnent) -- laeuft "
+                        "der esp_serial_bridge?" % ', '.join(fehlt))
+                else:
+                    self.get_logger().info(
+                        "Ausparken: warte auf die Bruecke (%s)"
+                        % ', '.join(fehlt), throttle_duration_sec=1.0)
+                return
             self._ausparken_planen()
             return
 
@@ -1060,9 +1087,12 @@ class Round1Controller(Node):
             # laenger als ein Regelzyklus.
             if self.ausp_phase == 'lenken':
                 if not self.ausp_lenk_gesendet:
-                    self.pub_steer.publish(Float32(data=float(lenk)))
                     self.ausp_lenk_gesendet = True
                     self.ausp_t0 = jetzt
+                # Waehrend der ganzen Wartezeit wiederholen statt einmalig:
+                # ein verlorener Lenkbefehl faellt sonst erst auf, wenn der
+                # Zug ohne Einschlag gefahren ist. Die Pakete sind 5 Byte.
+                self.pub_steer.publish(Float32(data=float(lenk)))
                 if jetzt - self.ausp_t0 < self.ausparken_lenk_wartezeit:
                     return
                 grad = cm_zu_grad(cm)
