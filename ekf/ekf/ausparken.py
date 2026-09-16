@@ -333,28 +333,39 @@ SCHRITTE_STANDARD = [
 ]
 
 
-def _trockenlauf(flach=None):
-    """Tabelle im Kopf fahren und das Ergebnis ausgeben."""
+def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
+                 spalt=0.004):
+    """Tabelle im Kopf fahren und das Ergebnis ausgeben.
+
+    laenge/tiefe sind die gemessenen Lueckenmasse, spalt die Luft zwischen
+    Heck und hinterer Wand beim Abstellen.
+    """
     # Gespiegelt wird mit offen_links=True: das laesst die Vorzeichen, wie
     # sie in der Tabelle stehen, addiert aber den Trimm -- der Trockenlauf
     # faehrt damit genau die Lenkwerte, die spaeter auf die Leitung gehen.
     schritte = spiegeln(schritte_aus_flach(flach or SCHRITTE_STANDARD), True)
-    start = startpose()
+    start = startpose(laengsspiel=spalt, tiefe=tiefe)
     print('Luecke %.1f cm lang, Waende %.0f cm tief, Fahrzeug %.1f x %.1f cm.'
-          % (LUECKE_LAENGE * 100, LUECKE_TIEFE * 100,
-             FZ_BREITE * 100, FZ_LAENGE * 100))
-    print('Start base_link (%.3f, %.3f), Kurs %+.1f grad.'
-          % (start[0], start[1], math.degrees(start[2])))
+          % (laenge * 100, tiefe * 100, FZ_BREITE * 100, FZ_LAENGE * 100))
+    print('Start base_link (%.3f, %.3f), %.0f mm Luft nach hinten.'
+          % (start[0], start[1], spalt * 1000))
     print()
     pose = start
     for i, (lenk, cm) in enumerate(schritte, 1):
+        # Engste Stelle NUR in diesem Zug -- so sieht man, welcher Zug die
+        # Grenze setzt und wo noch Luft ist.
+        eng = min((min(px, laenge - px)
+                   for (p, _nr) in bahn(pose, [(lenk, cm)])
+                   for (px, py) in ecken(p) if py < tiefe),
+                  default=float('inf'))
         pose = bahn(pose, [(lenk, cm)])[-1][0]
         R = wenderadius(lenk)
         print('  %d. Lenkung %+6.1f %% (R %s)  %+6.1f cm = %+7.0f grad Welle'
-              '  -> Kurs %+6.1f grad, y=%.3f'
+              '  -> Kurs %+6.1f grad, y=%.3f   Rand %s'
               % (i, lenk, '%.2f m' % R if R else 'gerade', cm, cm_zu_grad(cm),
-                 math.degrees(pose[2]), pose[1]))
-    e = simuliere(schritte, start)
+                 math.degrees(pose[2]), pose[1],
+                 'frei' if eng == float('inf') else '%3.0f mm' % (eng * 1000)))
+    e = simuliere(schritte, start, tiefe=tiefe, laenge=laenge)
     print()
     print('  Gesamtweg %.1f cm, %d Positionsfahrten.'
           % (sum(abs(cm) for _l, cm in schritte), len(schritte)))
@@ -375,5 +386,39 @@ def _trockenlauf(flach=None):
 
 if __name__ == '__main__':
     import sys
-    werte = [float(a) for a in sys.argv[1:]] or None
-    raise SystemExit(_trockenlauf(werte))
+
+    HILFE = """Trockenlauf einer Ausparkfolge.
+
+  python3 ausparken.py [luecke=CM] [tiefe=CM] [spalt=MM] [lenk cm lenk cm ...]
+
+Ohne Zahlen wird SCHRITTE_STANDARD gefahren. Die Masse sind die GEMESSENEN
+der echten Luecke -- stimmen sie nicht, sagt der Trockenlauf das Falsche.
+
+  luecke  Abstand zwischen den beiden Magenta-Waenden (Standard %.2f cm)
+  tiefe   wie weit sie vom Aussenwall ins Feld ragen (Standard %.0f cm)
+  spalt   Luft zwischen Heck und hinterer Wand beim Abstellen (Standard 4 mm)
+
+Beispiel:
+  python3 ausparken.py luecke=32 100 9 -100 -6 100 7 -100 -5 100 18 -100 37
+""" % (LUECKE_LAENGE * 100, LUECKE_TIEFE * 100)
+
+    if '-h' in sys.argv or '--help' in sys.argv:
+        print(HILFE)
+        raise SystemExit(0)
+
+    masse = {'luecke': LUECKE_LAENGE, 'tiefe': LUECKE_TIEFE, 'spalt': 0.004}
+    zahlen = []
+    for arg in sys.argv[1:]:
+        if '=' in arg:
+            name, _, wert = arg.partition('=')
+            if name not in masse:
+                print('Unbekanntes Mass "%s".\n' % name)
+                print(HILFE)
+                raise SystemExit(2)
+            teiler = 1000.0 if name == 'spalt' else 100.0
+            masse[name] = float(wert) / teiler
+        else:
+            zahlen.append(float(arg))
+
+    raise SystemExit(_trockenlauf(zahlen or None, laenge=masse['luecke'],
+                                  tiefe=masse['tiefe'], spalt=masse['spalt']))
