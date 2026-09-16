@@ -64,6 +64,8 @@ class Attrappe:
     _ausparken_pid = Round1Controller._ausparken_pid
     _ausparken_abbruch = Round1Controller._ausparken_abbruch
     ausparken_move_done_cb = Round1Controller.ausparken_move_done_cb
+    _ausparken_scanhalt = Round1Controller._ausparken_scanhalt
+    _ausparken_uebergeben = Round1Controller._ausparken_uebergeben
 
     def __init__(self, **kw):
         self.t = 100.0
@@ -82,6 +84,8 @@ class Attrappe:
         self.ausparken_lenk_wartezeit = 0.6
         self.ausparken_zug_timeout = 15.0
         self.ausparken_weg_toleranz_cm = 1.0
+        self.ausparken_halt_s = 2.0
+        self.race_direction = None
         self.ausp_stimmen = ['CW'] * 5
         self.ausp_letzter_grund = 'links 0.14 m, rechts 0.87 m'
         self.ausp_schritte = None
@@ -139,6 +143,8 @@ class Attrappe:
                     self.th += eth
                 self.t += 0.5
                 self.quittiere(status)
+            if self.state == 'AUSPARK_SCAN':
+                self.t += self.ausparken_halt_s + 0.1
             if self.state in ('WAIT_INPUTS', 'DONE'):
                 return
         raise AssertionError('Sequenz haengt -- kein Ende nach %d Takten' % grenze)
@@ -249,7 +255,9 @@ f = Attrappe()
 f.takt(2)
 f.stopps = 0
 f.durchfahren()
-pruefe('ueber die ganze Sequenz nur der Schlusshalt', f.stopps == 1,
+# Waehrend der Fahrten darf kein /cmd_vel rausgehen; danach schon: einmal
+# beim Abschluss und dann im Scan-Halt.
+pruefe('waehrend der Fahrten kein Halt, danach schon', f.stopps >= 2,
        '%d Halte' % f.stopps)
 pruefe('vollstaendige Sequenz laeuft durch',
        len(f.pub_move.werte) == len(f.ausp_schritte),
@@ -275,6 +283,45 @@ pruefe('danach weiter zum Rennen', f.state == 'WAIT_INPUTS')
 pruefe('Taster gilt als gedrueckt', f.button_pressed is True)
 pruefe('Regelparameter am Ende zurueckgestellt',
        list(f.pub_pid.werte[-1].data) == [4.0, 1023.0])
+
+print('\nScan-Halt nach dem Ausparken')
+f = Attrappe()
+f.takt(2)
+for _ in range(4000):
+    vorher = len(f.pub_move.werte)
+    f._ausparken_schritt(f.x, f.y, f.th)
+    f.t += 0.1
+    if len(f.pub_move.werte) > vorher:
+        f.t += 0.5
+        f.quittiere(0)
+    if f.state == 'AUSPARK_SCAN':
+        break
+pruefe('nach dem letzten Zug wird gehalten', f.state == 'AUSPARK_SCAN')
+halte_vorher = f.stopps
+f.takt(5)
+pruefe('waehrend des Halts bleibt er stehen',
+       f.state == 'AUSPARK_SCAN' and f.stopps == halte_vorher + 5)
+pruefe('und faehrt nicht weiter', len(f.pub_move.werte) == len(f.ausp_schritte))
+f.t += f.ausparken_halt_s
+f.takt(1)
+pruefe('nach der Zeit geht es zum Rennen', f.state == 'WAIT_INPUTS')
+
+f = Attrappe(ausparken_halt_s=0.0)
+f.durchfahren()
+pruefe('halt_s = 0 schaltet die Pause ab', f.state == 'WAIT_INPUTS')
+
+# Der Latch der Wahrnehmung kann aus der Zeit IN der Luecke stammen und dann
+# die falsche Richtung tragen. Das muss auffallen, nicht stillschweigend
+# ueberstimmt werden.
+f = Attrappe(race_direction='CCW')      # Ausparken misst CW
+f.durchfahren()
+pruefe('widersprechende Richtung wird als Fehler gemeldet',
+       any('WIDERSPRUCH' in t for t in f._log.stufen('error')))
+pruefe('... und der Lauf geht trotzdem weiter', f.state == 'WAIT_INPUTS')
+f = Attrappe(race_direction='CW')
+f.durchfahren()
+pruefe('passende Richtung wird nur bestaetigt',
+       not any('WIDERSPRUCH' in t for t in f._log.stufen('error')))
 
 f = Attrappe(nur_ausparken=True)
 f.durchfahren()

@@ -3,8 +3,8 @@
 Round-1 controller -- multi-corner (full lap).
 
 State machine:
-  [AUSPARKEN] -> WAIT_INPUTS -> [WAIT_BUTTON] -> APPROACH -> TURN -> EXIT ->
-  (loop) -> FINISHING -> DONE
+  [AUSPARKEN -> AUSPARK_SCAN] -> WAIT_INPUTS -> [WAIT_BUTTON] -> APPROACH ->
+  TURN -> EXIT -> (loop) -> FINISHING -> DONE
 
   AUSPARKEN  Optional (Parameter ausparken). Der Roboter steht laengs in der
              Startluecke und muss SEITLICH heraus -- mit Ackermann geht das nur
@@ -204,6 +204,16 @@ class Round1Controller(Node):
         # zaehlt der gefahrene Weg, nicht das Einschwingen: 2 mm bei 8 mm
         # Reserve sind kein Grund, die Sequenz abzubrechen.
         'ausparken_weg_toleranz_cm': ('ausparken_weg_toleranz_cm', 1.0, float),
+        # Standzeit nach dem Ausparken, bevor das Rennen beginnt. Die
+        # Wahrnehmung braucht sie: die Farbausbeute der Fusion liegt im
+        # Stillstand bei 38 Prozent und faellt ab 1 rad/s auf 2 Prozent. Der
+        # Roboter steht hier zum ersten Mal in der Spur und schaut die ganze
+        # Startgerade entlang -- das ist der beste Blick auf die Pylonen, den
+        # er im ganzen Lauf bekommt. 0 schaltet die Pause ab.
+        # Nicht "ausparken_scan_s" nennen: das unterscheidet sich nur um ein
+        # Zeichen von ausparken_scans (Stimmen fuer die Richtung) und meint
+        # etwas voellig anderes.
+        'ausparken_halt_s': ('ausparken_halt_s', 2.0, float),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
     }
 
@@ -1076,6 +1086,11 @@ class Round1Controller(Node):
             self._ausparken_planen()
             return
 
+        # --- Scan-Halt nach dem Ausparken ------------------------------
+        if self.state == 'AUSPARK_SCAN':
+            self._ausparken_scanhalt(x, y, theta)
+            return
+
         # --- die Zuege abfahren ----------------------------------------
         if self.state == 'AUSPARK_FAHREN':
             if self.ausp_index >= len(self.ausp_schritte):
@@ -1179,6 +1194,50 @@ class Round1Controller(Node):
             self.get_logger().info(
                 "nur_ausparken gesetzt -- Regler haelt hier an.")
             return
+        if self.ausparken_halt_s > 0.0:
+            self.state = 'AUSPARK_SCAN'
+            self.ausp_t0 = self.now_s()
+            self.get_logger().info(
+                "Scan-Halt: %.1f s stehen bleiben, bevor es losgeht."
+                % self.ausparken_halt_s)
+            return
+        self._ausparken_uebergeben()
+
+    def _ausparken_scanhalt(self, x, y, theta):
+        """Stillstehen, damit die Wahrnehmung die Startgerade aufnehmen kann.
+
+        Der Roboter steht hier zum ersten Mal in der Spur und schaut sie
+        entlang. Fahrend bricht die Bildrate der Kamera von 15,5 auf 2,5 Hz
+        ein und die Farbausbeute von 38 auf 2 Prozent -- die Pylonen der
+        Startgeraden sind jetzt besser zu sehen als spaeter im Lauf.
+        """
+        self.publish_stop()
+        rest = self.ausparken_halt_s - (self.now_s() - self.ausp_t0)
+        if rest > 0.0:
+            self.get_logger().info(
+                "Scan-Halt, noch %.1f s." % rest, throttle_duration_sec=0.5)
+            return
+        self._ausparken_uebergeben()
+
+    def _ausparken_uebergeben(self):
+        """An die normale Zustandsmaschine abgeben."""
+        # Stimmt die Richtung, die wir in der Luecke gemessen haben, mit der
+        # ueberein, die die Wahrnehmung gelatcht hat? Weichen sie ab, faehrt
+        # der Regler die Runde andersherum als geplant -- das muss auffallen.
+        if self.race_direction and self.ausp_richtung \
+                and self.race_direction != self.ausp_richtung:
+            self.get_logger().error(
+                "WIDERSPRUCH: beim Ausparken %s gemessen, /race_direction "
+                "meldet %s. Der Latch stammt vermutlich noch aus der Zeit IN "
+                "der Luecke, wo die Startpositionserkennung nichts Sinnvolles "
+                "sehen kann. Der Regler folgt /race_direction."
+                % (self.ausp_richtung, self.race_direction))
+        elif self.ausp_richtung:
+            self.get_logger().info(
+                "Fahrtrichtung %s, bestaetigt durch %s."
+                % (self.ausp_richtung,
+                   '/race_direction' if self.race_direction else
+                   'nichts weiter -- /race_direction fehlt noch'))
         # Der Taster ist bereits gedrueckt worden, sonst waeren wir nicht hier.
         self.button_pressed = True
         self.state = 'WAIT_INPUTS'
