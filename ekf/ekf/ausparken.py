@@ -401,8 +401,10 @@ def simuliere(schritte, start=None, tiefe=LUECKE_TIEFE,
 # Positive Lenkung heisst ZUR OFFENEN SEITE, negative Strecke rueckwaerts.
 SCHRITTE_STANDARD = [
      100.0,   6.9,     # vorwaerts, voll zur offenen Seite
-    -100.0,  -6.4,     # rueckwaerts, voll zur Wandseite
-     100.0,   9.6,     # Bogen aus der Luecke heraus    # Gegenbogen zurueck auf Bahnkurs
+    -100.0,  -5.4,     # rueckwaerts, voll zur Wandseite
+     100.0,   9.6,
+     0.0, 10.0,
+    -100.0, 18.6,     # Bogen aus der Luecke heraus    # Gegenbogen zurueck auf Bahnkurs
 ]
 
 
