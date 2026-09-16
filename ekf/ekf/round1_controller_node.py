@@ -3,7 +3,16 @@
 Round-1 controller -- multi-corner (full lap).
 
 State machine:
-  WAIT_INPUTS -> [WAIT_BUTTON] -> APPROACH -> TURN -> EXIT -> (loop) -> FINISHING -> DONE
+  [AUSPARKEN] -> WAIT_INPUTS -> [WAIT_BUTTON] -> APPROACH -> TURN -> EXIT ->
+  (loop) -> FINISHING -> DONE
+
+  AUSPARKEN  Optional (Parameter ausparken). Der Roboter steht laengs in der
+             Startluecke und muss SEITLICH heraus -- mit Ackermann geht das nur
+             ueber Rangieren. Die Zuege laufen als Positionsfahrten auf dem ESP
+             (Encoder), nicht ueber /cmd_vel: der Lidar sieht unter 0,15 m
+             nichts, und in der Luecke ist die naechste Wand genau dort.
+             Siehe ekf/ausparken.py. Mit nur_ausparken haelt der Regler danach
+             an, statt das Rennen zu fahren.
 
   APPROACH   Drive the current straight, centred against the target line (outer
              wall of the current edge, offset inward by o_out). Watch for the
@@ -36,8 +45,14 @@ from rclpy.qos import QoSProfile, DurabilityPolicy
 from rcl_interfaces.msg import SetParametersResult
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float64, String, Int32MultiArray, Float64MultiArray
-from std_msgs.msg import Header
+from std_msgs.msg import Float32, Float32MultiArray, Header, Int32
+
+from ekf.ausparken import (bahn, cm_zu_grad, richtung_aus_scan,
+                           schritte_aus_flach, simuliere, spiegeln,
+                           SCHRITTE_STANDARD)
+from ekf.wall_extraction import scan_to_points
 
 
 # Farbcodes aus robot_msgs/Obstacle.msg und die halbe Klotzbreite aus
@@ -166,6 +181,22 @@ class Round1Controller(Node):
         'finish_lead_time': ('finish_lead_time', 0.15, float),  # reaction lead [s] -> stops on point
         'v_finish_min':  ('v_finish_min',  0.15,  float),   # DRIVABLE crawl, just above deadband
         'finish_tol':    ('finish_tol',    0.04,  float),   # stop tolerance on front_dist
+        # --- Ausparken aus der Startluecke -----------------------------------
+        # Die beiden Magenta-Waende stehen senkrecht auf dem Aussenwall und
+        # ragen 20 cm ins Feld; die Luecke ist der 26,25 cm breite Spalt
+        # dazwischen. Der Roboter steht laengs darin und muss quer heraus.
+        # Die ganze Rechnerei steckt in ekf/ausparken.py, hier nur die Schalter.
+        # ausparken, nur_ausparken und ausparken_richtung_invertieren sind
+        # ECHTE Bool-Parameter und stehen weiter unten bei require_button --
+        # damit "-p nur_ausparken:=true" tut, was man erwartet. Alles in
+        # dieser Tabelle ist DOUBLE und wollte "1.0" statt "true".
+        'ausparken_sektor_grad':  ('ausparken_sektor_grad',  20.0, float),
+        'ausparken_scans':        ('ausparken_scans',        5,    int),
+        'ausparken_richtung_timeout': ('ausparken_richtung_timeout', 8.0, float),
+        # Der Servo braucht Zeit bis zum Anschlag -- erst danach losfahren,
+        # sonst faehrt der erste Zentimeter mit halbem Einschlag.
+        'ausparken_lenk_wartezeit': ('ausparken_lenk_wartezeit', 0.6, float),
+        'ausparken_zug_timeout':  ('ausparken_zug_timeout',  15.0, float),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
     }
 
@@ -176,6 +207,13 @@ class Round1Controller(Node):
             self.declare_parameter(name, default)
         # structural (read once)
         self.declare_parameter('require_button', False)
+        # Ausparken aus der Startluecke. nur_ausparken haelt danach an, statt
+        # das Rennen zu fahren -- zum Einstellen der Schrittfolge.
+        self.declare_parameter('ausparken', False)
+        self.declare_parameter('nur_ausparken', False)
+        # Falls meine Herleitung der offenen Seite doch falsch herum ist:
+        # ein Schalter statt einer Codeaenderung.
+        self.declare_parameter('ausparken_richtung_invertieren', False)
         self.declare_parameter('control_rate', 30.0)
         self.declare_parameter('odom_timeout', 0.5)   # bridge past short EKF gaps
 
@@ -189,14 +227,57 @@ class Round1Controller(Node):
         self.declare_parameter('o_out_list', [0.35, 0.35, 0.35, 0.35], arr)
         self.declare_parameter('turn_radius_list', [0.5, 0.5, 0.5, 0.5], arr)
 
+        # Ausparksequenz als flache Liste [lenkung_%, cm, lenkung_%, cm, ...].
+        # Positive Lenkung heisst ZUR OFFENEN SEITE, negative cm rueckwaerts --
+        # die Tabelle ist dadurch richtungsfrei und wird erst beim Ausfuehren
+        # gespiegelt. Pruefen ohne Roboter:
+        #     python3 src/ekf/ekf/ausparken.py 100 5.9 -100 -4.4 ...
+        self.declare_parameter('ausparken_schritte', list(SCHRITTE_STANDARD), arr)
+        # Regelparameter des ESP fuer die Dauer der Sequenz. Flach als
+        # [index, wert, ...], Reihenfolge der Indizes siehe PID_PARAMS in
+        # esp_serial_bridge.py: 0 kp, 1 ki, 2 kd, 3 ilimit, 4 maxduty,
+        # 5 tol_deg, 6 settle_ms, 7 timeout_ms, 8 minduty.
+        # Ohne Begrenzung steht der Stellwert bei mehreren hundert Grad
+        # Sollweg bis kurz vors Ziel am Anschlag -- in einer 26 cm langen
+        # Luecke ist das zu schnell.
+        self.declare_parameter('ausparken_pid', [4.0, 300.0], arr)
+        self.declare_parameter('ausparken_pid_nachher', [4.0, 1023.0], arr)
+
         self._load_params()
         self.require_button = bool(self.get_parameter('require_button').value)
+        self.ausparken = bool(self.get_parameter('ausparken').value)
+        self.nur_ausparken = bool(self.get_parameter('nur_ausparken').value)
+        self.ausparken_richtung_invertieren = bool(
+            self.get_parameter('ausparken_richtung_invertieren').value)
         self.control_rate = float(self.get_parameter('control_rate').value)
         self.odom_timeout = float(self.get_parameter('odom_timeout').value)
         self.add_on_set_parameters_callback(self._on_params)
 
+        self.ausparken_schritte = list(
+            self.get_parameter('ausparken_schritte').value)
+        self.ausparken_pid = list(self.get_parameter('ausparken_pid').value)
+        self.ausparken_pid_nachher = list(
+            self.get_parameter('ausparken_pid_nachher').value)
+        # Ein Schalter soll reichen: wer nur ausparken will, meint auch ausparken.
+        if self.nur_ausparken and not self.ausparken:
+            self.ausparken = True
+
         # --- state ---
-        self.state = 'WAIT_INPUTS'
+        self.state = 'AUSPARK_BUTTON' if self.ausparken else 'WAIT_INPUTS'
+        # Ausparken: Stimmen fuer die Richtung, Stelle in der Schrittfolge,
+        # letzte Quittung der Bruecke.
+        self.ausp_stimmen = []
+        self.ausp_letzter_grund = None
+        self.ausp_schritte = None
+        self.ausp_richtung = None
+        self.ausp_index = 0
+        self.ausp_phase = 'lenken'
+        self.ausp_lenk_gesendet = False
+        self.ausp_t0 = 0.0
+        self.ausp_gesendet_t = None
+        self.ausp_move_done = None
+        self.ausp_theta0 = 0.0
+        self.ausp_pose0 = None
         self.pose = None
         self.v_ist = 0.0
         self.front_wall_x = None
@@ -270,9 +351,35 @@ class Round1Controller(Node):
         # latched: a later-starting perception node still gets the current state.
         self.pub_lap = self.create_publisher(Int32MultiArray, '~/lap_state', latched)
 
+        # Nur fuers Ausparken. Bewusst nicht immer angelegt -- sonst haengt der
+        # Regler ohne Not am /scan und an vier weiteren Bruecken-Topics.
+        if self.ausparken:
+            self.pub_steer = self.create_publisher(
+                Float32, '/esp_serial_bridge/steer', 10)
+            self.pub_move = self.create_publisher(
+                Float32, '/esp_serial_bridge/move', 10)
+            self.pub_pid = self.create_publisher(
+                Float32MultiArray, '/esp_serial_bridge/pid_set', 10)
+            # Ein Motorbefehl bricht eine laufende Positionsfahrt ab -- das ist
+            # unser Notausstieg. Ueber /cmd_vel geht das NICHT: der
+            # Geschwindigkeitsregler der Bruecke schweigt waehrend einer Fahrt.
+            self.pub_motor = self.create_publisher(
+                Int32, '/esp_serial_bridge/motor', 10)
+            self.create_subscription(Int32MultiArray,
+                                     '/esp_serial_bridge/move_done',
+                                     self.ausparken_move_done_cb, 10)
+            self.create_subscription(LaserScan, '/scan',
+                                     self.ausparken_scan_cb, 10)
+
         self.dt = 1.0 / self.control_rate
         self.create_timer(self.dt, self.control_loop)
-        self.get_logger().info(">>> Round1Controller (multi-corner) bereit. Warte auf Eingaben... <<<")
+        if self.ausparken:
+            self.get_logger().info(
+                ">>> Round1Controller bereit. Erst AUSPARKEN%s. <<<"
+                % (", danach anhalten (nur_ausparken)" if self.nur_ausparken
+                   else ", danach das Rennen"))
+        else:
+            self.get_logger().info(">>> Round1Controller (multi-corner) bereit. Warte auf Eingaben... <<<")
 
     def _corner_msg_type(self):
         from robot_msgs.msg import CornerGeometry
@@ -784,6 +891,214 @@ class Round1Controller(Node):
             return cy, None
         return ziel, info
 
+    # ------------------------------------------------------------ Ausparken
+    #
+    # Ablauf: AUSPARK_BUTTON -> AUSPARK_RICHTUNG -> AUSPARK_FAHREN -> weiter.
+    # Waehrend AUSPARK_FAHREN wird KEIN /cmd_vel veroeffentlicht: die Bruecke
+    # wuerde daraufhin die Lenkung neu stellen, und ein Motorbefehl bricht die
+    # laufende Positionsfahrt ab.
+
+    def ausparken_scan_cb(self, msg):
+        """Eine Stimme fuer die Fahrtrichtung. Laeuft nur waehrend der Suche."""
+        if self.state != 'AUSPARK_RICHTUNG':
+            return
+        ergebnis = richtung_aus_scan(
+            scan_to_points(msg), halbwinkel_grad=self.ausparken_sektor_grad)
+        self.ausp_letzter_grund = ergebnis['grund']
+        if not ergebnis['sicher']:
+            self.ausp_stimmen = []
+            return
+        # Nur EINIGE Stimmen zaehlen, keine Mehrheit: ein einziger Widerspruch
+        # setzt zurueck. Wer den Roboter waehrend der Suche anfasst, bekommt
+        # keine Entscheidung statt einer knappen.
+        if self.ausp_stimmen and self.ausp_stimmen[-1] != ergebnis['richtung']:
+            self.ausp_stimmen = []
+        self.ausp_stimmen.append(ergebnis['richtung'])
+
+    def ausparken_move_done_cb(self, msg):
+        """Quittung der Bruecke: [move_id, status, position_zehntelgrad]."""
+        if len(msg.data) >= 3:
+            self.ausp_move_done = (self.now_s(), int(msg.data[0]),
+                                   int(msg.data[1]), msg.data[2] / 10.0)
+
+    def _ausparken_pid(self, flach):
+        """Regelparameter des ESP setzen. Fluechtig, nicht ins NVS."""
+        werte = list(flach)
+        if len(werte) % 2 != 0:
+            self.get_logger().warn(
+                "Ausparken: PID-Liste braucht Paare aus Index und Wert, "
+                "bekam %d Werte -- uebersprungen." % len(werte))
+            return
+        for i in range(0, len(werte), 2):
+            self.pub_pid.publish(
+                Float32MultiArray(data=[float(werte[i]), float(werte[i + 1])]))
+
+    def _ausparken_abbruch(self, grund):
+        """Fahrt abbrechen, Regelparameter zuruecksetzen, stehen bleiben."""
+        self.pub_motor.publish(Int32(data=0))      # loest die Positionsfahrt ab
+        self._ausparken_pid(self.ausparken_pid_nachher)
+        self.publish_stop()
+        self.state = 'DONE'
+        self.get_logger().error("Ausparken abgebrochen: %s" % grund)
+
+    def _ausparken_planen(self):
+        """Tabelle auf die erkannte Seite drehen und den Trockenlauf mitloggen."""
+        richtung = self.ausp_stimmen[-1]
+        if self.ausparken_richtung_invertieren:
+            richtung = 'CW' if richtung == 'CCW' else 'CCW'
+            self.get_logger().warn(
+                "Ausparken: Richtung per Parameter invertiert.")
+        offen_links = (richtung == 'CCW')
+        try:
+            tabelle = schritte_aus_flach(self.ausparken_schritte)
+        except ValueError as fehler:
+            self._ausparken_abbruch("Schrittliste unbrauchbar: %s" % fehler)
+            return
+        if not tabelle:
+            self._ausparken_abbruch("Schrittliste ist leer")
+            return
+
+        self.ausp_schritte = spiegeln(tabelle, offen_links)
+        self.ausp_richtung = richtung
+
+        # Trockenlauf zum Mitschreiben, immer in der Lage "offen links"
+        # gerechnet: die Luecke ist spiegelsymmetrisch, die Lenkung nur fast
+        # (R 0,306 m links gegen 0,312 m rechts). Fuer die Warnung reicht das.
+        probe = simuliere(spiegeln(tabelle, True))
+        self.get_logger().info(
+            "Ausparken: %s -- offene Seite %s (%s). %d Zuege, %.0f cm Weg."
+            % (richtung, 'links' if offen_links else 'rechts',
+               self.ausp_letzter_grund, len(tabelle),
+               sum(abs(cm) for _l, cm in tabelle)))
+        self.get_logger().info(
+            "Ausparken: Trockenlauf -- %s, engster Abstand %.0f mm zur "
+            "Magenta-Wand, am Ende %s."
+            % ('KOLLISION in Zug %s' % probe['bei_schritt'] if probe['kollision']
+               else 'kollisionsfrei',
+               probe['magenta_abstand_m'] * 1000,
+               'frei' if probe['frei'] else 'NOCH IN DER LUECKE'))
+        if probe['kollision'] or not probe['frei']:
+            self.get_logger().warn(
+                "Ausparken: die Schrittfolge geht rechnerisch nicht auf. "
+                "Sie wird trotzdem gefahren -- die Masse der Luecke koennen "
+                "von meinem Modell abweichen. Hand an den Nothalt.")
+
+        self._ausparken_pid(self.ausparken_pid)
+        self.state = 'AUSPARK_FAHREN'
+        self.ausp_index = 0
+        self.ausp_phase = 'lenken'
+        self.ausp_lenk_gesendet = False
+
+    def _ausparken_schritt(self, x, y, theta):
+        jetzt = self.now_s()
+
+        # --- auf den Taster warten -------------------------------------
+        if self.state == 'AUSPARK_BUTTON':
+            if self.require_button and not self.button_pressed:
+                self.publish_stop()
+                return
+            self.state = 'AUSPARK_RICHTUNG'
+            self.ausp_t0 = jetzt
+            self.get_logger().info(
+                "Ausparken: suche die offene Seite, %d einige Scans noetig."
+                % self.ausparken_scans)
+            return
+
+        # --- Fahrtrichtung aus dem rohen Scan --------------------------
+        if self.state == 'AUSPARK_RICHTUNG':
+            self.publish_stop()
+            if len(self.ausp_stimmen) < self.ausparken_scans:
+                if jetzt - self.ausp_t0 > self.ausparken_richtung_timeout:
+                    self._ausparken_abbruch(
+                        "keine eindeutige Richtung in %.0f s -- zuletzt: %s"
+                        % (self.ausparken_richtung_timeout,
+                           self.ausp_letzter_grund or 'kein Scan empfangen'))
+                else:
+                    self.get_logger().info(
+                        "Ausparken: %d/%d Stimmen -- %s"
+                        % (len(self.ausp_stimmen), self.ausparken_scans,
+                           self.ausp_letzter_grund or 'warte auf /scan'),
+                        throttle_duration_sec=1.0)
+                return
+            self._ausparken_planen()
+            return
+
+        # --- die Zuege abfahren ----------------------------------------
+        if self.state == 'AUSPARK_FAHREN':
+            if self.ausp_index >= len(self.ausp_schritte):
+                self._ausparken_fertig(x, y, theta)
+                return
+            lenk, cm = self.ausp_schritte[self.ausp_index]
+
+            # Erst lenken, dann fahren. Der Servo braucht bis zum Anschlag
+            # laenger als ein Regelzyklus.
+            if self.ausp_phase == 'lenken':
+                if not self.ausp_lenk_gesendet:
+                    self.pub_steer.publish(Float32(data=float(lenk)))
+                    self.ausp_lenk_gesendet = True
+                    self.ausp_t0 = jetzt
+                if jetzt - self.ausp_t0 < self.ausparken_lenk_wartezeit:
+                    return
+                grad = cm_zu_grad(cm)
+                self.ausp_move_done = None
+                self.ausp_gesendet_t = jetzt
+                self.ausp_theta0 = theta
+                self.ausp_pose0 = (x, y)
+                self.pub_move.publish(Float32(data=float(grad)))
+                self.ausp_phase = 'fahren'
+                self.get_logger().info(
+                    "Ausparken Zug %d/%d: Lenkung %+.0f %%, %+.1f cm "
+                    "(%+.0f grad Welle)."
+                    % (self.ausp_index + 1, len(self.ausp_schritte),
+                       lenk, cm, grad))
+                return
+
+            # --- auf die Quittung warten --------------------------------
+            quittung = self.ausp_move_done
+            if quittung is not None and quittung[0] >= self.ausp_gesendet_t:
+                _t, _mid, status, _pos = quittung
+                soll = bahn((0.0, 0.0, 0.0), [(lenk, cm)])[-1][0][2]
+                ist = wrap(theta - self.ausp_theta0)
+                gefahren = math.hypot(x - self.ausp_pose0[0],
+                                      y - self.ausp_pose0[1])
+                self.get_logger().info(
+                    "Ausparken Zug %d fertig: Kurs %+.1f grad (geplant "
+                    "%+.1f), %.1f cm ueber Grund."
+                    % (self.ausp_index + 1, math.degrees(ist),
+                       math.degrees(soll), gefahren * 100))
+                if status != 0:
+                    self._ausparken_abbruch(
+                        "Zug %d quittiert mit Status %d (0 waere ok)"
+                        % (self.ausp_index + 1, status))
+                    return
+                self.ausp_index += 1
+                self.ausp_phase = 'lenken'
+                self.ausp_lenk_gesendet = False
+                return
+
+            if jetzt - self.ausp_gesendet_t > self.ausparken_zug_timeout:
+                self._ausparken_abbruch(
+                    "Zug %d ohne Quittung nach %.0f s -- laeuft der "
+                    "esp_serial_bridge mit der move-Sperre?"
+                    % (self.ausp_index + 1, self.ausparken_zug_timeout))
+            return
+
+    def _ausparken_fertig(self, x, y, theta):
+        self._ausparken_pid(self.ausparken_pid_nachher)
+        self.publish_stop()
+        self.get_logger().info(
+            "Ausparken fertig: Pose (%.2f, %.2f), Kurs %+.1f grad."
+            % (x, y, math.degrees(theta)))
+        if self.nur_ausparken:
+            self.state = 'DONE'
+            self.get_logger().info(
+                "nur_ausparken gesetzt -- Regler haelt hier an.")
+            return
+        # Der Taster ist bereits gedrueckt worden, sonst waeren wir nicht hier.
+        self.button_pressed = True
+        self.state = 'WAIT_INPUTS'
+        self.get_logger().info("Weiter zum Rennen. Warte auf Eingaben...")
+
     def publish_lap_state(self):
         """Publish [corner_idx, corner_count, lap] for the perception side.
         corner_idx = corner currently being approached (0..3, box index)
@@ -999,6 +1314,12 @@ class Round1Controller(Node):
         if self.pose is None:
             return
         x, y, theta = self.pose
+
+        # Vor allem anderen, und bewusst VOR der odom-Alterspruefung: die
+        # Ausparkzuege laufen auf dem ESP und brauchen keine frische Pose.
+        if self.state.startswith('AUSPARK'):
+            self._ausparken_schritt(x, y, theta)
+            return
 
         if self.state == 'WAIT_INPUTS':
             if not self.inputs_ready():
