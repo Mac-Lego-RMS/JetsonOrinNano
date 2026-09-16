@@ -231,6 +231,13 @@ class Round1Controller(Node):
         # Falls meine Herleitung der offenen Seite doch falsch herum ist:
         # ein Schalter statt einer Codeaenderung.
         self.declare_parameter('ausparken_richtung_invertieren', False)
+        # Wer bestimmt die Fahrtrichtung, wenn ausgeparkt wird? In der Luecke
+        # ist sie sicher messbar: die nahe Seite IST die Aussenwand, die ferne
+        # das Spielfeld. Der scan_processor kann das aus der Luecke heraus
+        # nicht besser wissen -- er sieht dort keine brauchbare Ecke, latcht
+        # aber trotzdem und lag in einem Lauf nachweislich falsch herum.
+        # Aus: dann gilt weiter /race_direction aus der Eckengeometrie.
+        self.declare_parameter('ausparken_setzt_richtung', True)
         self.declare_parameter('control_rate', 30.0)
         self.declare_parameter('odom_timeout', 0.5)   # bridge past short EKF gaps
 
@@ -285,6 +292,8 @@ class Round1Controller(Node):
         self.nur_ausparken = bool(self.get_parameter('nur_ausparken').value)
         self.ausparken_richtung_invertieren = bool(
             self.get_parameter('ausparken_richtung_invertieren').value)
+        self.ausparken_setzt_richtung = bool(
+            self.get_parameter('ausparken_setzt_richtung').value)
         self.control_rate = float(self.get_parameter('control_rate').value)
         self.odom_timeout = float(self.get_parameter('odom_timeout').value)
         self.add_on_set_parameters_callback(self._on_params)
@@ -406,6 +415,10 @@ class Round1Controller(Node):
                                      self.ausparken_move_done_cb, 10)
             self.create_subscription(LaserScan, '/scan',
                                      self.ausparken_scan_cb, 10)
+            # Latched: der scan_processor bekommt sie auch, wenn er spaeter
+            # startet oder neu gestartet wird.
+            self.pub_park_dir = self.create_publisher(
+                String, '/parking_direction', latched)
 
         self.dt = 1.0 / self.control_rate
         self.create_timer(self.dt, self.control_loop)
@@ -1219,25 +1232,54 @@ class Round1Controller(Node):
             return
         self._ausparken_uebergeben()
 
+    def _ausparken_richtung_uebernehmen(self):
+        """Wer hat bei der Fahrtrichtung das letzte Wort?
+
+        Beim Parken ist die Richtung sicher messbar, aus der Eckengeometrie
+        heraus nicht: der scan_processor sieht aus der Luecke keine brauchbare
+        Ecke, latcht aber trotzdem. In einem Lauf standen dort CW aus dem
+        Ausparken und CCW aus der Wahrnehmung. Mit ausparken_setzt_richtung
+        gilt deshalb das Parken, sonst weiter /race_direction.
+        """
+        if not self.ausp_richtung:
+            return
+        passt = (self.race_direction is None
+                 or self.race_direction == self.ausp_richtung)
+
+        if not self.ausparken_setzt_richtung:
+            if passt:
+                self.get_logger().info(
+                    "Fahrtrichtung %s (aus der Eckengeometrie), das Ausparken "
+                    "kam auf dasselbe." % (self.race_direction or self.ausp_richtung))
+            else:
+                self.get_logger().error(
+                    "WIDERSPRUCH: Ausparken %s, /race_direction %s. "
+                    "ausparken_setzt_richtung ist aus, also gilt "
+                    "/race_direction -- der Lauf geht damit vermutlich "
+                    "andersherum als geplant."
+                    % (self.ausp_richtung, self.race_direction))
+            return
+
+        # Das Parken hat das Wort.
+        self.pub_park_dir.publish(String(data=self.ausp_richtung))
+        if passt:
+            self.get_logger().info(
+                "Fahrtrichtung %s aus der Parkluecke%s."
+                % (self.ausp_richtung,
+                   ", bestaetigt durch die Eckengeometrie" if self.race_direction
+                   else " (die Eckengeometrie hat noch nicht gelatcht)"))
+        else:
+            self.get_logger().warn(
+                "Fahrtrichtung %s aus der Parkluecke -- /race_direction meldet "
+                "%s. Der Latch stammt aus der Zeit IN der Luecke, wo die "
+                "Eckenerkennung nichts Sinnvolles sehen kann. Das Parken "
+                "gilt; der scan_processor bekommt sie ueber "
+                "/parking_direction." % (self.ausp_richtung, self.race_direction))
+        self.race_direction = self.ausp_richtung
+
     def _ausparken_uebergeben(self):
         """An die normale Zustandsmaschine abgeben."""
-        # Stimmt die Richtung, die wir in der Luecke gemessen haben, mit der
-        # ueberein, die die Wahrnehmung gelatcht hat? Weichen sie ab, faehrt
-        # der Regler die Runde andersherum als geplant -- das muss auffallen.
-        if self.race_direction and self.ausp_richtung \
-                and self.race_direction != self.ausp_richtung:
-            self.get_logger().error(
-                "WIDERSPRUCH: beim Ausparken %s gemessen, /race_direction "
-                "meldet %s. Der Latch stammt vermutlich noch aus der Zeit IN "
-                "der Luecke, wo die Startpositionserkennung nichts Sinnvolles "
-                "sehen kann. Der Regler folgt /race_direction."
-                % (self.ausp_richtung, self.race_direction))
-        elif self.ausp_richtung:
-            self.get_logger().info(
-                "Fahrtrichtung %s, bestaetigt durch %s."
-                % (self.ausp_richtung,
-                   '/race_direction' if self.race_direction else
-                   'nichts weiter -- /race_direction fehlt noch'))
+        self._ausparken_richtung_uebernehmen()
         # Der Taster ist bereits gedrueckt worden, sonst waeren wir nicht hier.
         self.button_pressed = True
         self.state = 'WAIT_INPUTS'

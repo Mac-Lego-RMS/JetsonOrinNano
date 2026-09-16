@@ -20,8 +20,14 @@ Two layers of obstacle output, mirroring the wall outputs:
                    BUFFERED with their pose and replayed when the grid is
                    built, so start-straight obstacles are not lost.
 
+Die Fahrtrichtung kommt normalerweise aus der Eckengeometrie. Wird aus einer
+Parkluecke gestartet, ist sie DORT sicherer zu bestimmen (die nahe Seite ist
+die Aussenwand, die ferne das Spielfeld); der Regler schickt sie dann auf
+/parking_direction, und die gilt. Kommt dort nichts, bleibt alles beim Alten.
+
 Subscribes: /scan, /ekf/odom, /round1_controller/lap_state (latched),
-            /camera_lidar/colored_scan (obstacle mode only)
+            /camera_lidar/colored_scan (obstacle mode only),
+            /parking_direction (latched, optional)
 Publishes:  /wall_matches
             /wall_distances    live [left, right] side distances, NaN if unseen
             /obstacles_live    raw obstacles, base_link frame, every scan
@@ -148,6 +154,10 @@ class ScanProcessor(Node):
                                  self.lap_state_cb, latched)
         self.create_subscription(PointCloud2, '/camera_lidar/colored_scan',
                                  self.colored_scan_cb, 10)
+        # Fahrtrichtung aus der Parkluecke, falls dort ausgeparkt wird.
+        # Latched, damit sie auch ankommt, wenn dieser Knoten spaeter startet.
+        self.create_subscription(String, '/parking_direction',
+                                 self.parking_direction_cb, latched)
 
         self.pub = self.create_publisher(WallMatchArray, '/wall_matches', 10)
         self.wall_dist_pub = self.create_publisher(
@@ -372,18 +382,50 @@ class ScanProcessor(Node):
         if len(self.dir_votes) > DIRECTION_VOTES:
             self.dir_votes.pop(0)
         if len(self.dir_votes) == DIRECTION_VOTES and len(set(self.dir_votes)) == 1:
-            self.direction = self.dir_votes[0]
-            self.direction_pub.publish(String(data=self.direction))
-            self.get_logger().info(f'race direction latched: {self.direction}')
+            self._latch_direction(self.dir_votes[0], 'corner geometry')
 
-            self._switch_map_to_direction()
+    def parking_direction_cb(self, msg):
+        """Fahrtrichtung aus der Parkluecke.
 
-            start_pose = self._start_pose_for_direction()
-            self._publish_corner_geometry(start_pose)
-            if self.race_mode == 'obstacle':
-                inner, corners = inner_walls_map(start_pose)
-                self._publish_inner_geometry(inner, corners)
-                self._init_obstacle_map(start_pose)
+        Beim Ausparken ist die Richtung sicher bestimmbar: der Roboter steht
+        an der Aussenwand, die nahe Seite IST die Wand und die ferne das
+        Spielfeld. Die Eckengeometrie hier kann das nicht besser wissen -- sie
+        sieht aus der Luecke heraus ueberhaupt keine brauchbare Ecke, latcht
+        aber trotzdem und war in einem Lauf nachweislich falsch herum
+        (Ausparken CW, Latch CCW).
+
+        Kommt nichts auf diesem Topic, bleibt alles wie bisher.
+        """
+        richtung = msg.data.strip().upper()
+        if richtung not in ('CW', 'CCW'):
+            self.get_logger().warn(
+                f'/parking_direction: "{msg.data}" ist weder CW noch CCW')
+            return
+        if self.direction is None:
+            self._latch_direction(richtung, 'parking')
+            return
+        if self.direction != richtung:
+            self.get_logger().error(
+                f'/parking_direction meldet {richtung}, gelatcht ist aber '
+                f'{self.direction}. Der Latch bleibt -- Karte, Eckengeometrie '
+                f'und Sitzraster haengen daran. Wenn das Parken recht hat, '
+                f'startet den scan_processor NACH dem Ausparken.')
+
+    def _latch_direction(self, direction, quelle):
+        """Richtung festnageln und alles daran Haengende aufbauen."""
+        self.direction = direction
+        self.direction_pub.publish(String(data=self.direction))
+        self.get_logger().info(
+            f'race direction latched: {self.direction} (from {quelle})')
+
+        self._switch_map_to_direction()
+
+        start_pose = self._start_pose_for_direction()
+        self._publish_corner_geometry(start_pose)
+        if self.race_mode == 'obstacle':
+            inner, corners = inner_walls_map(start_pose)
+            self._publish_inner_geometry(inner, corners)
+            self._init_obstacle_map(start_pose)
 
     def _start_pose_for_direction(self):
         if self.race_mode == 'open':

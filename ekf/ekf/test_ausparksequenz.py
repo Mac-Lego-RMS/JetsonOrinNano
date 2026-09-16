@@ -66,6 +66,8 @@ class Attrappe:
     ausparken_move_done_cb = Round1Controller.ausparken_move_done_cb
     _ausparken_scanhalt = Round1Controller._ausparken_scanhalt
     _ausparken_uebergeben = Round1Controller._ausparken_uebergeben
+    _ausparken_richtung_uebernehmen = \
+        Round1Controller._ausparken_richtung_uebernehmen
 
     def __init__(self, **kw):
         self.t = 100.0
@@ -86,6 +88,7 @@ class Attrappe:
         self.ausparken_weg_toleranz_cm = 1.0
         self.ausparken_halt_s = 2.0
         self.race_direction = None
+        self.ausparken_setzt_richtung = True
         self.ausp_stimmen = ['CW'] * 5
         self.ausp_letzter_grund = 'links 0.14 m, rechts 0.87 m'
         self.ausp_schritte = None
@@ -103,6 +106,7 @@ class Attrappe:
         self.pub_move = Sammler('move', self.protokoll)
         self.pub_pid = Sammler('pid', self.protokoll)
         self.pub_motor = Sammler('motor', self.protokoll)
+        self.pub_park_dir = Sammler('park_dir', self.protokoll)
         self.stopps = 0
         self._log = Logbuch()
         self.__dict__.update(kw)
@@ -315,13 +319,34 @@ pruefe('halt_s = 0 schaltet die Pause ab', f.state == 'WAIT_INPUTS')
 # ueberstimmt werden.
 f = Attrappe(race_direction='CCW')      # Ausparken misst CW
 f.durchfahren()
-pruefe('widersprechende Richtung wird als Fehler gemeldet',
-       any('WIDERSPRUCH' in t for t in f._log.stufen('error')))
-pruefe('... und der Lauf geht trotzdem weiter', f.state == 'WAIT_INPUTS')
+pruefe('das Parken setzt die Richtung durch', f.race_direction == 'CW')
+pruefe('... und schickt sie an den scan_processor',
+       [w for n, w in f.protokoll if n == 'park_dir'] == ['CW'])
+pruefe('... und sagt, dass es dem Latch widerspricht',
+       any('/race_direction meldet' in t for t in f._log.stufen('warn')))
+pruefe('... und der Lauf geht weiter', f.state == 'WAIT_INPUTS')
+
 f = Attrappe(race_direction='CW')
 f.durchfahren()
-pruefe('passende Richtung wird nur bestaetigt',
-       not any('WIDERSPRUCH' in t for t in f._log.stufen('error')))
+pruefe('passende Richtung erzeugt keine Warnung',
+       not any('meldet' in t for t in f._log.stufen('warn')
+               if 'Richtung' in t or 'race_direction' in t))
+pruefe('... wird aber trotzdem veroeffentlicht',
+       [w for n, w in f.protokoll if n == 'park_dir'] == ['CW'])
+
+# Schalter aus: die Eckengeometrie behaelt das Wort.
+f = Attrappe(race_direction='CCW', ausparken_setzt_richtung=False)
+f.durchfahren()
+pruefe('Schalter aus -> /race_direction bleibt', f.race_direction == 'CCW')
+pruefe('... nichts wird veroeffentlicht',
+       not [w for n, w in f.protokoll if n == 'park_dir'])
+pruefe('... der Widerspruch wird trotzdem gemeldet',
+       any('WIDERSPRUCH' in t for t in f._log.stufen('error')))
+
+# Ohne jeden Latch traegt das Parken die Richtung allein.
+f = Attrappe(race_direction=None)
+f.durchfahren()
+pruefe('ohne Latch gilt das Parken', f.race_direction == 'CW')
 
 f = Attrappe(nur_ausparken=True)
 f.durchfahren()
