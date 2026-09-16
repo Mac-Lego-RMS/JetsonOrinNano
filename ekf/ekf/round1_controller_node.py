@@ -11,7 +11,7 @@ State machine:
              ueber Rangieren. Die Zuege laufen als Positionsfahrten auf dem ESP
              (Encoder), nicht ueber /cmd_vel: der Lidar sieht unter 0,15 m
              nichts, und in der Luecke ist die naechste Wand genau dort.
-             Siehe ekf/ausparken.py. Mit nur_ausparken haelt der Regler danach
+             Siehe ekf/ausparken.py. Mit ausparken_nur haelt der Regler danach
              an, statt das Rennen zu fahren.
 
   APPROACH   Drive the current straight, centred against the target line (outer
@@ -137,6 +137,11 @@ class Round1Controller(Node):
         'v_start':       ('v_start',       0.35,  float),   # speed on the start straight (before direction latch)
         'start_stop_gap': ('start_stop_gap', 0.50, float),  # stop this far from the front wall if direction never comes
         'start_lane_min': ('start_lane_min', 0.45, float),  # plausibility band for d_left+d_right
+        # Steht der Roboter beim Losfahren dichter als das an einer Wand, ist
+        # das keine Spur mehr. In der Parkluecke misst er 0.15 zur Aussenwand
+        # gegen 0.83 ins Feld -- die Summe liegt im Plausibilitaetsband, die
+        # Aufteilung nicht. Nur eine Warnung: er koennte auch schief stehen.
+        'start_wand_warn': ('start_wand_warn', 0.30, float),
         'start_lane_max': ('start_lane_max', 1.30, float),
         # --- Ausweichen auf der Startgeraden ---------------------------------
         # Das Sitzraster und die Eckengeometrie gibt es erst beim Richtungs-
@@ -186,9 +191,9 @@ class Round1Controller(Node):
         # ragen 20 cm ins Feld; die Luecke ist der 26,25 cm breite Spalt
         # dazwischen. Der Roboter steht laengs darin und muss quer heraus.
         # Die ganze Rechnerei steckt in ekf/ausparken.py, hier nur die Schalter.
-        # ausparken, nur_ausparken und ausparken_richtung_invertieren sind
+        # ausparken, ausparken_nur und ausparken_richtung_invertieren sind
         # ECHTE Bool-Parameter und stehen weiter unten bei require_button --
-        # damit "-p nur_ausparken:=true" tut, was man erwartet. Alles in
+        # damit "-p ausparken_nur:=true" tut, was man erwartet. Alles in
         # dieser Tabelle ist DOUBLE und wollte "1.0" statt "true".
         'ausparken_sektor_grad':  ('ausparken_sektor_grad',  20.0, float),
         'ausparken_scans':        ('ausparken_scans',        5,    int),
@@ -224,10 +229,16 @@ class Round1Controller(Node):
             self.declare_parameter(name, default)
         # structural (read once)
         self.declare_parameter('require_button', False)
-        # Ausparken aus der Startluecke. nur_ausparken haelt danach an, statt
-        # das Rennen zu fahren -- zum Einstellen der Schrittfolge.
+        # ausparken ist DER Schalter. ausparken_nur ist eine Unteroption
+        # davon: nach der Sequenz anhalten, statt das Rennen zu fahren -- zum
+        # Einstellen der Schrittfolge.
+        #
+        # Frueher hiess sie nur_ausparken, und das war eine Falle:
+        # "-p nur_ausparken:=false" liest sich wie "ausparken und dann
+        # fahren", schaltet aber gar nichts ein. Der Name sagt jetzt, wozu
+        # sie gehoert.
         self.declare_parameter('ausparken', False)
-        self.declare_parameter('nur_ausparken', False)
+        self.declare_parameter('ausparken_nur', False)
         # Falls meine Herleitung der offenen Seite doch falsch herum ist:
         # ein Schalter statt einer Codeaenderung.
         self.declare_parameter('ausparken_richtung_invertieren', False)
@@ -289,7 +300,7 @@ class Round1Controller(Node):
         self._load_params()
         self.require_button = bool(self.get_parameter('require_button').value)
         self.ausparken = bool(self.get_parameter('ausparken').value)
-        self.nur_ausparken = bool(self.get_parameter('nur_ausparken').value)
+        self.ausparken_nur = bool(self.get_parameter('ausparken_nur').value)
         self.ausparken_richtung_invertieren = bool(
             self.get_parameter('ausparken_richtung_invertieren').value)
         self.ausparken_setzt_richtung = bool(
@@ -304,7 +315,7 @@ class Round1Controller(Node):
         self.ausparken_pid_nachher = list(
             self.get_parameter('ausparken_pid_nachher').value)
         # Ein Schalter soll reichen: wer nur ausparken will, meint auch ausparken.
-        if self.nur_ausparken and not self.ausparken:
+        if self.ausparken_nur and not self.ausparken:
             self.ausparken = True
 
         # --- state ---
@@ -422,13 +433,18 @@ class Round1Controller(Node):
 
         self.dt = 1.0 / self.control_rate
         self.create_timer(self.dt, self.control_loop)
-        if self.ausparken:
+        if self.ausparken and self.ausparken_nur:
             self.get_logger().info(
-                ">>> Round1Controller bereit. Erst AUSPARKEN%s. <<<"
-                % (", danach anhalten (nur_ausparken)" if self.nur_ausparken
-                   else ", danach das Rennen"))
+                ">>> Round1Controller bereit: AUSPARKEN, danach ANHALTEN "
+                "(ausparken_nur). <<<")
+        elif self.ausparken:
+            self.get_logger().info(
+                ">>> Round1Controller bereit: AUSPARKEN, danach das RENNEN. <<<")
         else:
-            self.get_logger().info(">>> Round1Controller (multi-corner) bereit. Warte auf Eingaben... <<<")
+            self.get_logger().info(
+                ">>> Round1Controller bereit: KEIN Ausparken -- er faehrt los, "
+                "sobald die Eingaben da sind. Zum Ausparken: "
+                "-p ausparken:=true <<<")
 
     def _corner_msg_type(self):
         from robot_msgs.msg import CornerGeometry
@@ -1202,10 +1218,10 @@ class Round1Controller(Node):
         self.get_logger().info(
             "Ausparken fertig: Pose (%.2f, %.2f), Kurs %+.1f grad."
             % (x, y, math.degrees(theta)))
-        if self.nur_ausparken:
+        if self.ausparken_nur:
             self.state = 'DONE'
             self.get_logger().info(
-                "nur_ausparken gesetzt -- Regler haelt hier an.")
+                "ausparken_nur gesetzt -- Regler haelt hier an.")
             return
         if self.ausparken_halt_s > 0.0:
             self.state = 'AUSPARK_SCAN'
@@ -1588,6 +1604,7 @@ class Round1Controller(Node):
         just drive the start straight (see _drive_start) and plan later."""
         self.drive_start_xy = (x, y)
         self.ct_integral = 0.0
+        self._warnen_wenn_in_der_luecke()
         if not self.geometry_ready():
             self.get_logger().info(
                 "Start ohne Kartengeometrie: fahre mittig geradeaus bis Richtung erkannt.")
@@ -1600,6 +1617,28 @@ class Round1Controller(Node):
         if self.arc is None:
             self.plan_arc(theta)
         self.publish_lap_state()
+
+    def _warnen_wenn_in_der_luecke(self):
+        """Steht er beim Losfahren noch in der Parkluecke?
+
+        Die bestehende Plausibilitaetspruefung (start_lane_min/max) sieht nur
+        die SUMME der beiden Wandabstaende. In der Luecke sind das 0.15 + 0.83
+        = 0.98 -- mitten im erlaubten Band. Die Aufteilung verraet es: in einer
+        Spur steht er ungefaehr mittig, in der Luecke klebt er an der Wand.
+        """
+        if self.ausparken or not self.wall_dist:
+            return
+        links, rechts = self.wall_dist
+        if not (math.isfinite(links) and math.isfinite(rechts)):
+            return
+        if min(links, rechts) >= self.start_wand_warn:
+            return
+        self.get_logger().warn(
+            "Eine Seite ist nur %.2f m entfernt, die andere %.2f m -- in einer "
+            "Spur stuende er mittig. Sieht nach der Parkluecke aus, und "
+            "ausparken ist AUS. Falls ja: mit -p ausparken:=true starten, "
+            "sonst faehrt er in die Magenta-Wand."
+            % (min(links, rechts), max(links, rechts)))
 
     def _drive_start(self, x, y, theta):
         """Drive the start straight before the direction/geometry are latched.

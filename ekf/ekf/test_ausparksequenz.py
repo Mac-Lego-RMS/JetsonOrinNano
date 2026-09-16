@@ -75,7 +75,7 @@ class Attrappe:
         self.state = 'AUSPARK_BUTTON'
         self.require_button = False
         self.button_pressed = False
-        self.nur_ausparken = False
+        self.ausparken_nur = False
         self.ausparken_richtung_invertieren = False
         self.ausparken_schritte = list(A.SCHRITTE_STANDARD)
         self.ausparken_pid = [4.0, 140.0, 8.0, 90.0]   # wie der echte Standard
@@ -348,10 +348,10 @@ f = Attrappe(race_direction=None)
 f.durchfahren()
 pruefe('ohne Latch gilt das Parken', f.race_direction == 'CW')
 
-f = Attrappe(nur_ausparken=True)
+f = Attrappe(ausparken_nur=True)
 f.durchfahren()
-pruefe('nur_ausparken haelt an', f.state == 'DONE')
-pruefe('nur_ausparken faehrt trotzdem die ganze Folge',
+pruefe('ausparken_nur haelt an', f.state == 'DONE')
+pruefe('ausparken_nur faehrt trotzdem die ganze Folge',
        len(f.pub_move.werte) == len(f.ausp_schritte))
 
 # Status 2 heisst: etwas anderes hat den Motor uebernommen. Immer fatal.
