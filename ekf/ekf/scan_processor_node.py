@@ -4,29 +4,35 @@ scan_processor node: start detection, map management, and perception outputs
 for both challenges. race_mode ('obstacle' | 'open') is a ROS parameter.
 
   obstacle: commits the full generated field map for the detected position
-            (direction defaults to CW, resolved at the first corner). After the
-            direction latch it also detects traffic signs from the
-            colour-classified cloud and accumulates them onto the fixed seat
-            grid.
+            (direction defaults to CW, resolved at the first corner). Detects
+            traffic signs from the colour-classified cloud.
   open:     inner-band geometry is unknown, so it commits a reduced 3-wall
             start map, computes the exact field start pose from the measured
             distances at the direction latch, learns each straight's lane width
             and reconstructs the inner band. No obstacle detection.
 
+Two layers of obstacle output, mirroring the wall outputs:
+  /obstacles_live  raw, per scan, base_link frame -- for REACTING. Needs no map,
+                   so it works from the first scan.
+  /obstacles       snapped to the seat grid, accumulated, map frame -- for
+                   PLANNING. The grid needs the start pose, so it only exists
+                   after the direction latch; detections from before that are
+                   BUFFERED with their pose and replayed when the grid is
+                   built, so start-straight obstacles are not lost.
+
 Subscribes: /scan, /ekf/odom, /round1_controller/lap_state (latched),
             /camera_lidar/colored_scan (obstacle mode only)
 Publishes:  /wall_matches
             /wall_distances    live [left, right] side distances, NaN if unseen
+            /obstacles_live    raw obstacles, base_link frame, every scan
             /front_wall_x      (latched) front wall x in the map frame
             /race_direction    (latched) CW / CCW, latched once, then frozen
             /corner_geometry   (latched) outer box, at the direction latch
-            /inner_geometry    (latched) inner band, once all lane widths known
-                                         (open mode only; edge_length unused)
-            /obstacles         (latched) complete obstacle set, republished on
-                                         every change (obstacle mode only)
+            /inner_geometry    (latched) inner band
+            /obstacles         (latched) accumulated obstacle set, map frame
 """
 import numpy as np
-from collections import Counter
+from collections import Counter, deque
 
 import rclpy
 from rclpy.node import Node
@@ -43,8 +49,9 @@ from geometry_msgs.msg import Point
 
 from ekf.ekf import wrap
 from ekf.direction_detection import detect_direction
-from ekf.obstacle_detection import detect_obstacles
-from ekf.obstacle_map import ObstacleMap
+from ekf.obstacle_detection import (detect_obstacles, mask_sectors,
+                                    sector_from_robot_point)
+from ekf.obstacle_map import ObstacleMap, MIN_SEAT_VOTES
 from ekf.wall_extraction import (
     scan_to_points, cluster_points, merge_wraparound, split_at_corners,
     fit_wall_hnf, lidar_to_base_link, match_walls,
@@ -58,11 +65,27 @@ from ekf.start_detection import detect_start_obstacle, detect_start_open
 
 START_VOTES = 5                # scans to vote over before committing the map
 DIRECTION_VOTES = 5            # confident, agreeing scans before latching
-MAP_SWITCH_MAX_X = 0.30        # only switch the map while still near the start
 LANE_NOMINALS = (0.60, 1.00)   # plausible lane widths (open challenge)
 LANE_PLAUS_TOL = 0.15          # measurement must be within this of a nominal
 MIN_WIDTH_SAMPLES = 10         # driving samples per straight before it counts
 SIDE_ALPHA_TOL = np.radians(25.0)
+
+# The map switch is jump-free for the whole start straight: the CW and CCW maps
+# describe the SAME three walls there and differ only in which side is the inner
+# band, which first matters at the corner. So the guard runs up to just short of
+# the corner -- driving far, or swerving around an obstacle, must not block it.
+MAP_SWITCH_CORNER_MARGIN = 0.40
+MAP_SWITCH_FALLBACK_X = 0.30
+
+# Detections taken before the seat grid exists are kept with their pose and
+# replayed once it does. Bounded so a long pre-latch phase cannot grow without
+# limit (15 Hz -> 60 s of scans).
+PENDING_MAX = 900
+
+# A seat is masked out of the wall extraction far earlier than it is reported
+# as an obstacle: one vote is already reason enough to keep those directions
+# out of a wall fit, while reporting still needs the full threshold.
+MASK_MIN_VOTES = max(1, MIN_SEAT_VOTES // 4)
 
 OUTER_HALF = 1.5               # outer wall position in the field frame
 
@@ -80,8 +103,6 @@ class ScanProcessor(Node):
         super().__init__('scan_processor')
         self.race_mode = self.declare_parameter(
             'race_mode', 'obstacle').get_parameter_value().string_value
-        # when true, the start straight only has its INNER column of seats
-        # (the rules move the signs inward once a parking lot is placed)
         self.parking_lot_present = self.declare_parameter(
             'parking_lot_present', False).get_parameter_value().bool_value
 
@@ -92,9 +113,6 @@ class ScanProcessor(Node):
         self.position = None
         self.lane_width = None
 
-        # measured start distances, for the exact open-mode start pose.
-        # front_d_meas is separate from front_wall_x, which gets overwritten
-        # when the matching map is switched.
         self.left_d = None
         self.right_d = None
         self.front_d_meas = None
@@ -108,11 +126,17 @@ class ScanProcessor(Node):
         self.width_fixed = {}
         self.inner_walls = None
 
-        # --- obstacle detection (obstacle mode) ---
+        # --- obstacles (obstacle mode) ---
         self.obstacle_map = None     # built at the direction latch
-        self.seat_wall_idx = None    # seat group -> outer wall index
-        self.start_wall_idx = None   # outer wall index of the start straight
-        self.obstacle_state = None   # last published set, for change detection
+        self.seat_wall_idx = None
+        self.start_wall_idx = None
+        self.obstacle_state = None
+        self.pending_dets = deque(maxlen=PENDING_MAX)   # (detections, pose)
+        # angular sectors of the pillars seen in the most recent colour scan.
+        # The wall extraction masks these out: a pillar merged into a wall
+        # corrupts its fit, and near a corner that delays the direction latch
+        # by seconds -- which in turn delays the seat grid and the obstacle map.
+        self.obstacle_sectors = []
 
         latched = QoSProfile(depth=1)
         latched.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -128,6 +152,8 @@ class ScanProcessor(Node):
         self.pub = self.create_publisher(WallMatchArray, '/wall_matches', 10)
         self.wall_dist_pub = self.create_publisher(
             Float64MultiArray, '/wall_distances', 10)
+        self.obstacle_live_pub = self.create_publisher(
+            ObstacleArray, '/obstacles_live', 10)
         self.front_wall_pub = self.create_publisher(Float64, '/front_wall_x', latched)
         self.direction_pub = self.create_publisher(String, '/race_direction', latched)
         self.corner_pub = self.create_publisher(CornerGeometry, '/corner_geometry', latched)
@@ -149,10 +175,8 @@ class ScanProcessor(Node):
         self.pose = (x, y, theta)
 
     def lap_state_cb(self, msg):
-        """Track [corner_idx, corner_count, lap]."""
         prev = self.lap_state
         self.lap_state = list(msg.data)
-        # remember the start straight while no corner has been driven yet
         if self.lap_state[1] == 0 and self.start_wall_idx is None:
             self.start_wall_idx = self._current_outer_wall_index()
         if prev is not None and self.lap_state[2] > prev[2]:
@@ -162,7 +186,6 @@ class ScanProcessor(Node):
         measured = self._extract(msg)
         self._publish_wall_distances(measured)
 
-        # --- DETECTING: vote on the start position ---
         if self.map_walls is None:
             res = self._detect(measured)
             if res['valid']:
@@ -172,7 +195,6 @@ class ScanProcessor(Node):
                 self._commit()
             return
 
-        # --- RUNNING: normal matching ---
         matches = match_walls(measured, self.map_walls, self.pose, d_tol=0.12)
         self._update_direction(measured)
         self._learn_lane_width(measured)
@@ -190,13 +212,34 @@ class ScanProcessor(Node):
         self.pub.publish(out)
 
     def colored_scan_cb(self, msg):
-        """Obstacle detection. Obstacle mode only, and only once the seat grid
-        exists (which needs the start pose, i.e. the direction latch)."""
-        if self.race_mode != 'obstacle' or self.obstacle_map is None:
+        """Obstacle detection, obstacle mode only.
+
+        Raw detections go out every scan on /obstacles_live -- no map needed.
+        For the seat grid: if it does not exist yet (before the direction
+        latch), the detections are buffered WITH the pose they were taken at
+        and replayed when the grid is built. The pose is start-anchored and
+        valid from the first scan, so a replayed detection snaps exactly as it
+        would have live.
+        """
+        if self.race_mode != 'obstacle':
             return
         dets = detect_obstacles(msg)
+
+        # hand the pillar directions to the wall extraction. Set every scan,
+        # including the empty case, so the mask clears once a pillar is passed.
+        # Colour scan and /scan come from the same LiDAR at the same rate, so
+        # the sectors are at most one scan interval old -- well inside the
+        # margin they are widened by.
+        self.obstacle_sectors = [d['sector'] for d in dets]
+
+        self._publish_obstacles_live(dets, msg.header.stamp)
         if not dets:
             return
+
+        if self.obstacle_map is None:
+            self.pending_dets.append((dets, self.pose))
+            return
+
         self.obstacle_map.add_detections(dets, self.pose,
                                          allowed=self._seat_allowed)
         self._publish_obstacles_if_changed()
@@ -205,8 +248,40 @@ class ScanProcessor(Node):
     # extraction / start detection
     # ------------------------------------------------------------------ #
 
+    def _map_obstacle_sectors(self):
+        """Sectors for pillars whose position is already known, recomputed from
+        the current pose.
+
+        This is the layer that carries a close pass. /obstacles_live cannot:
+        it arrives at ~6 Hz, and at 0.1-0.2 m the bearing sweeps ~25 deg
+        between messages while the pillar is ~20 deg wide, so the previous
+        sector no longer overlaps. The fusion also drops everything below its
+        0.15 m range floor, so the pillar vanishes from the live topic exactly
+        in the window where it breaks the wall fit. The map position does not
+        vanish, and the pose is available at scan rate.
+        """
+        if self.obstacle_map is None:
+            return []
+        px, py, th = self.pose
+        c, s = np.cos(th), np.sin(th)
+        out = []
+        for p in self.obstacle_map.seats_for_mask(MASK_MIN_VOTES):
+            dx, dy = p[0] - px, p[1] - py
+            xr = c * dx + s * dy          # map -> robot frame
+            yr = -s * dx + c * dy
+            sec = sector_from_robot_point(xr, yr)
+            if sec is not None:
+                out.append(sec)
+        return out
+
     def _extract(self, msg):
         pts = scan_to_points(msg)
+        # drop the directions occupied by pillars, so they cannot end up inside
+        # a wall cluster. A missing slice of wall is harmless (gap clustering
+        # splits it, both parts still match the same map wall); a pillar inside
+        # a wall is not. Two sources: known positions from the map (fast, works
+        # at any range) and the live topic (for pillars not yet mapped).
+        pts = mask_sectors(pts, self.obstacle_sectors + self._map_obstacle_sectors())
         clusters = merge_wraparound(cluster_points(pts))
         split = []
         for c in clusters:
@@ -221,8 +296,7 @@ class ScanProcessor(Node):
     @staticmethod
     def _side_distances(measured):
         """Nearest wall distance on each side, in metres (positive).
-        Left is alpha ~ -90 (+y), right is alpha ~ +90 (-y). Either may be None
-        if no wall was seen on that side -- normal in a corner."""
+        Left is alpha ~ -90 (+y), right is alpha ~ +90 (-y)."""
         left = right = None
         for w in measured:
             a, d = w[0], w[1]
@@ -312,19 +386,27 @@ class ScanProcessor(Node):
                 self._init_obstacle_map(start_pose)
 
     def _start_pose_for_direction(self):
-        """The field start pose consistent with the latched direction."""
         if self.race_mode == 'open':
             return self._open_start_pose()
         poses = START_POSES_CW if self.direction == 'CW' else START_POSES_CCW
         return poses[f'pos{self.position}']
 
+    def _map_switch_limit(self):
+        """How far along the straight the map may still be switched: up to just
+        short of the corner, since both maps hold the same three walls until
+        the inner band ends."""
+        if self.front_wall_x is None:
+            return MAP_SWITCH_FALLBACK_X
+        return max(MAP_SWITCH_FALLBACK_X,
+                   self.front_wall_x - MAP_SWITCH_CORNER_MARGIN)
+
     def _switch_map_to_direction(self):
-        """Switch the EKF matching map to the latched direction. Safe only near
-        the start; guarded against a late latch that would jump the pose."""
-        if abs(self.pose[0]) > MAP_SWITCH_MAX_X:
+        limit = self._map_switch_limit()
+        if abs(self.pose[0]) > limit:
             self.get_logger().warn(
-                f'direction latched late (x={self.pose[0]:.2f} m) -- NOT '
-                f'switching map to avoid a pose jump; check latch timing')
+                f'direction latched at x={self.pose[0]:.2f} m, past the '
+                f'{limit:.2f} m limit (corner) -- NOT switching map to avoid '
+                f'a pose jump')
             return
 
         start_pose = self._start_pose_for_direction()
@@ -340,7 +422,7 @@ class ScanProcessor(Node):
         self.front_wall_x = self._front_wall_x_from_map(self.map_walls)
         self.get_logger().info(
             f'matching map switched to {self.direction} '
-            f'({len(self.map_walls)} walls)')
+            f'({len(self.map_walls)} walls, at x={self.pose[0]:.2f} m)')
 
     def _open_start_pose(self):
         """Exact field start pose for the open challenge, from the measured
@@ -356,11 +438,27 @@ class ScanProcessor(Node):
         return (f - OUTER_HALF, OUTER_HALF - self.right_d, np.pi)
 
     # ------------------------------------------------------------------ #
-    # obstacles (obstacle mode only)
+    # obstacles
     # ------------------------------------------------------------------ #
 
+    def _publish_obstacles_live(self, dets, stamp):
+        """Raw detections, base_link frame, every scan. No map needed, so this
+        works from the first scan on. id and wall_idx are -1: without a map
+        there is no seat to assign."""
+        msg = ObstacleArray()
+        msg.header.stamp = stamp
+        msg.header.frame_id = 'base_link'
+        for d in dets:
+            o = Obstacle()
+            o.id = -1
+            o.position = Point(x=float(d['x']), y=float(d['y']), z=0.0)
+            o.color = COLOR_CODE.get(d['color'], Obstacle.COLOR_UNKNOWN)
+            o.wall_idx = -1
+            msg.obstacles.append(o)
+        self.obstacle_live_pub.publish(msg)
+
     def _init_obstacle_map(self, start_pose):
-        """Build the seat grid once the start pose is known."""
+        """Build the seat grid, then replay everything seen before it existed."""
         seats = obstacle_seats_map(start_pose)
         self.seat_wall_idx = seat_group_to_wall_index(start_pose)
         self.obstacle_map = ObstacleMap(seats)
@@ -368,20 +466,30 @@ class ScanProcessor(Node):
             f'obstacle seat grid ready (24 seats, groups -> walls '
             f'{self.seat_wall_idx})')
 
+        if self.pending_dets:
+            n = sum(len(d) for d, _ in self.pending_dets)
+            for dets, pose in self.pending_dets:
+                self.obstacle_map.add_detections(dets, pose,
+                                                 allowed=self._seat_allowed)
+            self.get_logger().info(
+                f'replayed {n} buffered detections from '
+                f'{len(self.pending_dets)} scans taken before the latch')
+            self.pending_dets.clear()
+            self._publish_obstacles_if_changed()
+
     def _seat_allowed(self, seat_group, column):
         """Parking-lot rule: on the start straight only the inner column is
         legal, because the signs are moved inward when a lot is placed."""
         if not self.parking_lot_present:
             return True
         if self.start_wall_idx is None or self.seat_wall_idx is None:
-            return True                       # start straight not known yet
+            return True
         if self.seat_wall_idx[seat_group] != self.start_wall_idx:
             return True
         return column == 'inner'
 
     @staticmethod
     def _seat_id(seat):
-        """Flat, stable id 0..23 from the seat's group / row / column."""
         return seat['straight'] * 6 + seat['row'] * 2 + \
             (0 if seat['column'] == 'outer' else 1)
 
@@ -404,16 +512,11 @@ class ScanProcessor(Node):
             msg.obstacles.append(o)
         self.obstacle_pub.publish(msg)
 
-        # a seat voted for BOTH colours means something is wrong (two pillars
-        # snapping to one seat, or a misclassification) -- surface it
-        for sid, colours in self.obstacle_map.votes.items():
-            if len(colours) > 1:
-                self.get_logger().warn(
-                    f'seat {sid} has votes for several colours: {dict(colours)}')
-
-        txt = ', '.join(f"#{self._seat_id(s)}({s['color'][0]},w{self.seat_wall_idx[s['straight']]})"
-                        for s in sorted(occupied, key=self._seat_id))
+        txt = ', '.join(
+            f"#{self._seat_id(s)}({s['color'][0]},w{self.seat_wall_idx[s['straight']]})"
+            for s in sorted(occupied, key=self._seat_id))
         self.get_logger().info(f'obstacles: {len(occupied)} [{txt}]')
+        self.get_logger().info('votes: ' + self.obstacle_map.vote_summary())
 
     # ------------------------------------------------------------------ #
     # lane-width learning (open mode)
@@ -428,10 +531,9 @@ class ScanProcessor(Node):
         return (k - 1) % 4 if self.direction == 'CCW' else k % 4
 
     def _learn_lane_width(self, measured):
-        """The START straight's width comes from the stationary start detection
-        (more accurate, and there may be little distance left on it from
-        position 1). The others are sampled while driving. Learning continues
-        past round 1 until the inner band is committed."""
+        """The START straight's width comes from the stationary start detection.
+        The others are sampled while driving. Learning continues past round 1
+        until the inner band is committed."""
         if self.race_mode != 'open' or self.inner_walls is not None:
             return
         wall_idx = self._current_outer_wall_index()

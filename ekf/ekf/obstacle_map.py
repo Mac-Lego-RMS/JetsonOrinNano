@@ -7,23 +7,33 @@ SNAPPED to the nearest legal seat. Seats are 0.2 m apart across the lane and
 0.5 m along it, so snapping turns a noisy measurement into a discrete decision
 and a plausibility check in one step.
 
-Votes accumulate per (seat, colour) over the whole drive rather than being
-decided per scan. That resolves occlusion: when two pillars share a row (0.2 m
-apart in depth) the near one hides the far one head-on, and only a later
-viewpoint reveals both.
+Votes accumulate per seat over the whole drive rather than being decided per
+scan. That resolves occlusion: when two pillars share a row (0.2 m apart in
+depth) the near one hides the far one head-on, and only a later viewpoint
+reveals both.
+
+DISTANCE-GATED COLOUR. Measured on real runs: the pillar POSITION is reliable
+at any range (clusters stay compact, snap error < 0.06 m even at 2.4 m), but
+the COLOUR is not -- beyond roughly 1.7 m red pillars read as green, one-sided
+and reproducibly:
+
+    seat 0 (physically RED), red/green votes by range
+      0-0.8 m  12/0     1.2-1.6 m  10/0     2.0-3.0 m   0/16
+      0.8-1.2  10/0     1.6-2.0     2/8
+
+At 2.4 m the sampling window is only a few pixels tall, so background bleeds in.
+Counting those votes made seats report the wrong colour for seconds before
+flipping. So occupancy is voted at ANY range, colour only within
+COLOR_MAX_DIST. A seat that is occupied but has no close-range colour vote yet
+reports 'unknown' -- which is honest and actionable: the controller knows
+something is there and can prepare, it just cannot pick a side yet.
 
 GHOST SUPPRESSION. Accumulating votes never forgets, so a single bad snap
-leaves a permanent mark: one pillar that snapped to both columns of its row at
-different times shows up as two obstacles 0.2 m apart, and a stray can push a
-straight to three. Two filters run before a seat is reported, both using only
-information already available:
-
-  1. Same-row competition. Two seats in one row are 0.2 m apart. Both CAN
-     legitimately hold a pillar (rules cards 28-36), so this is a ratio test,
-     not an exclusion: the weaker seat must reach a fair share of the stronger
-     one's votes, otherwise it is a snapping artefact of the same pillar.
-  2. Cap per straight. The rules allow exactly 1 or 2 obstacles per straight,
-     so only the two strongest seats of a straight are reported.
+leaves a permanent mark. Two filters run before a seat is reported:
+  1. Same-row competition -- two seats in one row are 0.2 m apart. Both CAN
+     legitimately hold a pillar, so this is a ratio test, not an exclusion.
+  2. Cap per straight -- the rules allow at most 2, so only the two strongest
+     seats of a straight are reported.
 """
 import numpy as np
 from collections import defaultdict
@@ -31,9 +41,11 @@ from collections import defaultdict
 SNAP_MAX_DIST = 0.12       # a detection further than this from any seat is
                            # not an obstacle (seats are 0.2 m apart)
 MIN_SEAT_VOTES = 3         # votes before a seat counts as occupied
+COLOR_MAX_DIST = 1.60      # colour is only believed within this range
 SIBLING_MIN_RATIO = 0.35   # weaker of two same-row seats must reach this share
-                           # of the stronger one's votes to be believed
 MAX_PER_STRAIGHT = 2       # rules: never more than 2 obstacles on a straight
+
+FAR = 'far'                # vote key for "seen, but too far to trust colour"
 
 
 def robot_to_map(x, y, pose):
@@ -46,7 +58,8 @@ def robot_to_map(x, y, pose):
 class ObstacleMap:
     """Accumulates obstacle detections onto the fixed seat grid."""
 
-    def __init__(self, seats_by_straight, snap_max=SNAP_MAX_DIST):
+    def __init__(self, seats_by_straight, snap_max=SNAP_MAX_DIST,
+                 color_max_dist=COLOR_MAX_DIST):
         """seats_by_straight: output of obstacle_seats_map(start_pose)."""
         self.seats = []            # flat: (straight, k, point, column, row)
         for si, straight in enumerate(seats_by_straight):
@@ -54,7 +67,8 @@ class ObstacleMap:
                 self.seats.append((si, k, np.asarray(s['p'], dtype=float),
                                    s['column'], s['row']))
         self.snap_max = snap_max
-        self.votes = defaultdict(lambda: defaultdict(int))   # seat -> colour -> n
+        self.color_max_dist = color_max_dist
+        self.votes = defaultdict(lambda: defaultdict(int))  # seat -> key -> n
         self.rejected = 0          # detections that matched no seat
 
     # ------------------------------------------------------------------ #
@@ -64,7 +78,10 @@ class ObstacleMap:
     def add_detections(self, detections, pose, allowed=None):
         """Snap detections (robot frame) to seats using the current pose.
 
-        allowed: optional predicate(straight, column) -> bool, to encode the
+        A detection beyond color_max_dist still votes for OCCUPANCY, but its
+        colour is discarded -- the classifier is not trustworthy at range.
+
+        allowed: optional predicate(straight, column) -> bool, for the
         start-straight rule that only the inner column is legal there.
         """
         for det in detections:
@@ -79,7 +96,9 @@ class ObstacleMap:
             if best is None or best_d > self.snap_max:
                 self.rejected += 1
                 continue
-            self.votes[best][det['color']] += 1
+
+            key = det['color'] if det['dist'] <= self.color_max_dist else FAR
+            self.votes[best][key] += 1
 
     # ------------------------------------------------------------------ #
     # evaluation
@@ -88,22 +107,25 @@ class ObstacleMap:
     def _candidates(self, min_votes):
         """Seats over the vote threshold, before ghost suppression."""
         out = []
-        for sid, colours in self.votes.items():
-            total = sum(colours.values())
+        for sid, keys in self.votes.items():
+            total = sum(keys.values())               # occupancy: all ranges
             if total < min_votes:
                 continue
-            color = max(colours.items(), key=lambda kv: kv[1])[0]
+            coloured = {k: n for k, n in keys.items() if k != FAR}
+            color = (max(coloured.items(), key=lambda kv: kv[1])[0]
+                     if coloured else 'unknown')
             si, k, sp, col, row = self.seats[sid]
             out.append({'seat_id': sid, 'straight': si, 'column': col,
-                        'row': row, 'p': sp, 'color': color, 'votes': total})
+                        'row': row, 'p': sp, 'color': color, 'votes': total,
+                        'color_votes': sum(coloured.values())})
         return out
 
     @staticmethod
     def _resolve_row_conflicts(group, ratio=SIBLING_MIN_RATIO):
-        """Within one straight, drop a weak seat sitting next to a much stronger
-        one in the SAME ROW -- that is one pillar snapping to both columns, not
-        two pillars 0.2 m apart. A genuine same-row pair has comparable vote
-        counts and survives."""
+        """Drop a weak seat sitting next to a much stronger one in the SAME ROW
+        -- that is one pillar snapping to both columns, not two pillars 0.2 m
+        apart. A genuine same-row pair has comparable vote counts and survives.
+        """
         by_row = defaultdict(list)
         for c in group:
             by_row[c['row']].append(c)
@@ -125,8 +147,10 @@ class ObstacleMap:
         """Seats believed to hold an obstacle, after ghost suppression.
 
         Returns dicts:
-            {'seat_id', 'straight', 'column', 'row', 'p', 'color', 'votes'}
-        Colour is the majority of that seat's votes.
+            {'seat_id', 'straight', 'column', 'row', 'p', 'color', 'votes',
+             'color_votes'}
+        'color' is 'red', 'green', or 'unknown' when the seat has only been
+        seen from beyond the colour range.
         """
         out = []
         candidates = self._candidates(min_votes)
@@ -145,13 +169,26 @@ class ObstacleMap:
                  if s['straight'] == straight])
         return 1 <= n <= 2, n
 
+    def seats_for_mask(self, min_votes=1):
+        """Map positions of seats with at least min_votes, for masking the wall
+        extraction.
+
+        Deliberately a much lower bar than occupied_seats: a seat with even one
+        vote is probably a real pillar, and masking it costs only a slice of
+        wall, which the gap clustering absorbs. Reporting it as an obstacle
+        would be a different matter -- that still needs the full threshold.
+        """
+        return [self.seats[sid][2] for sid, keys in self.votes.items()
+                if sum(keys.values()) >= min_votes]
+
     # ------------------------------------------------------------------ #
     # diagnostics
     # ------------------------------------------------------------------ #
 
     def vote_summary(self, min_votes=MIN_SEAT_VOTES):
         """Raw votes per seat plus whether it survived suppression -- for
-        tuning SIBLING_MIN_RATIO against real runs."""
+        tuning the thresholds against real runs. 'far' counts are occupancy
+        votes whose colour was discarded as unreliable."""
         reported = {c['seat_id'] for c in self.occupied_seats(min_votes)}
         lines = []
         for sid in sorted(self.votes):
