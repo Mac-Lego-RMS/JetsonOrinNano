@@ -254,150 +254,13 @@ def rg_kennzahl(stack: np.ndarray):
     return (g - r) / np.maximum(mx, 1).astype(np.float32), mx, (g - r)
 
 
-# ---------------------------------------------------------------------------
-# Neutralpunkt (Weissabgleich am Spielfeld)
-# ---------------------------------------------------------------------------
-# rg_kennzahl setzt stillschweigend voraus, dass eine farblose Flaeche z=0
-# ergibt. Das tut sie nur, wenn der Weissabgleich der Kamera zum Licht passt.
-# Am Aufbau gemessen (Bag wb_test, 266 Frames): die WEISSE Matte liefert
-# B=167 G=212 R=194, also z=+0.084 statt 0. Damit sind die symmetrischen
-# Schwellen +-rg_z_min in Wahrheit voellig unsymmetrisch:
-#
-#     gruen braucht einen Farbhub von 0.150 - 0.084 = 0.066
-#     rot   braucht einen Farbhub von 0.150 + 0.084 = 0.234   (3.5-mal so viel)
-#
-# Deshalb sieht der Roboter ueberall gruen und verliert rot als erstes, sobald
-# die Pylone klein wird und ihre Farbe sich mit dem Hintergrund mischt. Im Bag
-# gefunden: eine rote Pylone bei Azimut 85 Grad misst z=-0.134 und faellt damit
-# unter die Schwelle -- sie wurde als 'unbekannt' verworfen.
-#
-# DER STICH IST NICHT RUNDUM GLEICH. Ueber 12 Sektoren gemessen laeuft er von
-# +0.046 bis +0.121, Spanne 0.075 -- die halbe Schwelle. Ursache ist das
-# gerichtete Licht im Raum plus der Farbgang des Fisheyes zum Rand hin. Eine
-# einzelne globale Zahl wuerde also die halbe Korrektur verschenken, deshalb
-# wird je Azimutsektor gemessen.
-#
-# Ueber die Zeit ist der Stich dagegen bockstabil (Streuung je Sektor maximal
-# 0.006 ueber 14 Sekunden Fahrt). Er ist also kein Belichtungsproblem, sondern
-# eine feststehende Fehleinstellung -- und damit sauber messbar.
-#
-# Warum nicht die schwarze Bande als zweite Referenz: sie misst B=6 G=13 R=13.
-# Bei so kleinen Zahlen kippt ein einziger Digit die Kennzahl um 0.077, und der
-# Median von Ganzzahlen ist selbst wieder ganzzahlig -- z_bande sprang in der
-# Messung zwischen 0.000 und -0.077 hin und her. Die Matte bei rund 200 ist die
-# belastbare Referenz, deshalb nur ein Punkt und der MITTELWERT statt des
-# Medians (mittelt das Digit-Rauschen ueber tausende Pixel weg).
-_RING_CACHE = {}
-
-
-def _ring_index(shape, center, r_min, r_max, sektoren, schritt):
-    """Pixelindizes eines Kreisrings, nach Azimutsektor sortiert.
-
-    Wird je Geometrie EINMAL gebaut und danach wiederverwendet -- pro Frame
-    bleibt reines Indizieren uebrig. Mit ``schritt`` wird ausgeduennt; fuer den
-    Mittelwert ueber tausende Pixel ist jedes dritte Pixel mehr als genug.
-    """
-    key = (tuple(shape), (round(float(center[0]), 1), round(float(center[1]), 1)),
-           float(r_min), float(r_max), int(sektoren), int(schritt))
-    treffer = _RING_CACHE.get(key)
-    if treffer is not None:
-        return treffer
-    hoehe, breite = shape[:2]
-    ys = np.arange(0, hoehe, schritt)
-    xs = np.arange(0, breite, schritt)
-    YY, XX = np.meshgrid(ys, xs, indexing='ij')
-    dx = XX - float(center[0])
-    dy = YY - float(center[1])
-    rad = np.hypot(dx, dy)
-    drin = (rad >= float(r_min)) & (rad <= float(r_max))
-    sek = ((np.degrees(np.arctan2(dy, dx)) % 360.0) //
-           (360.0 / int(sektoren))).astype(np.int32)
-    treffer = (YY[drin], XX[drin], np.clip(sek[drin], 0, int(sektoren) - 1))
-    _RING_CACHE[key] = treffer
-    return treffer
-
-
-def neutralpunkt(image_bgr, center, r_min, r_max, sektoren=12, schritt=3,
-                 max_chroma=30, hell_perzentil=55.0, min_pixel=150,
-                 glaetten=True):
-    """Neutralpunkt z0 der Kamera je Azimutsektor, gemessen an der Matte.
-
-    Abgetastet wird ein Kreisring zwischen ``r_min`` und ``r_max``; der soll auf
-    der hellen Matte liegen, also knapp AUSSERHALB der Bande (radial nach aussen
-    heisst im Fisheye nach unten). Je Sektor werden daraus die hellen, nahezu
-    farblosen Pixel genommen -- das ist die Matte -- und ihr mittleres
-    (G-R)/max(B,G,R) gebildet.
-
-    Rueckgabe: Array der Laenge ``sektoren``. Sektor i deckt die Azimutwinkel
-    [i*360/n, (i+1)*360/n) ab, gemessen im BILD (arctan2(y-cy, x-cx)), also in
-    derselben Konvention wie ``phi`` in ``classify_zone``.
-
-    Sektoren mit zu wenig brauchbaren Pixeln (etwas steht davor, die Matte ist
-    verdeckt) bekommen den Mittelwert der uebrigen -- eine Fehlstelle kann die
-    Korrektur also nicht verreissen.
-    """
-    sektoren = max(int(sektoren), 1)
-    ys, xs, sek = _ring_index(image_bgr.shape, center, r_min, r_max,
-                              sektoren, max(int(schritt), 1))
-    if ys.size == 0:
-        return np.zeros(sektoren, dtype=np.float32)
-
-    px = image_bgr[ys, xs].astype(np.float32)
-    b, g, r = px[:, 0], px[:, 1], px[:, 2]
-    mx = np.maximum(np.maximum(b, g), r)
-    lum = (b + g + r) / 3.0
-    farblos = np.abs(g - r) < float(max_chroma)
-
-    werte = np.full(sektoren, np.nan, dtype=np.float32)
-    for i in range(sektoren):
-        m = (sek == i) & farblos
-        if m.sum() < int(min_pixel):
-            continue
-        grenze = np.percentile(lum[m], float(hell_perzentil))
-        m = m & (lum >= grenze)          # nur die helle Haelfte = Matte
-        if m.sum() < int(min_pixel) // 2:
-            continue
-        # Mittelwert, nicht Median: der mittelt das Digit-Rauschen weg.
-        werte[i] = (g[m].mean() - r[m].mean()) / max(mx[m].mean(), 1.0)
-
-    gut = np.isfinite(werte)
-    if not gut.any():
-        return np.zeros(sektoren, dtype=np.float32)
-    werte[~gut] = float(werte[gut].mean())
-
-    if glaetten and sektoren >= 5:
-        # zyklischer 3-Punkt-Mittelwert, der Stich springt nicht von Sektor
-        # zu Sektor
-        werte = (np.roll(werte, 1) + werte + np.roll(werte, -1)) / 3.0
-    return werte.astype(np.float32)
-
-
-def z0_je_punkt(phi, z0_sektoren):
-    """Sektorwerte zyklisch auf beliebige Azimutwinkel interpolieren.
-
-    Gestuetzt wird auf die Sektormitten, damit an den Sektorgrenzen keine
-    Treppe entsteht.
-    """
-    z0 = np.asarray(z0_sektoren, dtype=np.float32).ravel()
-    if z0.size == 0:
-        return np.zeros(np.asarray(phi).shape, dtype=np.float32)
-    if z0.size == 1:
-        return np.full(np.asarray(phi).shape, float(z0[0]), dtype=np.float32)
-    zwei_pi = 2.0 * np.pi
-    mitten = (np.arange(z0.size) + 0.5) * (zwei_pi / z0.size)
-    stuetz_x = np.concatenate([mitten - zwei_pi, mitten, mitten + zwei_pi])
-    stuetz_y = np.tile(z0, 3)
-    return np.interp(np.asarray(phi, dtype=np.float32) % zwei_pi,
-                     stuetz_x, stuetz_y).astype(np.float32)
-
-
 def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
                   r_aussen: np.ndarray, center, min_frac: float = 0.20,
                   ranges: dict = None, steps: int = 13, black_v_max: int = 45,
                   nutz_anteil: float = 1.0, adaptiv_faktor: float = 0.0,
                   adaptiv_grad: float = 20.0,
                   rg_z_min: float = 0.15, rg_s_min: int = 60,
-                  rg_d_min: int = 20, z0=None):
+                  rg_d_min: int = 20):
     """Farbe je Punkt per Abstimmung ueber ein radiales Segment.
 
     Das Segment ist NICHT konstant breit, sondern wird je Punkt aus zwei
@@ -499,22 +362,7 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
             schwellen[name] = np.maximum(grund * adaptiv_faktor,
                                          float(spec['s_min']) * 0.5)
 
-    zz, mxs, dd = rg_kennzahl(stack)
-
-    # Neutralpunkt abziehen. Eine farblose Flaeche soll z=0 ergeben; tut sie
-    # wegen des Weissabgleichs nicht, verschieben wir die Messung statt der
-    # Schwellen -- dann behalten rg_z_min und rg_d_min ihre bisherige Bedeutung
-    # und ihre eingefahrene Abstimmung.
-    #
-    # dd wird mit mx skaliert mitgezogen: der Versatz in (G-R) waechst mit der
-    # Helligkeit, denn z = (G-R)/mx heisst (G-R) = z*mx. Ein fester Abzug waere
-    # auf der hellen Matte zu klein und auf der dunklen Bande zu gross.
-    if z0 is not None:
-        versatz = np.asarray(z0, dtype=np.float32)
-        if versatz.ndim:
-            versatz = versatz.reshape(1, -1)
-        zz = zz - versatz
-        dd = dd - versatz * mxs
+    zz, _, dd = rg_kennzahl(stack)
 
     labels = np.full(phi.size, 'unbekannt', dtype=object)
     best = np.full(phi.size, float(min_frac) - 1e-9)

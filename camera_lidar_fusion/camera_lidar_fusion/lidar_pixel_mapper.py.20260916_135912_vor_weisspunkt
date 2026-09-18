@@ -285,20 +285,6 @@ class LidarPixelMapper(Node):
         # Absolutes Tor auf |G-R| in Zaehlwerten. Faengt den Farbstich ueber
         # das Fischauge ab, gegen den die relativen Tore blind sind.
         self.declare_parameter('rg_d_min', 20)
-        # --- Neutralpunkt / Weissabgleich am Spielfeld -------------------- #
-        # rg_kennzahl setzt voraus, dass eine farblose Flaeche z=0 ergibt. Am
-        # Aufbau gemessen liefert die WEISSE Matte z=+0.084 -- damit braucht rot
-        # einen 3.5-mal groesseren Farbhub als gruen, und rot faellt auf
-        # Entfernung als erstes raus. Der Stich laeuft ueber den Azimut von
-        # +0.046 bis +0.121, ist ueber die Zeit aber bockstabil. Er wird
-        # deshalb je Sektor aus dem Bild gemessen und abgezogen.
-        self.declare_parameter('weisspunkt', True)
-        self.declare_parameter('weisspunkt_sektoren', 12)
-        # Abtastring auf der MATTE, also knapp ausserhalb der Bande. 0 = automatisch
-        # aus der Zone (aeusserste Zonenkante + Abstand) bzw. dem Bildkreisradius.
-        self.declare_parameter('weisspunkt_r_min', 0.0)
-        self.declare_parameter('weisspunkt_r_max', 0.0)
-        self.declare_parameter('weisspunkt_schritt', 3)
         self.declare_parameter('sample_zone_adaptiv', 0.0)
         self.declare_parameter('sample_zone_adaptiv_grad', 20.0)
         # Median-Blur ueber das GANZE Bild -- kostet auf 1280x960 rund 26 ms je
@@ -545,7 +531,6 @@ class LidarPixelMapper(Node):
             f'roll={self.calib.roll_deg:.2f} (Grad), '
             f'Kamera {self.calib.cam_z * 100:.1f} cm ueber der Lidar-Ebene\n'
             f'  Abgriff: {abgriff}\n'
-            f'  Weisspunkt: {self._weisspunkt_text()}\n'
             f'  CSV-Modus: {self.get_parameter("csv_mode").value} -> {self.csv_dir}\n'
             f'  debug={self.get_parameter("debug").value}, '
             f'cloud_color_mode={self.get_parameter("cloud_color_mode").value} '
@@ -607,12 +592,6 @@ class LidarPixelMapper(Node):
             v = np.abs(np.asarray(versatz)) * 1000.0
             text += (f' | Versatz Bild-Scan: med {np.median(v):.0f} ms, '
                      f'p90 {np.percentile(v, 90):.0f} ms, max {v.max():.0f} ms')
-        z0s = getattr(self, '_z0_sektoren', None)
-        if z0s is not None and np.size(z0s):
-            # Laeuft der Weissabgleich weg, sieht man es hier zuerst -- und
-            # die Spanne sagt, ob eine globale Zahl gereicht haette.
-            text += (f' | Weisspunkt z0: {np.min(z0s):+.3f}..{np.max(z0s):+.3f} '
-                     f'(Mittel {np.mean(z0s):+.3f})')
         if not self.get_parameter('motion_compensation').value:
             text += ' | Bewegungskompensation AUS'
         elif komp:
@@ -893,7 +872,6 @@ class LidarPixelMapper(Node):
                 r_aussen = np.maximum(r_aussen, r_min + 2.0)
             if self.get_parameter('zone_from_band').value:
                 r_innen, r_aussen = self._zone_aus_bande(image, phi, r_innen, r_aussen)
-            z0 = self._neutralpunkt(image, phi, r_aussen)
             labels, bgr, hsv = colors.classify_zone(
                 image, phi, r_innen, r_aussen,
                 center=(self.calib.cx, self.calib.cy),
@@ -905,8 +883,7 @@ class LidarPixelMapper(Node):
                 adaptiv_grad=self.get_parameter('sample_zone_adaptiv_grad').value,
                 rg_z_min=float(self.get_parameter('rg_z_min').value),
                 rg_s_min=int(self.get_parameter('rg_s_min').value),
-                rg_d_min=int(self.get_parameter('rg_d_min').value),
-                z0=z0)
+                rg_d_min=int(self.get_parameter('rg_d_min').value))
         else:
             bgr, hsv = colors.sample_colors(
                 image, u, v, self.get_parameter('patch_px').value,
@@ -1095,50 +1072,6 @@ class LidarPixelMapper(Node):
         aktiv = set(self.get_parameter('active_labels').value)
         gefiltert = {k: v for k, v in self.ranges.items() if k in aktiv}
         return gefiltert or self.ranges
-
-    def _weisspunkt_text(self):
-        """Eine Zeile fuers Startbanner: laeuft die Korrektur, und wo misst sie?"""
-        if not self.get_parameter('weisspunkt').value:
-            return 'AUS -- rg_kennzahl nimmt den Nullpunkt bei 0 an'
-        basis = (self.calib.zone_r0_out if self.calib.zone_kalibriert
-                 else self.calib.radius_px * 0.88)
-        r_min = float(self.get_parameter('weisspunkt_r_min').value) or basis + 12.0
-        r_max = float(self.get_parameter('weisspunkt_r_max').value) or self.calib.radius_px - 15.0
-        return (f'an der Matte, {self.get_parameter("weisspunkt_sektoren").value} Sektoren, '
-                f'Ring {r_min:.0f}..{r_max:.0f} px')
-
-    def _neutralpunkt(self, image, phi, r_aussen):
-        """Neutralpunkt je Punkt, gemessen an der Matte. None = abgeschaltet.
-
-        Der Abtastring muss auf der MATTE liegen, also weiter aussen als die
-        Bande (radial nach aussen heisst im Fisheye nach unten). Automatisch
-        wird deshalb ab der aeussersten Zonenkante plus Sicherheitsabstand
-        gemessen, bis kurz vor den Bildkreisrand -- ganz aussen frisst die
-        Vignettierung die Farbe.
-        """
-        if not self.get_parameter('weisspunkt').value:
-            return None
-        r_min = float(self.get_parameter('weisspunkt_r_min').value)
-        r_max = float(self.get_parameter('weisspunkt_r_max').value)
-        if r_min <= 0.0:
-            # NICHT an max(r_aussen) haengen: ein Lidar-Punkt auf 0.2 m treibt
-            # die Zonenkante auf ueber 470 px und der Ring waere leer -- der
-            # Weisspunkt haette sich dann still selbst abgeschaltet.
-            # Die Asymptote zone_r0_out ist dagegen die Bandenunterkante in der
-            # FERNE, und weiter aussen als die liegt in jeder Richtung Matte.
-            basis = (self.calib.zone_r0_out if self.calib.zone_kalibriert
-                     else self.calib.radius_px * 0.88)
-            r_min = basis + 12.0
-        if r_max <= 0.0:
-            r_max = self.calib.radius_px - 15.0
-        if r_max <= r_min:
-            return None
-        z0_sek = colors.neutralpunkt(
-            image, (self.calib.cx, self.calib.cy), r_min, r_max,
-            sektoren=int(self.get_parameter('weisspunkt_sektoren').value),
-            schritt=int(self.get_parameter('weisspunkt_schritt').value))
-        self._z0_sektoren = z0_sek
-        return colors.z0_je_punkt(phi, z0_sek)
 
     def _zone_aus_bande(self, image, phi, r_innen, r_aussen):
         """Zone an die live gefundene Bandenunterkante haengen.

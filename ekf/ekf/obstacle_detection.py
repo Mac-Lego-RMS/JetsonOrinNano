@@ -182,3 +182,95 @@ def mask_sectors(pts, sectors):
     for centre, half in sectors:
         keep &= np.abs((ang - centre + np.pi) % (2 * np.pi) - np.pi) > half
     return pts[keep]
+
+# --- parking lot -----------------------------------------------------------
+# The two magenta boundary walls are a different shape from the pillars: 20 cm
+# long, 2 cm thick, standing perpendicular to the outer band. Long and thin
+# where a pillar is compact, so MAX_OBSTACLE_EXTENT would throw them away.
+# They get their own path: cluster, fit a line, keep the ENDPOINTS -- it is the
+# ends that define the bay.
+#
+# Note on timing: while the robot is parked the walls sit about 4 cm ahead and
+# behind it, far below the fusion range floor, so they are invisible. The bay
+# can only be measured after pulling out.
+
+PARK_CLUSTER_RADIUS = 0.05     # region growing for the magenta points (m)
+PARK_MIN_POINTS = 8
+PARK_LEN_MIN = 0.10            # a 20 cm wall seen at an angle still spans this
+PARK_LEN_MAX = 0.30
+PARK_PARALLEL_TOL = np.radians(25.0)   # the two walls face the same way
+
+
+def _fit_segment(arr):
+    """Least-squares line through a cluster, returned as its two endpoints.
+
+    Endpoints come from projecting every point onto the fitted direction and
+    taking the extremes -- unlike the wall fit there is no scan ordering to
+    rely on here, the points come from a cloud.
+    """
+    centroid = arr.mean(axis=0)
+    _, _, Vh = np.linalg.svd(arr - centroid, full_matrices=False)
+    direction = Vh[0]
+    t = (arr - centroid) @ direction
+    return centroid + t.min() * direction, centroid + t.max() * direction
+
+
+def detect_parking_walls(msg, min_points=PARK_MIN_POINTS,
+                         radius=PARK_CLUSTER_RADIUS):
+    """Find the magenta parking-lot walls in one colour-classified scan.
+
+    Returns a list of dicts:
+        {'p1', 'p2', 'length', 'n', 'dist'}
+    with p1/p2 the segment endpoints in the base_link frame.
+    """
+    pts = colored_points(msg, colors=(MAGENTA,))
+    if not pts:
+        return []
+    group = np.array([[x, y] for (x, y, _) in pts])
+
+    walls = []
+    for idx in _grow_clusters(group, radius):
+        if len(idx) < min_points:
+            continue
+        arr = group[idx]
+        p1, p2 = _fit_segment(arr)
+        length = float(np.hypot(*(p2 - p1)))
+        if not (PARK_LEN_MIN <= length <= PARK_LEN_MAX):
+            continue
+        centre = 0.5 * (p1 + p2)
+        walls.append({'p1': p1, 'p2': p2, 'length': length, 'n': len(idx),
+                      'dist': float(np.hypot(*centre))})
+    return walls
+
+
+def parking_pair(walls, expected_gap, tol=0.06):
+    """Pick the two walls that actually form the bay, or None.
+
+    Checks what the rules fix: two roughly parallel segments, separated by
+    1.5 x robot length. Anything else -- a single wall, a magenta smear, three
+    candidates -- fails rather than producing a plausible-looking bay.
+    """
+    if len(walls) < 2:
+        return None
+
+    best, best_err = None, np.inf
+    for i in range(len(walls)):
+        for j in range(i + 1, len(walls)):
+            a, b = walls[i], walls[j]
+            da = a['p2'] - a['p1']
+            db = b['p2'] - b['p1']
+            # segments have no head/tail, so fold the angle into [0, pi/2]
+            dang = abs(wrap(np.arctan2(da[1], da[0]) - np.arctan2(db[1], db[0])))
+            if dang > np.pi / 2:
+                dang = np.pi - dang
+            if dang > PARK_PARALLEL_TOL:
+                continue
+
+            # gap: perpendicular distance from B's centre to A's line
+            u = da / np.hypot(*da)
+            n = np.array([-u[1], u[0]])
+            gap = abs(float(np.dot(0.5 * (b['p1'] + b['p2']) - a['p1'], n)))
+            err = abs(gap - expected_gap)
+            if err <= tol and err < best_err:
+                best_err, best = err, (a, b, gap)
+    return best

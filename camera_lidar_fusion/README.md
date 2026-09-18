@@ -359,6 +359,91 @@ Annahme, dass `target_height_m` (Hoehe des Farb-Blob-Schwerpunkts ueber der
 Lidar-Ebene) stimmt. Nachmessen mit dem Lineal ist genauer; `height` ist der
 Gegencheck.
 
+### Der Nullpunkt der Farbkennzahl: `weisspunkt`
+
+`rg_kennzahl` setzt stillschweigend voraus, dass eine farblose Flaeche
+`z = (G-R)/max(B,G,R) = 0` ergibt. Das tut sie nur, wenn der Weissabgleich der
+Kamera zum Licht passt. Am 16.09.2026 nachgemessen (Bag `wb_test`, 266 Frames,
+`CAM_WB_TEMP=4600`): die **weisse Matte** liefert B=167 G=212 R=194, also
+**z = +0.084 statt 0**.
+
+Damit sind die symmetrischen Schwellen `+-rg_z_min` in Wahrheit voellig
+unsymmetrisch:
+
+| Farbe | noetiger Farbhub |
+| --- | --- |
+| gruen | 0.150 - 0.084 = **0.066** |
+| rot | 0.150 + 0.084 = **0.234** |
+
+Rot muss also dreieinhalbmal so kraeftig sein wie gruen. Nah faellt das nicht
+auf (eine rote Pylone liegt bei z = -0.58), aber je weiter weg, desto mehr
+mischen sich die wenigen Pylonenpixel mit dem Hintergrund -- und rot faellt
+zuerst unter die Schwelle. Genau das war die Rot-Gruen-Verwechslung auf
+Entfernung. Im Bag gefunden: eine rote Pylone bei Azimut 85 Grad misst
+z = -0.134 und wurde als `unbekannt` verworfen.
+
+**Der Stich ist nicht rundum gleich.** Ueber 12 Sektoren gemessen laeuft er von
++0.046 bis +0.121, Spanne 0.075 -- die halbe Schwelle. Ursache ist gerichtetes
+Licht plus der Farbgang des Fisheyes zum Rand. Eine einzelne globale Zahl (oder
+eine andere Kelvinzahl) kann das nicht treffen, deshalb wird **je Azimutsektor**
+gemessen.
+
+Ueber die Zeit ist er dagegen bockstabil: Streuung je Sektor maximal 0.006 ueber
+14 Sekunden Fahrt. Es ist also kein Belichtungsproblem, sondern eine
+feststehende Fehleinstellung -- und damit sauber messbar.
+
+Abgetastet wird ein Pixelring auf der **Matte**, knapp ausserhalb der Bande
+(automatisch `zone_r0_out + 12` bis `radius_px - 15`, am Aufbau 408..446 px).
+Je Sektor werden daraus die hellen, nahezu farblosen Pixel genommen und ihr
+mittleres z gebildet -- **Mittelwert, nicht Median**: bei Median von Ganzzahlen
+bleibt das Ergebnis ganzzahlig.
+
+Warum nicht zusaetzlich die schwarze Bande als zweiter Stuetzpunkt: sie misst
+B=6 G=13 R=13. Bei so kleinen Zahlen kippt ein einziger Digit die Kennzahl um
+0.077; `z_bande` sprang in der Messung zwischen 0.000 und -0.077 hin und her.
+Die Matte bei rund 200 ist die belastbare Referenz.
+
+**Korrigiert wird die Messung, nicht das Bild.** Von `zz` wird `z0` abgezogen
+und von `dd` entsprechend `z0 * mx` (der Versatz in `G-R` waechst mit der
+Helligkeit, denn `z = (G-R)/mx`). `rg_z_min`, `rg_s_min` und `rg_d_min`
+behalten damit ihre Bedeutung und ihre eingefahrene Abstimmung, und es kostet
+kein Rauschen -- anders als ein Hochskalieren der Kanaele.
+
+Gegen `wb_test` geprueft, 219 Scans mit 2 roten und 3 gruenen Pylonen:
+
+| | vorher | nachher |
+| --- | --- | --- |
+| rote Pylonen, stabile Cluster | 3 | 3 (unveraendert) |
+| rote Pylone 2 m, faelschlich gruene Punkte | 13.1 | **5.7** |
+| rote Pylone 2 m, rote Punkte | 22.4 | 22.8 |
+| gruene Pylone 2.55 m | 11.5 | 12.5 |
+| gruene Pylone 0.56 m | 16.1 | 10.6 |
+
+Die letzte Zeile ist der Preis: eine nahe gruene Pylone verliert rund ein
+Drittel ihrer Punkte (bleibt mit 10.6 aber weit ueber jeder Clusterschwelle).
+
+```bash
+ros2 param set /lidar_pixel_mapper weisspunkt true
+ros2 param set /lidar_pixel_mapper weisspunkt_sektoren 12   # 30 Grad je Sektor
+ros2 param set /lidar_pixel_mapper weisspunkt_schritt 3     # Pixelausduennung
+ros2 param set /lidar_pixel_mapper weisspunkt_r_min 0       # 0 = automatisch
+ros2 param set /lidar_pixel_mapper weisspunkt_r_max 0
+```
+
+Der gemessene Wert steht im periodischen `Sync:`-Log (`Weisspunkt z0: ...`).
+Laeuft er weg oder wird die Spanne gross, sieht man es dort zuerst.
+
+Rechenzeit auf dem Jetson, 1280x960:
+
+| `weisspunkt_schritt` | Pixel im Ring | Zeit je Frame | gemessenes z0 |
+| --- | --- | --- | --- |
+| 1 | 100596 | 18.07 ms | +0.105 |
+| **3** (Vorgabe) | **11196** | **5.18 ms** | **+0.106** |
+| 4 | 6300 | 3.84 ms | +0.104 |
+
+Das Ergebnis haengt praktisch nicht an der Abtastdichte -- wer CPU braucht,
+kann bedenkenlos auf 4 gehen.
+
 ## Warum ein Referenzscan noetig ist
 
 Am S3 verdecken Kabel und Elektronik einen Teil des Sichtfelds. Dort misst der

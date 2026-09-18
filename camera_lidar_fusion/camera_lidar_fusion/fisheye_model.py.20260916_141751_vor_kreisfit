@@ -279,24 +279,8 @@ def find_blind_sectors(scans, angle_min: float, angle_increment: float,
 def detect_image_circle(image_bgr: np.ndarray, threshold: int = 12):
     """Schaetzt (cx, cy, radius) des Fisheye-Bildkreises aus dem dunklen Rand.
 
-    Kleinste-Quadrate-Kreisfit nach Kasa ueber die Aussenkontur des hellen
-    Bereichs. Gibt None zurueck, wenn nichts passt.
-
-    WARUM NICHT DIE BOUNDING BOX (so war es bis 16.09.2026): der Bildkreis ragt
-    bei der verbauten Kamera rund 7 px UEBER die Sensoroberkante hinaus. Die
-    Bounding-Box wird dort bei y=0 gekappt statt bei cy-r, also rutscht
-    cy = y + h/2 um die halbe Kappung nach unten. Am Fahrt-Frame gemessen:
-    Bounding-Box cy=455.0, Kreisfit cy=450.5 -- 4.6 px Versatz, systematisch.
-
-    Das ist nicht harmlos: classify_zone tastet RADIAL von (cx, cy) aus ab. Ein
-    verschobenes Zentrum laesst den Abgriffsradius azimutabhaengig wandern, eine
-    Periode pro Umdrehung. Bei 2 bis 3 m ist die Zone nur 5 bis 8 px dick -- der
-    Versatz wirft sie dort ueber einen Teil des Azimuts komplett von der Pylone.
-    Dazu kommen rund 0.9 Grad scheinbarer Azimutfehler (tangentialer Anteil bei
-    r=400 px).
-
-    Konturpunkte am BILDRAND werden verworfen: genau dort ist der Kreis
-    abgeschnitten, und sie wuerden den Fit wieder verziehen.
+    Nutzt die Bounding-Box des hellen Bereichs -- robuster gegen ueberstrahlte
+    Lampen als ein umschliessender Kreis. Gibt None zurueck, wenn nichts passt.
     """
     import cv2  # lokal, damit das Modell selbst ohne OpenCV importierbar bleibt
 
@@ -306,28 +290,11 @@ def detect_image_circle(image_bgr: np.ndarray, threshold: int = 12):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
     contour = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(contour)
     if w < 50 or h < 50:
         return None
-
-    pts = contour.reshape(-1, 2).astype(np.float64)
-    hoehe, breite = gray.shape[:2]
-    frei = ((pts[:, 0] > 2) & (pts[:, 0] < breite - 3) &
-            (pts[:, 1] > 2) & (pts[:, 1] < hoehe - 3))
-    if frei.sum() < 50:
-        # Kreis ringsum angeschnitten -- dann bleibt nur die alte Schaetzung.
-        return x + w / 2.0, y + h / 2.0, (w + h) / 4.0
-
-    px, py = pts[frei, 0], pts[frei, 1]
-    # Kasa: x^2 + y^2 = a*x + b*y + c  ist linear in (a, b, c)
-    A = np.c_[px, py, np.ones(px.size)]
-    loesung, *_ = np.linalg.lstsq(A, px ** 2 + py ** 2, rcond=None)
-    cx, cy = loesung[0] / 2.0, loesung[1] / 2.0
-    radius = float(np.sqrt(max(loesung[2] + cx ** 2 + cy ** 2, 0.0)))
-    if not (np.isfinite(cx) and np.isfinite(cy)) or radius < 25.0:
-        return x + w / 2.0, y + h / 2.0, (w + h) / 4.0
-    return float(cx), float(cy), radius
+    return x + w / 2.0, y + h / 2.0, (w + h) / 4.0

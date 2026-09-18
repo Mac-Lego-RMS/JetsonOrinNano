@@ -34,19 +34,6 @@ WORKSPACE=/home/macjetson/ros2_ws
 # zwischen /dev/video0 und /dev/video1. Ohne festen Namen findet video_source
 # sie nicht wieder UND das v4l2-ctl weiter unten scheitert still -- dann laeuft
 # die Kamera mit Autobelichtung und die Farberkennung bricht weg.
-#
-# ACHTUNG, hier steckte bis 18.09.2026 ein Fehler: video_source (jetson-utils)
-# parst aus einem "v4l2://"-URI eine NUMERISCHE Geraete-ID. Ein Symlink ohne
-# Ziffer im Namen scheitert deshalb hart:
-#     URI -- failed to parse V4L2 device ID from /dev/picam
-#     [video] videoOptions -- failed to parse input resource URI
-# Der Symlink taugt also zum FINDEN des richtigen Knotens, nicht als URI --
-# fuer video_source wird er mit readlink -f auf /dev/videoN aufgeloest.
-#
-# Dass es am 16.09. trotzdem lief, war Zufall: der Container startete, bevor
-# udev den Symlink angelegt hatte, also griff die Rueckfallebene unten. Nach
-# dem naechsten Reboot existierte /dev/picam von Anfang an -- und die Kamera
-# kam nicht mehr hoch.
 if [ -e /dev/picam ]; then
     CAM_DEV=/dev/picam
 else
@@ -63,16 +50,7 @@ else
     echo "HINWEIS: /dev/picam fehlt, benutze $CAM_DEV."
     echo "  Fuer einen festen Namen: /etc/udev/rules.d/99-picam.rules anlegen."
 fi
-# Symlink -> echter Geraeteknoten. v4l2-ctl ist der Pfad egal, video_source
-# nicht. Schlaegt readlink fehl, bleibt der Originalpfad stehen.
-CAM_NODE=$(readlink -f "$CAM_DEV" 2>/dev/null || echo "$CAM_DEV")
-case "$CAM_NODE" in
-    /dev/video[0-9]*) ;;
-    *) echo "WARNUNG: $CAM_DEV zeigt auf '$CAM_NODE', nicht auf /dev/videoN --"
-       echo "  video_source wird das nicht oeffnen koennen."
-       ;;
-esac
-CAM_RESOURCE=v4l2://$CAM_NODE
+CAM_RESOURCE=v4l2://$CAM_DEV
 CAM_WIDTH=1280
 CAM_HEIGHT=960
 CAM_FPS=15.0
@@ -154,24 +132,7 @@ FUSION_BAND_STEPS=360     # 180 spart 10 Prozent CPU, 2 Grad reichen fuer eine B
 # Am Bild gemessen: 87.8 % aller Abgriffe liegen bei |G-R| <= 10, die echte
 # Pylone bei > 60. Mit 20 fallen drei Phantomhindernisse weg, alle echten
 # bleiben; ab 30 verliert man die gruene Pylone auf 1.24 m.
-# 18.09.2026 von 20 auf 16 gesenkt, ZUSAMMEN mit FUSION_WEISSPUNKT.
-# Der Grund: die 20 waren selbst eine Kruecke gegen den Farbstich. Ein
-# neutrales Mattenpixel bei mx=200 hat roh |G-R| = 0.09*200 = 18 -- das Tor
-# musste also knapp darueber liegen. Mit abgezogenem Neutralpunkt hat ein
-# neutrales Pixel |G-R| ~ 0, und das Tor darf tiefer.
-#
-# Bei 20 UND aktivem Weisspunkt fallen dagegen dunkle gruene Pylonen raus:
-# am Aufbau gemessen B=35 G=52 R=30, also |G-R| = 22 roh, korrigiert aber
-# 22 - 0.102*52 = 16.7 -- knapp unter 20.
-#
-# Gegen den Bag wb_test durchgefahren (219 Scans, Cluster je Scan):
-#     ohne Weisspunkt, 20 : rot 3.00 | gruen echt 3.05, gestreut 0.40
-#     mit  Weisspunkt, 20 : rot 3.00 | gruen echt 2.38, gestreut 0.73  <- Gruen kaputt
-#     mit  Weisspunkt, 16 : rot 3.00 | gruen echt 2.99, gestreut 0.18  <- hier
-#     mit  Weisspunkt, 12 : rot 3.00 | gruen echt 3.02, gestreut 0.24
-# Bei 16 bleibt das echte Gruen vollstaendig erhalten und die gestreuten
-# Cluster (die Phantomhindernisse) halbieren sich.
-FUSION_RG_DMIN=16
+FUSION_RG_DMIN=20
 FUSION_ZONE_ADAPTIV=0.0
 # --- Neutralpunkt der Kamera je Azimutsektor an der weissen Matte messen ---
 # Zieht den Weissabgleich-Versatz von der rg_kennzahl ab, damit eine farblose
@@ -446,14 +407,14 @@ run_window 3 camera \
 #
 # Erst nach dem Start von video_source setzen, damit das Geraet offen ist.
 sleep 5
-if docker exec "$CONTAINER" v4l2-ctl -d "$CAM_NODE" \
+if docker exec "$CONTAINER" v4l2-ctl -d "$CAM_DEV" \
         -c auto_exposure=1 \
         -c exposure_time_absolute=$CAM_EXPOSURE \
         -c saturation=$CAM_SATURATION \
         -c white_balance_automatic=0 \
         -c white_balance_temperature=$CAM_WB_TEMP \
         -c gamma=100 -c gain=$CAM_GAIN -c contrast=32 -c brightness=0 2>/dev/null; then
-    echo "Kamera ($CAM_NODE): feste Belichtung $((CAM_EXPOSURE / 10)) ms, Saettigung $CAM_SATURATION, gain $CAM_GAIN, Weissabgleich fest $CAM_WB_TEMP K."
+    echo "Kamera: feste Belichtung $((CAM_EXPOSURE / 10)) ms, Saettigung $CAM_SATURATION, gain $CAM_GAIN, Weissabgleich fest $CAM_WB_TEMP K."
 else
     echo "HINWEIS: v4l2-ctl fehlgeschlagen -- Kamera laeuft mit Autobelichtung."
     echo "  Der Bildrand saeuft dann ab und die Farberkennung findet keine Pylonen."

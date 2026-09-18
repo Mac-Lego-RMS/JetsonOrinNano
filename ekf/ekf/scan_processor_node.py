@@ -46,7 +46,7 @@ from sensor_msgs.msg import LaserScan, PointCloud2
 from nav_msgs.msg import Odometry
 
 from robot_msgs.msg import (WallMatch, WallMatchArray, CornerGeometry, WallHNF,
-                            Obstacle, ObstacleArray)
+                            Obstacle, ObstacleArray, ParkingBay)
 
 from std_msgs.msg import Float64, String, Int32MultiArray, Float64MultiArray
 from rclpy.qos import QoSProfile, DurabilityPolicy
@@ -56,7 +56,8 @@ from geometry_msgs.msg import Point
 from ekf.ekf import wrap
 from ekf.direction_detection import detect_direction
 from ekf.obstacle_detection import (detect_obstacles, mask_sectors,
-                                    sector_from_robot_point)
+                                    sector_from_robot_point,
+                                    detect_parking_walls, parking_pair)
 from ekf.obstacle_map import ObstacleMap, MIN_SEAT_VOTES
 from ekf.wall_extraction import (
     scan_to_points, cluster_points, merge_wraparound, split_at_corners,
@@ -92,6 +93,14 @@ PENDING_MAX = 900
 # as an obstacle: one vote is already reason enough to keep those directions
 # out of a wall fit, while reporting still needs the full threshold.
 MASK_MIN_VOTES = max(1, MIN_SEAT_VOTES // 4)
+
+# Parklücke: das Reglement bemisst sie mit 1,5 x Roboterlaenge. Gemessen, nicht
+# gesetzt -- welcher Rand im Regeltext verankert ist, ist nicht eindeutig, und
+# der Spalt wandert mit dem Chassis. Der Nennwert dient nur als
+# Plausibilitaetspruefung fuer das gefundene Paar.
+ROBOT_LENGTH = 0.175
+PARK_GAP_NOMINAL = 1.5 * ROBOT_LENGTH        # 0.2625 m
+PARK_GAP_TOL = 0.06
 
 OUTER_HALF = 1.5               # outer wall position in the field frame
 
@@ -158,6 +167,7 @@ class ScanProcessor(Node):
         # corrupts its fit, and near a corner that delays the direction latch
         # by seconds -- which in turn delays the seat grid and the obstacle map.
         self.obstacle_sectors = []
+        self.parking_bay = None      # gelatcht, sobald die Luecke vermessen ist
 
         latched = QoSProfile(depth=1)
         latched.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -189,6 +199,7 @@ class ScanProcessor(Node):
         self.corner_pub = self.create_publisher(CornerGeometry, '/corner_geometry', latched)
         self.inner_pub = self.create_publisher(CornerGeometry, '/inner_geometry', latched)
         self.obstacle_pub = self.create_publisher(ObstacleArray, '/obstacles', latched)
+        self.parking_pub = self.create_publisher(ParkingBay, '/parking_bay', latched)
 
         self.get_logger().info(
             f'start detection running (mode={self.race_mode}, '
@@ -279,6 +290,7 @@ class ScanProcessor(Node):
         self.obstacle_sectors = [d['sector'] for d in dets]
 
         self._publish_obstacles_live(dets, msg.header.stamp)
+        self._detect_parking_bay(msg)
         if not dets:
             return
 
@@ -584,6 +596,50 @@ class ScanProcessor(Node):
             o.wall_idx = -1
             msg.obstacles.append(o)
         self.obstacle_live_pub.publish(msg)
+
+    def _detect_parking_bay(self, msg):
+        """Vermisst die Parkluecke an ihren beiden Magenta-Waenden, einmalig.
+
+        Erst nach dem Kartencommit: davor ist self.pose nicht im endgueltigen
+        map-Frame, die Endpunkte laegen also falsch. Im geparkten Zustand waere
+        ohnehin nichts zu sehen -- die Waende stehen dann rund 4 cm vor und
+        hinter dem Roboter, weit unter der Untergrenze der Fusion. Messbar wird
+        die Luecke erst nach dem Ausparken, wenn sie 0,3-1 m entfernt liegt.
+
+        Laeuft weiter, bis ein gueltiges Paar gefunden ist, damit ein
+        schlechter erster Blick nicht endgueltig ist.
+        """
+        if self.parking_bay is not None or self.map_walls is None:
+            return
+        pair = parking_pair(detect_parking_walls(msg),
+                            PARK_GAP_NOMINAL, PARK_GAP_TOL)
+        if pair is None:
+            return
+        a, b, gap = pair
+
+        px, py, th = self.pose
+        c, s_ = np.cos(th), np.sin(th)
+
+        def to_map(p):
+            return (px + c * p[0] - s_ * p[1], py + s_ * p[0] + c * p[1])
+
+        out = ParkingBay()
+        out.header.stamp = msg.header.stamp
+        out.header.frame_id = 'map'
+        out.detected = True
+        for field, p in (('wall_a_start', a['p1']), ('wall_a_end', a['p2']),
+                         ('wall_b_start', b['p1']), ('wall_b_end', b['p2'])):
+            mx, my = to_map(p)
+            setattr(out, field, Point(x=float(mx), y=float(my), z=0.0))
+        out.wall_idx = (int(self.start_wall_idx)
+                        if self.start_wall_idx is not None else -1)
+
+        self.parking_bay = out
+        self.parking_pub.publish(out)
+        self.get_logger().info(
+            f'Parkluecke vermessen: Spalt={gap:.3f} m (nominal '
+            f'{PARK_GAP_NOMINAL:.3f}), Waende {a["length"]:.2f} / '
+            f'{b["length"]:.2f} m, wall_idx={out.wall_idx}')
 
     def _init_obstacle_map(self, start_pose):
         """Build the seat grid, then replay everything seen before it existed."""

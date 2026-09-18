@@ -18,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CornerGeometry.msg"
   "msg/Obstacle.msg"
   "msg/ObstacleArray.msg"
+  "msg/ParkingBay.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 
