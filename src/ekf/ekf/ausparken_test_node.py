@@ -34,9 +34,12 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32, Float32MultiArray, Int32, Int32MultiArray
 
-from ekf.ausparken import (bahn, cm_zu_grad, schritte_aus_flach, schritte_fuer,
-                           spiegeln, LENK_QUELLE, SCHRITTE_STANDARD,
-                           wenderadius)
+from sensor_msgs.msg import LaserScan
+
+from ekf.ausparken import (bahn, cm_zu_grad, richtung_aus_scan,
+                           schritte_aus_flach, schritte_fuer, spiegeln,
+                           LENK_QUELLE, SCHRITTE_STANDARD, wenderadius)
+from ekf.wall_extraction import scan_to_points
 
 
 def yaw_from_quaternion(q):
@@ -166,7 +169,15 @@ class AusparkTest(Node):
         super().__init__('ausparken_test')
         arr = self._array_typ()
         self.declare_parameter('schritte', list(SCHRITTE_STANDARD), arr)
-        self.declare_parameter('richtung', 'CW')
+        # Leer = aus dem Scan MESSEN, so wie es der Regler tut. Der Roboter
+        # steht beim Test in derselben Luecke; eine geratene Richtung
+        # spiegelt die Folge falsch herum und misst dann etwas anderes, als
+        # spaeter gefahren wird. CW oder CCW erzwingt eine Richtung, fuer
+        # Versuche ausserhalb der Luecke.
+        self.declare_parameter('richtung', '')
+        self.declare_parameter('scans', 5)
+        self.declare_parameter('sektor_grad', 20.0)
+        self.declare_parameter('richtung_timeout', 8.0)
         self.declare_parameter('wiederholungen', 1)
         # An der Wende auf Enter warten statt auf die Uhr: dort will man
         # nachmessen, und eine feste Zeit ist dafuer immer entweder zu kurz
@@ -191,14 +202,19 @@ class AusparkTest(Node):
         self.countdown_s = float(self.get_parameter('countdown_s').value)
         self.runden = max(1, int(self.get_parameter('wiederholungen').value))
 
-        richtung = str(self.get_parameter('richtung').value).strip().upper()
-        if richtung not in ('CW', 'CCW'):
-            raise ValueError('richtung muss CW oder CCW sein, nicht "%s"'
-                             % richtung)
-        roh, herkunft = schritte_fuer(
-            richtung, gemeinsam=list(self.get_parameter('schritte').value))
-        self.hin = spiegeln(schritte_aus_flach(roh), richtung == 'CCW')
-        self.zurueck = umkehren(self.hin)
+        self.vorgabe = str(self.get_parameter('richtung').value).strip().upper()
+        if self.vorgabe not in ('', 'CW', 'CCW'):
+            raise ValueError('richtung muss leer, CW oder CCW sein, nicht "%s"'
+                             % self.vorgabe)
+        self.scans = max(1, int(self.get_parameter('scans').value))
+        self.sektor_grad = float(self.get_parameter('sektor_grad').value)
+        self.richtung_timeout = float(
+            self.get_parameter('richtung_timeout').value)
+        self.stimmen = []
+        self.letzter_grund = None
+        self.richtung = None
+        self.hin = None
+        self.zurueck = None
 
         self.pub_steer = self.create_publisher(Float32, '/esp_serial_bridge/steer', 10)
         self.pub_move = self.create_publisher(Float32, '/esp_serial_bridge/move', 10)
@@ -208,6 +224,7 @@ class AusparkTest(Node):
         self.create_subscription(Int32MultiArray, '/esp_serial_bridge/move_done',
                                  self.move_done_cb, 10)
         self.create_subscription(Odometry, '/ekf/odom', self.odom_cb, 10)
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
 
         self.pose = None
         self.zustand = 'WARTEN'
@@ -218,18 +235,16 @@ class AusparkTest(Node):
         self.wende_pose = None
         self.protokoll = []
 
-        ende = bahn((0.0, 0.0, 0.0), self.hin)[-1][0]
         self.get_logger().info(
-            ">>> Ausparktest: %s, %s, %d Zuege, %.0f cm hin und dieselbe "
-            "Strecke zurueck, %dx <<<"
-            % (richtung, herkunft, len(self.hin),
-               sum(abs(cm) for _l, cm in self.hin), self.runden))
+            ">>> Ausparktest: hin und dieselbe Strecke zurueck, %dx. "
+            "Fahrtrichtung: %s <<<"
+            % (self.runden,
+               self.vorgabe + ' (vorgegeben)' if self.vorgabe
+               else 'wird aus dem Scan gemessen'))
         self.get_logger().info(
-            "Lenkung: %s, Vollausschlag R = %.3f m. Modell sagt fuer den "
-            "Hinweg: %.1f cm voraus, %.1f cm zur Seite, %+.1f grad."
+            "Lenkung: %s, Vollausschlag R = %.3f m."
             % (LENK_QUELLE or 'NOTNAGEL (steer_calib.json nicht gefunden!)',
-               wenderadius(100.0), ende[0] * 100, ende[1] * 100,
-               math.degrees(ende[2])))
+               wenderadius(100.0)))
         self.create_timer(1.0 / 30.0, self.control_loop)
 
     @staticmethod
@@ -244,6 +259,40 @@ class AusparkTest(Node):
         p = msg.pose.pose
         self.pose = (p.position.x, p.position.y,
                      yaw_from_quaternion(p.orientation))
+
+    def scan_cb(self, msg):
+        """Eine Stimme fuer die Fahrtrichtung, solange gesucht wird."""
+        if self.zustand != 'RICHTUNG':
+            return
+        e = richtung_aus_scan(scan_to_points(msg),
+                              halbwinkel_grad=self.sektor_grad)
+        self.letzter_grund = e['grund']
+        if not e['sicher']:
+            self.stimmen = []
+            return
+        # Nur EINIGE Stimmen zaehlen: ein Widerspruch setzt zurueck. Wer den
+        # Roboter waehrend der Suche anfasst, bekommt keine Entscheidung statt
+        # einer knappen -- dieselbe Regel wie im Regler.
+        if self.stimmen and self.stimmen[-1] != e['richtung']:
+            self.stimmen = []
+        self.stimmen.append(e['richtung'])
+
+    def _folge_festlegen(self, richtung, quelle):
+        """Schrittfolge fuer diese Richtung waehlen und spiegeln."""
+        self.richtung = richtung
+        roh, herkunft = schritte_fuer(
+            richtung, gemeinsam=list(self.get_parameter('schritte').value))
+        self.hin = spiegeln(schritte_aus_flach(roh), richtung == 'CCW')
+        self.zurueck = umkehren(self.hin)
+        ende = bahn((0.0, 0.0, 0.0), self.hin)[-1][0]
+        self.get_logger().info(
+            "Fahrtrichtung %s (%s). %s: %d Zuege, %.0f cm je Richtung."
+            % (richtung, quelle, herkunft, len(self.hin),
+               sum(abs(cm) for _l, cm in self.hin)))
+        self.get_logger().info(
+            "Modell sagt fuer den Hinweg: %.1f cm voraus, %.1f cm zur Seite, "
+            "%+.1f grad." % (ende[0] * 100, ende[1] * 100,
+                             math.degrees(ende[2])))
 
     def move_done_cb(self, msg):
         if len(msg.data) >= 3 and self.fahrer is not None:
@@ -286,6 +335,34 @@ class AusparkTest(Node):
                     self._abbruch("Bruecke hoert nicht zu (%s)"
                                   % ', '.join(fehlt))
                 return
+            self.zustand = 'RICHTUNG'
+            self.t0 = jetzt
+            if self.vorgabe:
+                self._folge_festlegen(self.vorgabe, 'vorgegeben')
+                self.zustand = 'COUNTDOWN'
+            else:
+                self.get_logger().info(
+                    "suche die offene Seite, %d einige Scans noetig."
+                    % self.scans)
+            return
+
+        if self.zustand == 'RICHTUNG':
+            if len(self.stimmen) < self.scans:
+                if jetzt - self.t0 > self.richtung_timeout:
+                    self._abbruch(
+                        "keine eindeutige Fahrtrichtung in %.0f s -- zuletzt: "
+                        "%s. Steht er in der Luecke? Sonst richtung:=CW oder "
+                        "CCW vorgeben."
+                        % (self.richtung_timeout,
+                           self.letzter_grund or 'kein /scan empfangen'))
+                else:
+                    self.get_logger().info(
+                        "%d/%d Stimmen -- %s"
+                        % (len(self.stimmen), self.scans,
+                           self.letzter_grund or 'warte auf /scan'),
+                        throttle_duration_sec=1.0)
+                return
+            self._folge_festlegen(self.stimmen[-1], 'aus dem Scan gemessen')
             self.zustand = 'COUNTDOWN'
             self.t0 = jetzt
             return

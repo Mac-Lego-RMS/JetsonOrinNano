@@ -70,6 +70,104 @@ l, q, g = im_startrahmen(start, (1.0, 2.0, math.radians(-175.0)))
 pruefe('die Gierabweichung wird kurz herum gerechnet',
        abs(math.degrees(g) - 95.0) < 1e-9, '%.1f grad' % math.degrees(g))
 
+print('\nFahrtrichtung messen statt raten')
+from sensor_msgs.msg import LaserScan
+
+
+def scan_bauen(links_m, rechts_m, n=360):
+    """Ein Scan, der links und rechts unterschiedlich weit sieht.
+
+    Gebaut ueber die echte Umrechnung in scan_to_points, damit der Test die
+    Konvention nicht ein zweites Mal festschreibt.
+    """
+    msg = LaserScan()
+    msg.angle_min = -math.pi
+    msg.angle_increment = 2.0 * math.pi / n
+    msg.range_min, msg.range_max = 0.05, 12.0
+    werte = []
+    for i in range(n):
+        a = msg.angle_min + i * msg.angle_increment
+        # wie scan_to_points: x = -r*cos(a), y = -r*sin(a)
+        phi = math.atan2(-math.sin(a), -math.cos(a))
+        werte.append(links_m if phi > 0.0 else rechts_m)
+    msg.ranges = werte
+    return msg
+
+
+class RichtungAttrappe:
+    scan_cb = AusparkTest.scan_cb
+
+    def __init__(self, zustand='RICHTUNG'):
+        self.zustand = zustand
+        self.sektor_grad = 20.0
+        self.stimmen = []
+        self.letzter_grund = None
+
+
+# Wand rechts, Feld links -> CCW (field_map: CW hat den Innenblock rechts)
+f = RichtungAttrappe()
+for _ in range(5):
+    f.scan_cb(scan_bauen(links_m=0.86, rechts_m=0.15))
+pruefe('Feld links wird als CCW gezaehlt',
+       f.stimmen == ['CCW'] * 5, str(f.stimmen))
+
+f = RichtungAttrappe()
+for _ in range(5):
+    f.scan_cb(scan_bauen(links_m=0.15, rechts_m=0.86))
+pruefe('Feld rechts wird als CW gezaehlt', f.stimmen == ['CW'] * 5,
+       str(f.stimmen))
+
+# Ein Widerspruch setzt zurueck -- keine knappe Mehrheit gewinnen lassen.
+f = RichtungAttrappe()
+for _ in range(3):
+    f.scan_cb(scan_bauen(0.86, 0.15))
+f.scan_cb(scan_bauen(0.15, 0.86))
+pruefe('ein Widerspruch setzt die Stimmen zurueck', f.stimmen == ['CW'],
+       str(f.stimmen))
+
+# Unentschiedene Scans zaehlen gar nicht.
+f = RichtungAttrappe()
+f.scan_cb(scan_bauen(0.86, 0.15))
+f.scan_cb(scan_bauen(0.50, 0.46))
+pruefe('unsichere Scans setzen zurueck', f.stimmen == [], f.letzter_grund)
+
+# Ausserhalb der Suche wird nicht gezaehlt.
+f = RichtungAttrappe(zustand='HIN')
+f.scan_cb(scan_bauen(0.86, 0.15))
+pruefe('nur waehrend der Suche wird gestimmt', f.stimmen == [])
+
+
+class FolgeAttrappe:
+    _folge_festlegen = AusparkTest._folge_festlegen
+
+    def __init__(self, tabelle):
+        self.tabelle = tabelle
+        self.zeilen = []
+
+    def get_parameter(self, name):
+        return types.SimpleNamespace(value=self.tabelle)
+
+    def get_logger(self):
+        an = lambda t, **kw: self.zeilen.append(t)
+        return types.SimpleNamespace(info=an, warn=an, error=an)
+
+
+TAB = [100.0, 6.0, -100.0, -4.0, 0.0, 9.0]
+a, b = FolgeAttrappe(TAB), FolgeAttrappe(TAB)
+a._folge_festlegen('CW', 'Test')
+b._folge_festlegen('CCW', 'Test')
+pruefe('CW und CCW spiegeln die Lenkung gegeneinander',
+       all(x * y < 0 for (x, _c1), (y, _c2) in zip(a.hin, b.hin)
+           if abs(x) > 5.0),
+       '%s vs %s' % ([round(l) for l, _c in a.hin],
+                     [round(l) for l, _c in b.hin]))
+pruefe('die Strecken bleiben in beiden gleich',
+       [c for _l, c in a.hin] == [c for _l, c in b.hin])
+pruefe('der Rueckweg wird gleich mitgebaut',
+       a.zurueck == umkehren(a.hin) and b.zurueck == umkehren(b.hin))
+pruefe('die Richtung steht im Log',
+       any('CW' in z for z in a.zeilen) and any('CCW' in z for z in b.zeilen))
+
 print('\nPose-Ausgabe')
 pruefe('Pose wird lesbar ausgegeben',
        pose_text((0.1234, -0.5678, math.radians(12.34)))
