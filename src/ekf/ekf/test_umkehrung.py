@@ -7,9 +7,14 @@ Das ist die Grundlage des Ausparktests (ekf/ausparken_test_node.py): gilt es
 nicht schon auf dem Papier, misst der Test am Roboter nichts Brauchbares.
 """
 import math
+import sys
+import threading
+import time
+import types
 
 from ekf import ausparken as A
-from ekf.ausparken_test_node import umkehren, im_startrahmen, wrap
+from ekf.ausparken_test_node import (AusparkTest, im_startrahmen, pose_text,
+                                     umkehren, wrap)
 
 
 def pruefe(name, bedingung, zusatz=''):
@@ -64,5 +69,70 @@ pruefe('quer zeigt nach links', abs(q - 0.1) < 1e-12 and abs(l) < 1e-12,
 l, q, g = im_startrahmen(start, (1.0, 2.0, math.radians(-175.0)))
 pruefe('die Gierabweichung wird kurz herum gerechnet',
        abs(math.degrees(g) - 95.0) < 1e-9, '%.1f grad' % math.degrees(g))
+
+print('\nPose-Ausgabe')
+pruefe('Pose wird lesbar ausgegeben',
+       pose_text((0.1234, -0.5678, math.radians(12.34)))
+       == 'x=+0.123 m  y=-0.568 m  Kurs=+12.3 grad',
+       pose_text((0.1234, -0.5678, math.radians(12.34))))
+
+
+class PauseAttrappe:
+    _pause_vorbei = AusparkTest._pause_vorbei
+    _auf_taste_warten = AusparkTest._auf_taste_warten
+
+    def __init__(self, mit_taste, tty):
+        self.pause_mit_taste = mit_taste
+        self.pause_s = 2.0
+        self.weiter = False
+        self.taste_laeuft = False
+        self.t0 = 100.0
+        self._tty = tty
+        self.zeilen = []
+
+    def get_logger(self):
+        an = lambda text, **kw: self.zeilen.append(text)
+        return types.SimpleNamespace(info=an, warn=an, error=an)
+
+
+print('\nPause an der Wende')
+echtes_stdin = sys.stdin
+
+# Mit Terminal: es wartet, bis die Taste kam -- und nicht auf die Uhr.
+# readline() muss BLOCKIEREN wie ein echtes Terminal, sonst setzt der Faden
+# das Flag schon im selben Augenblick und der Test misst nichts.
+taste = threading.Event()
+sys.stdin = types.SimpleNamespace(
+    isatty=lambda: True,
+    readline=lambda: (taste.wait(5.0), '\n')[1])
+f = PauseAttrappe(mit_taste=True, tty=True)
+pruefe('ohne Tastendruck geht es nicht weiter', not f._pause_vorbei(100.0))
+pruefe('die Aufforderung steht im Log',
+       any('ENTER' in z for z in f.zeilen))
+pruefe('auch nach langer Zeit nicht', not f._pause_vorbei(1e6))
+taste.set()
+for _ in range(200):                      # dem Faden Zeit lassen
+    if f.weiter:
+        break
+    time.sleep(0.01)
+pruefe('nach dem Tastendruck geht es weiter', f._pause_vorbei(100.0))
+pruefe('der Faden hat das Flag wirklich gesetzt', f.weiter is True)
+
+# Ohne Terminal darf er nicht ewig haengen.
+sys.stdin = types.SimpleNamespace(isatty=lambda: False)
+f = PauseAttrappe(mit_taste=True, tty=False)
+pruefe('ohne Terminal faellt er auf die Uhr zurueck',
+       not f._pause_vorbei(100.0) and f._pause_vorbei(102.5))
+pruefe('und sagt, dass er das tut',
+       any('kein Terminal' in z for z in f.zeilen))
+
+# Abgeschaltet wartet er ebenfalls nur die Zeit ab.
+sys.stdin = types.SimpleNamespace(isatty=lambda: True)
+f = PauseAttrappe(mit_taste=False, tty=True)
+pruefe('pause_mit_taste=False nimmt wieder die Uhr',
+       not f._pause_vorbei(101.0) and f._pause_vorbei(102.1)
+       and not any('ENTER' in z for z in f.zeilen))
+
+sys.stdin = echtes_stdin
 
 print('\nalle Tests bestanden')

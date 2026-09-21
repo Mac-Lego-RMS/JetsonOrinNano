@@ -26,6 +26,8 @@ einer Positionsfahrt wirkt /cmd_vel nicht -- der Nothalt geht ueber
 /esp_serial_bridge/emergency.
 """
 import math
+import sys
+import threading
 
 import rclpy
 from rclpy.node import Node
@@ -45,6 +47,12 @@ def yaw_from_quaternion(q):
 
 def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
+
+
+def pose_text(pose):
+    """Pose so, wie man sie mitschreiben will."""
+    return ('x=%+.3f m  y=%+.3f m  Kurs=%+.1f grad'
+            % (pose[0], pose[1], math.degrees(pose[2])))
 
 
 def umkehren(schritte):
@@ -128,6 +136,9 @@ class Fahrer:
                 % (self.name, self.i + 1, ist_dreh, soll_dreh,
                    ist_weg * 100, soll_weg * 100,
                    '' if status == 0 else '  [Status %d]' % status))
+            # Er steht jetzt still -- also die Pose mitschreiben.
+            self.node.get_logger().info("           steht bei  %s"
+                                        % pose_text(pose))
             if status == 2:
                 self.fehler = ("Zug %d wurde von einem Motorbefehl abgeloest"
                                % (self.i + 1))
@@ -157,6 +168,11 @@ class AusparkTest(Node):
         self.declare_parameter('schritte', list(SCHRITTE_STANDARD), arr)
         self.declare_parameter('richtung', 'CW')
         self.declare_parameter('wiederholungen', 1)
+        # An der Wende auf Enter warten statt auf die Uhr: dort will man
+        # nachmessen, und eine feste Zeit ist dafuer immer entweder zu kurz
+        # oder zu lang. Ohne Terminal (stdin kein TTY) faellt es auf pause_s
+        # zurueck, sonst haengt der Knoten dort fuer immer.
+        self.declare_parameter('pause_mit_taste', True)
         self.declare_parameter('pause_s', 2.0)
         self.declare_parameter('countdown_s', 3.0)
         self.declare_parameter('lenk_wartezeit', 0.6)
@@ -169,6 +185,9 @@ class AusparkTest(Node):
         self.zug_timeout = float(self.get_parameter('zug_timeout').value)
         self.weg_toleranz_cm = float(self.get_parameter('weg_toleranz_cm').value)
         self.pause_s = float(self.get_parameter('pause_s').value)
+        self.pause_mit_taste = bool(self.get_parameter('pause_mit_taste').value)
+        self.weiter = False
+        self.taste_laeuft = False
         self.countdown_s = float(self.get_parameter('countdown_s').value)
         self.runden = max(1, int(self.get_parameter('wiederholungen').value))
 
@@ -241,6 +260,9 @@ class AusparkTest(Node):
         self.pub_motor.publish(Int32(data=0))
         self._pid(self.get_parameter('pid_nachher').value)
         self.get_logger().error("Abgebrochen: %s" % grund)
+        if self.pose is not None:
+            self.get_logger().error("           steht bei  %s"
+                                    % pose_text(self.pose))
         self.zustand = 'ENDE'
 
     def control_loop(self):
@@ -288,8 +310,9 @@ class AusparkTest(Node):
             return
 
         if self.zustand == 'PAUSE':
-            if jetzt - self.t0 < self.pause_s:
+            if not self._pause_vorbei(jetzt):
                 return
+            self.get_logger().info("Rueckweg: dieselbe Folge, rueckwaerts.")
             self.fahrer = Fahrer(self, self.zurueck, 'RUECKWEG')
             self.zustand = 'ZURUECK'
             return
@@ -298,15 +321,39 @@ class AusparkTest(Node):
             self._bericht()
             raise SystemExit(0)
 
+    def _auf_taste_warten(self):
+        """Auf Enter warten, in einem eigenen Faden -- rclpy.spin blockiert."""
+        try:
+            sys.stdin.readline()
+        except Exception:
+            pass
+        self.weiter = True
+
+    def _pause_vorbei(self, jetzt):
+        if not self.pause_mit_taste or not sys.stdin.isatty():
+            if not self.taste_laeuft:
+                self.taste_laeuft = True
+                if self.pause_mit_taste:
+                    self.get_logger().warn(
+                        "kein Terminal an stdin -- warte %.1f s statt auf "
+                        "Enter." % self.pause_s)
+            return jetzt - self.t0 >= self.pause_s
+        if not self.taste_laeuft:
+            self.taste_laeuft = True
+            threading.Thread(target=self._auf_taste_warten,
+                             daemon=True).start()
+            self.get_logger().info(
+                ">>> ENTER druecken, dann faehrt er den Rueckweg. <<<")
+        return self.weiter
+
     def _neue_runde(self):
         self.runde += 1
         self.start_pose = self.pose
         self.fahrer = Fahrer(self, self.hin, 'HINWEG')
         self.zustand = 'HIN'
-        self.get_logger().info(
-            "--- Runde %d/%d, Start bei (%.3f, %.3f, %+.1f grad) ---"
-            % (self.runde, self.runden, self.pose[0], self.pose[1],
-               math.degrees(self.pose[2])))
+        self.get_logger().info("--- Runde %d/%d, Start bei  %s ---"
+                               % (self.runde, self.runden,
+                                  pose_text(self.pose)))
 
     def _abschnitt_fertig(self, jetzt):
         if self.zustand == 'HIN':
@@ -318,7 +365,11 @@ class AusparkTest(Node):
                 "| Modell: %.1f / %.1f / %+.1f"
                 % (laengs * 100, quer * 100, math.degrees(gier),
                    modell[0] * 100, modell[1] * 100, math.degrees(modell[2])))
+            self.get_logger().info("           steht bei  %s"
+                                   % pose_text(self.pose))
             self.zustand = 'PAUSE'
+            self.weiter = False
+            self.taste_laeuft = False
             self.t0 = jetzt
             return
 
@@ -329,6 +380,9 @@ class AusparkTest(Node):
             "%+.1f grad  (Abstand %.1f cm)"
             % (self.runde, laengs * 100, quer * 100, math.degrees(gier),
                math.hypot(laengs, quer) * 100))
+        self.get_logger().info("           steht bei  %s  (Start war %s)"
+                               % (pose_text(self.pose),
+                                  pose_text(self.start_pose)))
         if self.runde < self.runden:
             self._neue_runde()
         else:
