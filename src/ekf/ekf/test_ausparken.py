@@ -6,6 +6,8 @@
 (wie test_obstacle_path.py -- ein Import "from ekf import ..." scheitert hier,
 weil ekf.py im selben Verzeichnis das Paket ekf verdeckt.)
 """
+import io
+import json
 import math
 
 import numpy as np
@@ -32,6 +34,48 @@ pruefe('1 cm sind 38.2 Grad Welle', abs(A.cm_zu_grad(1.0) - 38.197) < 0.01,
        '%.3f' % A.cm_zu_grad(1.0))
 pruefe('Hin und zurueck', abs(A.grad_zu_cm(A.cm_zu_grad(7.3)) - 7.3) < 1e-9)
 pruefe('Vorzeichen bleibt', A.cm_zu_grad(-5.0) < 0)
+
+print('\nKennlinie aus steer_calib.json')
+pruefe('sie wird wirklich aus der Datei geladen', A.LENK_QUELLE is not None,
+       str(A.LENK_QUELLE))
+pruefe('und nicht vom Notnagel', A.LENK_KENNLINIE is not A.NOT_KENNLINIE)
+
+kennlinie, mitte, radstand, quelle = A.lade_lenkkennlinie()
+roh = json.load(io.open(quelle, encoding='utf-8'))
+langsamste = sorted(roh['speeds'], key=lambda e: float(e['v']))[0]
+pruefe('die langsamste Stufe wird genommen',
+       abs(float(langsamste['v']) - 0.35) < 1e-9,
+       'v = %s m/s' % langsamste['v'])
+
+erwartet = {}
+for seite in ('left', 'right'):
+    for servo, delta in langsamste[seite]:
+        erwartet[round(float(servo) * 100.0, 6)] = math.degrees(float(delta))
+pruefe('jeder Stuetzpunkt stimmt mit der Datei ueberein',
+       len(kennlinie) == len(erwartet)
+       and all(abs(g - erwartet[pz]) < 1e-9 for pz, g in kennlinie),
+       '%d Punkte' % len(kennlinie))
+pruefe('die Kennlinie ist aufsteigend sortiert',
+       [pz for pz, _g in kennlinie] == sorted(pz for pz, _g in kennlinie))
+pruefe('der Radstand kommt aus der Datei',
+       abs(radstand - float(roh['wheelbase'])) < 1e-12,
+       '%.3f m' % radstand)
+pruefe('der Trimm ist der Punkt ohne Lenkwinkel',
+       abs(dict(kennlinie)[mitte]) < 1e-12, '%.1f %%' % mitte)
+
+# Tempo waehlbar: bei mehr Tempo schmiert der Reifen, die Kennlinie ist flacher.
+schnell, _m, _r, _q = A.lade_lenkkennlinie(tempo=0.75)
+pruefe('mit tempo=0.75 kommt eine ANDERE Stufe', schnell != kennlinie)
+pruefe('und tempo=0.0 liefert wieder die langsamste',
+       A.lade_lenkkennlinie(tempo=0.0)[0] == kennlinie)
+
+# Fehlt die Datei, wird geraten -- aber sichtbar.
+ersatz, e_mitte, e_radstand, e_quelle = A.lade_lenkkennlinie(
+    pfad='/gibt/es/nicht/steer_calib.json')
+pruefe('fehlende Datei faellt auf den Notnagel zurueck',
+       ersatz == A.NOT_KENNLINIE and e_quelle is None)
+pruefe('... und der Versuch wird protokolliert',
+       any('gibt/es/nicht' in z for z in A.lade_lenkkennlinie.versucht))
 
 print('\nLenkung')
 pruefe('0 in der Tabelle ist der Trimm',
@@ -173,9 +217,18 @@ pruefe('bleibt im Lenkbereich',
        all(abs(l) <= 100.0 + 1e-9 for l, _c in A.spiegeln(std, True)))
 vor = max([cm for _l, cm in std if cm > 0], default=0.0)
 zurueck = -min([cm for _l, cm in std if cm < 0], default=0.0)
-print('      braucht %.1f cm nach vorn und %.1f cm nach hinten, also mindestens'
+# Bewusst KEIN Laengsspiel daraus ableiten: vorwaerts und rueckwaerts zu
+# addieren gilt nur fuer Geradeausfahrt. Sobald der Roboter schraeg steht,
+# kommt er beim Zurueckfahren nicht auf derselben Linie zurueck, sondern an der
+# Wandspitze vorbei -- deshalb passen Folgen, die nach dieser Milchmaedchen-
+# rechnung nicht passen duerften. Was wirklich gilt, sagt simuliere().
+print('      laengster Zug vorwaerts %.1f cm, rueckwaerts %.1f cm'
       % (vor, zurueck))
-print('      %.1f cm Laengsspiel -- die Luecke muss dafuer %.1f cm lang sein.'
-      % (vor + zurueck, A.FZ_LAENGE * 100 + vor + zurueck))
+e_std = A.simuliere(A.spiegeln(std, True), A.startpose())
+print('      Trockenlauf gegen die Sollmasse: %s, %s'
+      % ('Kollision in Zug %s' % e_std['bei_schritt'] if e_std['kollision']
+         else 'kollisionsfrei',
+         'kommt heraus' if e_std['frei'] else 'bleibt in der Luecke'))
+print('      (die echte Luecke kann davon abweichen -- luecke=CM setzen)')
 
 print('\nalle Tests bestanden')

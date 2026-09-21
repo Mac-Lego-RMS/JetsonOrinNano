@@ -33,7 +33,10 @@ Der Weg wird ueber den Encoder gemessen, nicht ueber den Lidar: unterhalb
 0,15 m (range_min) liefert der Lidar keine Punkte, und in der Luecke ist die
 naechste Wand genau dort.
 """
+import io
+import json
 import math
+import os
 
 import numpy as np
 
@@ -56,17 +59,94 @@ LUECKE_TIEFE = 0.200                 # wie weit die Magenta-Waende ins Feld rage
 LUECKE_WANDDICKE = 0.020
 
 # --- Lenkung -------------------------------------------------------------
-# Gemessene Kennlinie aus wall_follower_robot/steer_calib.json bei v=0,35 m/s,
-# der langsamsten kalibrierten Stufe. Prozent -> Lenkwinkel in Grad. Der
-# Nullpunkt liegt bei -2 % (Trimm), nicht bei 0.
-LENK_MITTE = -2.0
-LENK_KENNLINIE = [
+# Kennlinie, Trimm und Radstand kommen aus der GEMESSENEN Kalibrierung,
+# esp_bridge/steer_calib.json -- derselben Datei, aus der auch die
+# Bruecke ihre Lenkung speist. Nichts davon wird hier abgeschrieben: wer neu
+# kalibriert, soll nicht daran denken muessen, es an zweiter Stelle
+# nachzutragen.
+#
+# Nur wenn die Datei fehlt, greifen die Werte unten -- sie sind ein Abzug vom
+# 08.09.2026 und stehen ausdruecklich als Notnagel da. Der Trockenlauf sagt
+# dann auch, dass er raet.
+STEER_CALIB_UMGEBUNG = 'STEER_CALIB'     # Pfad per Umgebungsvariable
+
+NOT_KENNLINIE = [
     (-100.0, -17.76), (-80.0, -14.29), (-65.0, -11.61),
-    (-50.0, -9.42), (-35.0, -5.33), (LENK_MITTE, 0.0),
+    (-50.0, -9.42), (-35.0, -5.33), (-2.0, 0.0),
     (35.0, 7.60), (50.0, 10.07), (65.0, 12.66),
     (80.0, 14.56), (100.0, 18.10),
 ]
-RADSTAND = 0.10
+NOT_MITTE = -2.0
+NOT_RADSTAND = 0.10
+
+
+def steer_calib_pfade():
+    """Wo nach steer_calib.json gesucht wird, in dieser Reihenfolge."""
+    pfade = []
+    aus_umgebung = os.environ.get(STEER_CALIB_UMGEBUNG)
+    if aus_umgebung:
+        pfade.append(aus_umgebung)
+    # Nachbarpaket im selben Workspace. __file__ aufloesen, weil dieses Modul
+    # ueber den colcon-Symlink build/ekf/ekf/ geladen wird.
+    hier = os.path.dirname(os.path.realpath(__file__))
+    src = os.path.dirname(os.path.dirname(hier))          # .../src
+    pfade.append(os.path.join(src, 'esp_bridge', 'esp_bridge',
+                              'steer_calib.json'))
+    pfade.append('/workspace/src/esp_bridge/esp_bridge/steer_calib.json')
+    # Altlast: bis September 2026 lag die Datei im wall_follower_robot-Paket.
+    pfade.append(os.path.join(src, 'wall_follower_robot',
+                              'wall_follower_robot', 'steer_calib.json'))
+    pfade.append('/workspace/src/wall_follower_robot/wall_follower_robot/'
+                 'steer_calib.json')
+    return pfade
+
+
+def lade_lenkkennlinie(pfad=None, tempo=None):
+    """steer_calib.json einlesen.
+
+    ``tempo`` waehlt die Geschwindigkeitsstufe; ohne Angabe die LANGSAMSTE.
+    Beim Ausparken kriecht der Roboter, und die Kennlinie haengt vom Tempo ab
+    (bei mehr Tempo schmiert der Reifen und der wirksame Lenkwinkel sinkt).
+
+    Rueckgabe: (kennlinie, mitte, radstand, quelle) mit der Kennlinie als
+    aufsteigende Liste (prozent, grad). ``quelle`` ist der benutzte Pfad oder
+    None, wenn nichts gelesen werden konnte.
+    """
+    versucht = []
+    for kandidat in ([pfad] if pfad else steer_calib_pfade()):
+        try:
+            with io.open(kandidat, encoding='utf-8') as f:
+                daten = json.load(f)
+            stufen = sorted(daten['speeds'], key=lambda e: float(e['v']))
+            if not stufen:
+                raise ValueError('keine Geschwindigkeitsstufe enthalten')
+            if tempo is None:
+                stufe = stufen[0]
+            else:
+                stufe = min(stufen, key=lambda e: abs(float(e['v']) - tempo))
+            punkte = {}
+            for seite in ('left', 'right'):
+                for servo, delta_rad in stufe[seite]:
+                    # servo -1..1 -> Prozent; die Mitte steht in beiden Seiten
+                    punkte[round(float(servo) * 100.0, 6)] = \
+                        math.degrees(float(delta_rad))
+            if len(punkte) < 3:
+                raise ValueError('zu wenige Stuetzpunkte')
+            kennlinie = sorted(punkte.items())
+            # Der Trimm ist der Punkt, an dem die Lenkung wirklich gerade
+            # steht -- nicht 0 Prozent.
+            mitte = min(kennlinie, key=lambda pd: abs(pd[1]))[0]
+            radstand = float(daten.get('wheelbase', NOT_RADSTAND))
+            return kennlinie, mitte, radstand, kandidat
+        except Exception as fehler:
+            versucht.append('%s: %s' % (kandidat, fehler))
+
+    lade_lenkkennlinie.versucht = versucht
+    return NOT_KENNLINIE, NOT_MITTE, NOT_RADSTAND, None
+
+
+LENK_KENNLINIE, LENK_MITTE, RADSTAND, LENK_QUELLE = lade_lenkkennlinie()
+
 
 # --- Encoder -------------------------------------------------------------
 # r_eff aus ekf.py: 0,0150 m pro rad der Ausgangswelle (Strecken-Kalibrierung
@@ -427,6 +507,15 @@ def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
              FZ_BREITE * 100, FZ_LAENGE * 100))
     print('Start base_link (%.3f, %.3f), %.0f mm Luft nach hinten.'
           % (start[0], start[1], spalt * 1000))
+    if LENK_QUELLE:
+        print('Lenkung aus %s: Trimm %.1f %%, Radstand %.3f m, '
+              'Vollausschlag R = %.3f m.'
+              % (LENK_QUELLE, LENK_MITTE, RADSTAND, wenderadius(100.0)))
+    else:
+        print('ACHTUNG: steer_calib.json nicht gefunden -- gerechnet wird mit '
+              'dem Notnagel vom 08.09.2026, nicht mit eurer Kalibrierung.')
+        for zeile in getattr(lade_lenkkennlinie, 'versucht', []):
+            print('  versucht: %s' % zeile)
     print()
     pose = start
     for i, (lenk, cm) in enumerate(schritte, 1):
