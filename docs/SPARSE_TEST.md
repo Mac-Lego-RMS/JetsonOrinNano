@@ -1,1 +1,0 @@
-sparse-checkout test
