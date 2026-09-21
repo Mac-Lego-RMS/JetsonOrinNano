@@ -1,0 +1,9 @@
+# ROS 2 Build-Artefakte — gehoeren nie ins Repo
+/build/
+/install/
+/log/
+
+# Messdaten / Logs aus Testfahrten
+*.log
+
+.DS_Store
