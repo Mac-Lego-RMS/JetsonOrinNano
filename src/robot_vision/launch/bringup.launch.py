@@ -25,7 +25,7 @@ def generate_launch_description():
 
     # 3. ESP Serial Bridge
     esp_bridge_node = Node(
-        package='wall_follower_robot',
+        package='esp_bridge',
         executable='esp_serial_bridge',
         name='esp_serial_bridge',
         output='screen'

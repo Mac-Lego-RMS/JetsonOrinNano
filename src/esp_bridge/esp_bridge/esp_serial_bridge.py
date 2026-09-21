@@ -678,7 +678,7 @@ def _build_node_class():
     from std_msgs.msg import Int32, Int32MultiArray, String
     from std_srvs.srv import SetBool, Trigger
 
-    from wall_follower_robot.steer_lut import SteerLUT
+    from esp_bridge.steer_lut import SteerLUT
 
     class EspBridgeNode(Node):
         """Alle Funktionen des ESP als Topics und Services.
@@ -724,7 +724,7 @@ def _build_node_class():
             self.declare_parameter("steer_b_left", -0.01985)   # rad Offset (CCW)
             self.declare_parameter("steer_a_right", 0.2962)   # rad pro servo-Einheit (CW)
             self.declare_parameter("steer_b_right", 0.00377)  # rad Offset (CW)
-            self.declare_parameter('steer_calib_path', '/workspace/src/wall_follower_robot/wall_follower_robot/steer_calib.json')
+            self.declare_parameter('steer_calib_path', '/workspace/src/esp_bridge/esp_bridge/steer_calib.json')
             self.declare_parameter("steer_v_min", 0.05)       # darunter: delta bei v_min clampen
             self.declare_parameter("steer_raw_bypass", False)
 

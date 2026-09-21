@@ -1,6 +1,6 @@
 """Hardware-freie Tests fuer Serialisierung und Parsing der ESP-Bridge."""
 
-from wall_follower_robot.esp_serial_bridge import (
+from esp_bridge.esp_serial_bridge import (
     CMD_BATTERY_WARN,
     CMD_BUTTON,
     CMD_MOVE_DONE,

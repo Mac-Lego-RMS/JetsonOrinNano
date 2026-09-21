@@ -162,11 +162,21 @@ JetsonOrinNano/
 │   ├── package.xml
 │   └── setup.py
 │
-├── wall_follower_robot/         # ROS 2 package — control & ESP bridge
-│   ├── wall_follower_robot/
-│   │   ├── wall_follower_logic.py  # PID wall follower + state machine (core autonomy)
+├── esp_bridge/                  # ROS 2 package — ESP32 serial bridge
+│   ├── esp_bridge/
 │   │   ├── esp_serial_bridge.py    # ROS 2 ↔ ESP32 serial protocol bridge
-│   │   └── yolo_vision_node.py     # Vision node entry point
+│   │   ├── timesync_jetson.py      # Clock sync, framing, packet parser
+│   │   ├── steer_lut.py            # Speed-dependent steering lookup
+│   │   └── steer_calib.json        # Measured steering calibration
+│   ├── test/
+│   │   └── test_esp_protocol.py    # Hardware-free protocol tests
+│   ├── package.xml
+│   └── setup.py
+│
+├── wall_follower_robot/         # ROS 2 package — legacy wall-following control
+│   ├── wall_follower_robot/
+│   │   ├── wall_follower_logic.py  # PID wall follower + state machine
+│   │   └── drive_speed_test.py     # Speed measurement helper
 │   ├── package.xml
 │   └── setup.py
 │

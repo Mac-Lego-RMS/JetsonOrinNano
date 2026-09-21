@@ -402,7 +402,7 @@ run_window 0 lidar "ros2 launch sllidar_ros2 sllidar_s3_launch.py"
 run_window 1 imu "ros2 run bno055 bno055 --ros-args --params-file /workspace/bno055_params.yaml"
 
 # Fenster 2: ESP Serial
-run_window 2 esp "ros2 run wall_follower_robot esp_serial_bridge"
+run_window 2 esp "ros2 run esp_bridge esp_serial_bridge"
 
 # Fenster 3: Kamera (USB UVC, 360-Grad-Fisheye)
 run_window 3 camera \

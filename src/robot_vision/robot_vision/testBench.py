@@ -6,7 +6,7 @@ und loggt alle Antworten/Events, die vom ESP zurueckkommen. Kein Lidar, keine
 Kamera -- nur die UART-Bridge testen.
 
 Start (in zwei Terminals):
-    ros2 run wall_follower_robot esp_serial_bridge
+    ros2 run esp_bridge esp_serial_bridge
     ros2 run robot_vision testBench          # oder: python3 testBench.py
 """
 

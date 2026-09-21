@@ -36,7 +36,7 @@ SERVO_STEPS = [-1.00, -0.80, -0.65, -0.50, -0.35,
                 0.35,  0.50,  0.65,  0.80, 1.00]  # servo steps (both sides)
 CENTER_TRIM = -0.02        # servo at straight-ahead (steer_center_servo)
 
-OUT_PATH = "/workspace/src/wall_follower_robot/wall_follower_robot/steer_calib.json"
+OUT_PATH = "/workspace/src/esp_bridge/esp_bridge/steer_calib.json"
 
 SETTLE_S = 2.0
 WINDOW_S = 2.5
