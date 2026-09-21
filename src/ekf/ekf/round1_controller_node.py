@@ -50,7 +50,8 @@ from std_msgs.msg import Bool, Float64, String, Int32MultiArray, Float64MultiArr
 from std_msgs.msg import Float32, Float32MultiArray, Header, Int32
 
 from ekf.ausparken import (bahn, cm_zu_grad, richtung_aus_scan,
-                           schritte_aus_flach, simuliere, spiegeln,
+                           schritte_aus_flach, schritte_fuer, simuliere,
+                           spiegeln, SCHRITTE_CCW, SCHRITTE_CW,
                            SCHRITTE_STANDARD)
 from ekf.wall_extraction import scan_to_points
 
@@ -268,6 +269,13 @@ class Round1Controller(Node):
         # gespiegelt. Pruefen ohne Roboter:
         #     python3 src/ekf/ekf/ausparken.py 100 5.9 -100 -4.4 ...
         self.declare_parameter('ausparken_schritte', list(SCHRITTE_STANDARD), arr)
+        # Je Fahrtrichtung eine eigene Folge, falls der Roboter in der Luecke
+        # unterschiedlich steht. Spiegeln allein reicht dann nicht: es sind
+        # andere WEGE, nicht nur andere Vorzeichen. Leer = die gemeinsame
+        # Folge oben gilt, so dass man nur die Richtung fuellen muss, die
+        # wirklich abweicht.
+        self.declare_parameter('ausparken_schritte_cw', list(SCHRITTE_CW), arr)
+        self.declare_parameter('ausparken_schritte_ccw', list(SCHRITTE_CCW), arr)
         # Regelparameter des ESP fuer die Dauer der Sequenz. Flach als
         # [index, wert, ...], Reihenfolge der Indizes siehe PID_PARAMS in
         # esp_serial_bridge.py: 0 kp, 1 ki, 2 kd, 3 ilimit, 4 maxduty,
@@ -311,6 +319,10 @@ class Round1Controller(Node):
 
         self.ausparken_schritte = list(
             self.get_parameter('ausparken_schritte').value)
+        self.ausparken_schritte_cw = list(
+            self.get_parameter('ausparken_schritte_cw').value)
+        self.ausparken_schritte_ccw = list(
+            self.get_parameter('ausparken_schritte_ccw').value)
         self.ausparken_pid = list(self.get_parameter('ausparken_pid').value)
         self.ausparken_pid_nachher = list(
             self.get_parameter('ausparken_pid_nachher').value)
@@ -1026,7 +1038,11 @@ class Round1Controller(Node):
                 "Ausparken: Richtung per Parameter invertiert.")
         offen_links = (richtung == 'CCW')
         try:
-            tabelle = schritte_aus_flach(self.ausparken_schritte)
+            roh, herkunft = schritte_fuer(
+                richtung, gemeinsam=self.ausparken_schritte,
+                cw=self.ausparken_schritte_cw,
+                ccw=self.ausparken_schritte_ccw)
+            tabelle = schritte_aus_flach(roh)
         except ValueError as fehler:
             self._ausparken_abbruch("Schrittliste unbrauchbar: %s" % fehler)
             return
@@ -1042,9 +1058,9 @@ class Round1Controller(Node):
         # (R 0,306 m links gegen 0,312 m rechts). Fuer die Warnung reicht das.
         probe = simuliere(spiegeln(tabelle, True))
         self.get_logger().info(
-            "Ausparken: %s -- offene Seite %s (%s). %d Zuege, %.0f cm Weg."
+            "Ausparken: %s -- offene Seite %s (%s). %s: %d Zuege, %.0f cm Weg."
             % (richtung, 'links' if offen_links else 'rechts',
-               self.ausp_letzter_grund, len(tabelle),
+               self.ausp_letzter_grund, herkunft, len(tabelle),
                sum(abs(cm) for _l, cm in tabelle)))
         self.get_logger().info(
             "Ausparken: Trockenlauf -- %s, engster Abstand %.0f mm zur "

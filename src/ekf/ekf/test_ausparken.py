@@ -85,8 +85,17 @@ pruefe('Vollausschlag bleibt Vollausschlag',
        abs(A.lenk_auf_leitung(-100.0) + 100.0) < 1e-9)
 pruefe('ueber den Anschlag hinaus wird geklemmt',
        A.lenk_auf_leitung(150.0) == 100.0 and A.lenk_auf_leitung(-150.0) == -100.0)
-pruefe('Wenderadius bei Vollausschlag rund 0.31 m',
-       0.29 < A.wenderadius(100.0) < 0.33, '%.3f m' % A.wenderadius(100.0))
+# KEINE feste Zahl erwarten: der Wendekreis kommt aus der Kalibrierung und
+# aendert sich mit ihr. Am 21.09.2026 ist er von 0.306 auf 0.203 m gewandert,
+# und ein Test auf "rund 0.31" haette dann die Kalibrierung fuer kaputt
+# erklaert statt sie zu uebernehmen. Geprueft wird die Rechnung, nicht der Wert.
+voll = dict(A.LENK_KENNLINIE)[100.0]
+pruefe('Wenderadius folgt der Kennlinie',
+       abs(A.wenderadius(100.0)
+           - A.RADSTAND / math.tan(math.radians(voll))) < 1e-12,
+       '%.3f m bei %.2f grad' % (A.wenderadius(100.0), voll))
+pruefe('und liegt in einer plausiblen Groessenordnung',
+       0.10 < A.wenderadius(100.0) < 1.00, '%.3f m' % A.wenderadius(100.0))
 pruefe('Geradeausstellung hat keinen Radius', A.wenderadius(A.LENK_MITTE) is None)
 
 print('\nSchrittliste')
@@ -102,6 +111,35 @@ try:
     pruefe('Lenkung ausserhalb faellt auf', False)
 except ValueError:
     pruefe('Lenkung ausserhalb faellt auf', True)
+
+print('\nSchrittfolge je Fahrtrichtung')
+GEM = [100.0, 5.0, -100.0, -3.0]
+NUR_CW = [100.0, 9.0, -100.0, -7.0]
+folge, woher = A.schritte_fuer('CCW', gemeinsam=GEM, cw=NUR_CW, ccw=[])
+pruefe('leere Richtung faellt auf die gemeinsame zurueck',
+       folge == GEM and 'gemeinsam' in woher, woher)
+folge, woher = A.schritte_fuer('CW', gemeinsam=GEM, cw=NUR_CW, ccw=[])
+pruefe('gefuellte Richtung gewinnt', folge == NUR_CW and 'CW' in woher, woher)
+pruefe('nur eine Seite fuellen reicht',
+       A.schritte_fuer('CCW', gemeinsam=GEM, cw=NUR_CW, ccw=[])[0] == GEM
+       and A.schritte_fuer('CW', gemeinsam=GEM, cw=NUR_CW, ccw=[])[0] == NUR_CW)
+pruefe('beide Seiten koennen verschieden sein',
+       A.schritte_fuer('CW', gemeinsam=GEM, cw=NUR_CW, ccw=GEM)[0] != 
+       A.schritte_fuer('CCW', gemeinsam=GEM, cw=NUR_CW, ccw=GEM)[0])
+pruefe('ohne Argumente gilt der Modulstandard',
+       A.schritte_fuer('CW')[0] == list(A.SCHRITTE_STANDARD)
+       or A.SCHRITTE_CW)
+for kaputt, name in ((('LINKS',), 'unbekannte Richtung'),):
+    try:
+        A.schritte_fuer(*kaputt)
+        pruefe(name + ' faellt auf', False)
+    except ValueError:
+        pruefe(name + ' faellt auf', True)
+try:
+    A.schritte_fuer('CW', gemeinsam=[], cw=[], ccw=[])
+    pruefe('gar keine Folge faellt auf', False)
+except ValueError:
+    pruefe('gar keine Folge faellt auf', True)
 
 print('\nSpiegelung')
 tab = A.schritte_aus_flach([100.0, 5.0, -100.0, -3.0, 0.0, 9.0])
@@ -176,6 +214,21 @@ print('\nTrockenlauf')
 # soll der Mechanismus geprueft werden, nicht die eingestellten Zahlen.
 REFERENZ = [100.0, 5.9, -100.0, -4.4, 100.0, 4.6,
             -100.0, -3.9, 100.0, 17.7, -100.0, 37.1]
+
+# Dazu die Kennlinie, FUER DIE sie entworfen wurde -- nicht die gerade
+# installierte. Sonst prueft dieser Abschnitt die Kalibrierung statt der
+# Geometrie: am 21.09.2026 wanderte der Vollausschlag von 0.306 auf 0.203 m,
+# und die Referenzfolge haette 6 statt 10 mm Rand gehabt, ohne dass an der
+# Rechnung irgendetwas falsch war.
+REFERENZ_KENNLINIE = [
+    (-100.0, -17.76), (-80.0, -14.29), (-65.0, -11.61),
+    (-50.0, -9.42), (-35.0, -5.33), (-2.0, 0.0),
+    (35.0, 7.60), (50.0, 10.07), (65.0, 12.66),
+    (80.0, 14.56), (100.0, 18.10),
+]
+_gemerkt = (A.LENK_KENNLINIE, A.LENK_MITTE, A.RADSTAND)
+A.LENK_KENNLINIE, A.LENK_MITTE, A.RADSTAND = REFERENZ_KENNLINIE, -2.0, 0.10
+
 ref = A.schritte_aus_flach(REFERENZ)
 e = A.simuliere(A.spiegeln(ref, True), A.startpose(laengsspiel=0.010))
 pruefe('Referenzfolge setzt nirgends auf', not e['kollision'])
@@ -208,7 +261,13 @@ e2 = A.simuliere(A.spiegeln([(0.0, 30.0)], True), A.startpose(laengsspiel=0.010)
 pruefe('geradeaus laeuft in die vordere Wand', e2['kollision'],
        'Zug %s' % e2['bei_schritt'])
 
+# Ab hier wieder die echte Kalibrierung: die eingestellte Folge soll gegen
+# das geprueft werden, womit der Roboter wirklich faehrt.
+A.LENK_KENNLINIE, A.LENK_MITTE, A.RADSTAND = _gemerkt
+
 print('\nDie eingestellte Standardfolge')
+print('      (gerechnet mit der installierten Kalibrierung: Vollausschlag '
+      'R = %.3f m)' % A.wenderadius(100.0))
 std = A.schritte_aus_flach(A.SCHRITTE_STANDARD)
 pruefe('ist wohlgeformt', len(std) >= 1)
 pruefe('laesst sich in beide Richtungen spiegeln',

@@ -488,8 +488,38 @@ SCHRITTE_STANDARD = [
 ]
 
 
+# Je Fahrtrichtung eine eigene Folge, wenn sie gebraucht wird.
+#
+# Gespiegelt wird ohnehin (positive Lenkung heisst "zur offenen Seite"), aber
+# das reicht nur, solange der Roboter in beiden Faellen GLEICH in der Luecke
+# steht. Tut er das nicht, sind es andere Wege, nicht nur andere Vorzeichen.
+#
+# Leer heisst: SCHRITTE_STANDARD gilt. Wer nur eine Richtung anders braucht,
+# fuellt nur diese -- die andere bleibt leer und folgt weiter dem Standard.
+SCHRITTE_CW = []
+SCHRITTE_CCW = []
+
+
+def schritte_fuer(richtung, gemeinsam=None, cw=None, ccw=None):
+    """Welche Schrittfolge gilt fuer diese Fahrtrichtung?
+
+    Rueckgabe: (flache Liste, Herkunft als Text fuers Protokoll).
+    """
+    if richtung not in ('CW', 'CCW'):
+        raise ValueError('Fahrtrichtung "%s" ist weder CW noch CCW' % richtung)
+    eigen = (cw if cw is not None else SCHRITTE_CW) if richtung == 'CW' \
+        else (ccw if ccw is not None else SCHRITTE_CCW)
+    if eigen:
+        return list(eigen), 'eigene Folge fuer %s' % richtung
+    geteilt = gemeinsam if gemeinsam is not None else SCHRITTE_STANDARD
+    if not geteilt:
+        raise ValueError('weder eine Folge fuer %s noch eine gemeinsame'
+                         % richtung)
+    return list(geteilt), 'gemeinsame Folge'
+
+
 def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
-                 spalt=0.004, dicke=LUECKE_WANDDICKE):
+                 spalt=0.004, dicke=LUECKE_WANDDICKE, richtung=None):
     """Tabelle im Kopf fahren und das Ergebnis ausgeben.
 
     laenge/tiefe sind die gemessenen Lueckenmasse, spalt die Luft zwischen
@@ -498,7 +528,13 @@ def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
     # Gespiegelt wird mit offen_links=True: das laesst die Vorzeichen, wie
     # sie in der Tabelle stehen, addiert aber den Trimm -- der Trockenlauf
     # faehrt damit genau die Lenkwerte, die spaeter auf die Leitung gehen.
-    schritte = spiegeln(schritte_aus_flach(flach or SCHRITTE_STANDARD), True)
+    if flach:
+        roh, herkunft = flach, 'Kommandozeile'
+    elif richtung:
+        roh, herkunft = schritte_fuer(richtung)
+    else:
+        roh, herkunft = SCHRITTE_STANDARD, 'gemeinsame Folge'
+    schritte = spiegeln(schritte_aus_flach(roh), True)
     start = startpose(laengsspiel=spalt, tiefe=tiefe)
     balken = hindernisse(laenge, tiefe, dicke)
     print('Luecke %.1f cm lang, Waende %.0f cm tief und %.1f cm dick, '
@@ -507,6 +543,8 @@ def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
              FZ_BREITE * 100, FZ_LAENGE * 100))
     print('Start base_link (%.3f, %.3f), %.0f mm Luft nach hinten.'
           % (start[0], start[1], spalt * 1000))
+    print('Schrittfolge: %s%s.'
+          % (herkunft, ' (%s)' % richtung if richtung else ''))
     if LENK_QUELLE:
         print('Lenkung aus %s: Trimm %.1f %%, Radstand %.3f m, '
               'Vollausschlag R = %.3f m.'
@@ -555,7 +593,8 @@ if __name__ == '__main__':
 
     HILFE = """Trockenlauf einer Ausparkfolge.
 
-  python3 ausparken.py [luecke=CM] [tiefe=CM] [dicke=CM] [spalt=MM] [lenk cm ...]
+  python3 ausparken.py [cw|ccw] [luecke=CM] [tiefe=CM] [dicke=CM] [spalt=MM]
+                       [lenk cm lenk cm ...]
 
 Ohne Zahlen wird SCHRITTE_STANDARD gefahren. Die Masse sind die GEMESSENEN
 der echten Luecke -- stimmen sie nicht, sagt der Trockenlauf das Falsche.
@@ -565,6 +604,8 @@ der echten Luecke -- stimmen sie nicht, sagt der Trockenlauf das Falsche.
   dicke   Dicke der Balken laengs der Bahn (Standard %.1f cm) -- sie sind
           BALKEN, keine Mauern: hinter ihnen ist wieder frei
   spalt   Luft zwischen Heck und hinterer Wand beim Abstellen (Standard 4 mm)
+  cw/ccw  die fuer diese Fahrtrichtung hinterlegte Folge fahren (SCHRITTE_CW
+          bzw. SCHRITTE_CCW, sonst SCHRITTE_STANDARD)
 
 Beispiel:
   python3 ausparken.py luecke=32 100 9 -100 -6 100 7 -100 -5 100 18 -100 37
@@ -577,8 +618,11 @@ Beispiel:
     masse = {'luecke': LUECKE_LAENGE, 'tiefe': LUECKE_TIEFE,
              'dicke': LUECKE_WANDDICKE, 'spalt': 0.004}
     zahlen = []
+    richtung = None
     for arg in sys.argv[1:]:
-        if '=' in arg:
+        if arg.upper() in ('CW', 'CCW'):
+            richtung = arg.upper()
+        elif '=' in arg:
             name, _, wert = arg.partition('=')
             if name not in masse:
                 print('Unbekanntes Mass "%s".\n' % name)
@@ -591,4 +635,4 @@ Beispiel:
 
     raise SystemExit(_trockenlauf(zahlen or None, laenge=masse['luecke'],
                                   tiefe=masse['tiefe'], spalt=masse['spalt'],
-                                  dicke=masse['dicke']))
+                                  dicke=masse['dicke'], richtung=richtung))

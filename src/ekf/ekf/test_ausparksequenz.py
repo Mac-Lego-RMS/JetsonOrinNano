@@ -78,6 +78,8 @@ class Attrappe:
         self.ausparken_nur = False
         self.ausparken_richtung_invertieren = False
         self.ausparken_schritte = list(A.SCHRITTE_STANDARD)
+        self.ausparken_schritte_cw = []
+        self.ausparken_schritte_ccw = []
         self.ausparken_pid = [4.0, 140.0, 8.0, 90.0]   # wie der echte Standard
         self.ausparken_pid_nachher = [4.0, 1023.0]
         self.ausparken_scans = 5
@@ -221,6 +223,22 @@ f3 = Attrappe(ausparken_richtung_invertieren=True)
 f3.takt(2)
 pruefe('Invertierschalter dreht die Seite',
        f3.ausp_schritte[0][0] * f.ausp_schritte[0][0] < 0)
+
+# Eigene Folge fuer die erkannte Richtung (hier CW) schlaegt die gemeinsame.
+EIGEN = [100.0, 3.0, -100.0, -2.0]
+f = Attrappe(ausparken_schritte_cw=EIGEN)
+f.takt(2)
+pruefe('CW nimmt die eigene Folge',
+       [cm for _l, cm in f.ausp_schritte] == [3.0, -2.0],
+       '%d Zuege' % len(f.ausp_schritte))
+pruefe('und sagt das im Log', 'eigene Folge fuer CW' in f._log.text())
+
+f = Attrappe(ausparken_schritte_ccw=EIGEN)     # gefuellt, aber erkannt wird CW
+f.takt(2)
+pruefe('die Folge der ANDEREN Richtung bleibt unbeachtet',
+       [cm for _l, cm in f.ausp_schritte]
+       == list(A.SCHRITTE_STANDARD[1::2]))
+pruefe('und die gemeinsame wird benannt', 'gemeinsame Folge' in f._log.text())
 
 print('\nEin einzelner Zug')
 f = Attrappe()
