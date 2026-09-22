@@ -49,7 +49,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float64, String, Int32MultiArray, Float64MultiArray
 from std_msgs.msg import Float32, Float32MultiArray, Header, Int32
 
-from ekf.ausparken import (bahn, cm_zu_grad, richtung_aus_scan,
+from ekf.ausparken import (bahn, cm_zu_grad, grad_zu_cm, richtung_aus_scan,
                            schritte_aus_flach, schritte_fuer, simuliere,
                            spiegeln, SCHRITTE_CCW, SCHRITTE_CW,
                            SCHRITTE_STANDARD)
@@ -128,7 +128,29 @@ class Round1Controller(Node):
         # do not start the arc while still correcting laterally (0.2 s steering dead time)
         'turn_in_lat_gate': ('turn_in_lat_gate', 0.03, float),  # settled below this lateral error
         'turn_in_om_gate':  ('turn_in_om_gate',  0.50, float),  # ... and below this commanded omega
-        'turn_in_delay_max':('turn_in_delay_max',0.25, float),  # max distance to wait past T_A
+        'turn_in_settle_window':('turn_in_settle_window',0.50, float),  # slow down within this distance to T_A
+        'v_settle':         ('v_settle',         0.25, float),  # speed while settling before the corner
+        'turn_in_past_max': ('turn_in_past_max', 0.50, float),  # Plausibilitaet: weiter hinter T_A -> Nothalt
+        # Bogen an der Ist-Pose: so nah an der Aussenbande darf er hoechstens
+        # auf die naechste Gerade kommen, wenn der kleinste Radius noetig ist.
+        'turn_anchor_min_out': ('turn_anchor_min_out', 0.20, float),
+        # Auch beim puenktlichen Einlenken verankern, wenn die Einfahrt gestoert
+        # ist (Kursfehler zur Kreistangente oder Querversatz ueber diesen Werten).
+        'turn_anchor_puenktlich': ('turn_anchor_puenktlich', 1.0, lambda v: bool(float(v))),
+        'turn_anchor_kurs_deg': ('turn_anchor_kurs', 3.0, lambda v: math.radians(float(v))),
+        'turn_anchor_quer':     ('turn_anchor_quer', 0.02, float),
+        # Totzeit der Lenkung: 241 ms vom /cmd_vel-Befehl bis zur Gierrate
+        # (Kreuzkorrelation, Lenkverstaerkung 0,84). Der kurze Radstand macht
+        # den Kursintegrator schnell (3,5 rad/s Gierrate je rad Lenkwinkel);
+        # mit 241 ms bleiben nur ~28 grad Phasenreserve -- jede Anregung
+        # klingelt ueber Sekunden aus (Schwingdauer ~4 x Totzeit = 1 s).
+        # Stanley rechnet deshalb mit der Pose bei Wirkbeginn. Simuliert: statt
+        # +-18 grad Lenkungspendeln +-2 grad, kein Klingeln. k_heading NICHT
+        # senken -- dann uebernimmt der Querterm und es wird schlechter.
+        # ACHTUNG: nicht zusaetzlich pose_extrapolate_s im Fusionsknoten
+        # setzen, sonst wird die Totzeit doppelt vorausgerechnet. 0 = aus.
+        'steer_dead_time':  ('steer_dead_time',  0.260, float),   # Lauf 2: 260 ms (Lauf 1: 241)
+        'steer_gain_pred':  ('steer_gain_pred',  0.84, float),
         # scan pause at the end of each straight (lap 1 only -- after that the
         # seat grid is filled and standing still would only cost time)
         'scan_pause':       ('scan_pause',       1.0, lambda v: bool(float(v))),
@@ -220,6 +242,46 @@ class Round1Controller(Node):
         # Zeichen von ausparken_scans (Stimmen fuer die Richtung) und meint
         # etwas voellig anderes.
         'ausparken_halt_s': ('ausparken_halt_s', 2.0, float),
+        # --- Einparken am Ende --------------------------------------------
+        # Das Regelwerk verlangt nach drei Runden 3 s Stillstand, erst danach
+        # darf eingeparkt werden. Reserve drauf, damit ein langsamer Takt die
+        # 3 s nicht knapp unterschreitet.
+        'einparken_halt_s':      ('einparken_halt_s',      3.5,  float),
+        # Wie genau die Einpark-Startpose getroffen sein muss, bevor die
+        # umgekehrte Ausparkfolge startet. Ein Kursfehler dreht die GANZE
+        # Folge mit -- 2 Grad sind ueber ~50 cm Rangierweg schon 1,7 cm.
+        'einparken_quer_tol':    ('einparken_quer_tol',    0.025, float),
+        'einparken_kurs_tol_grad': ('einparken_kurs_tol_grad', 2.5, float),
+        # Plausibilitaet: laenger darf die gerade Anfahrt nicht sein.
+        'einparken_max_anfahrt': ('einparken_max_anfahrt', 1.20, float),
+        # Steilster Rueckschwenk auf die Parklinie nach dem letzten Hindernis
+        # (Meter quer pro Meter laengs). Gemessen sauber: ~1,0.
+        'einparken_rueck_steigung_max': ('einparken_rueck_steigung_max', 0.90, float),
+        # Anfahrt zur Startpose: so genau muss sie laengs stimmen, so viele
+        # gerade Korrekturzuege sind erlaubt, so lange wird vor dem
+        # Nachmessen gewartet (EKF soll ruhen).
+        'einparken_laengs_tol':  ('einparken_laengs_tol',  0.010, float),
+        'einparken_anfahrt_max_zuege': ('einparken_anfahrt_max_zuege', 3, int),
+        'einparken_nachmess_s':  ('einparken_nachmess_s',  0.3,  float),
+        # So lange wird im Stand gemittelt (nach der Beruhigungszeit).
+        'einparken_mittel_s':    ('einparken_mittel_s',    0.5,  float),
+        # Rueckfall fuer die Parklinie, falls /wall_distances im Scan-Halt
+        # nichts Brauchbares liefert. Handmessung base_link -> Aussenbande am
+        # Ende des Ausparkens (Radnabe + halbe Spurweite).
+        'einparken_linie_cw':    ('einparken_linie_cw',    0.370, float),
+        'einparken_linie_ccw':   ('einparken_linie_ccw',   0.345, float),
+        # Nur wenn Ecke 1 nach dem Ausparken NAEHER als das liegt, wird am
+        # Ausparkende gescannt (voller Halt ausparken_halt_s, ersetzt den
+        # Scan-Stopp vor Ecke 1). Sonst faehrt er gleich los und scannt
+        # regulaer am Ende der Geraden -- ein Scan-Stopp pro Gerade.
+        'ausparken_scan_ersetzt_bis': ('ausparken_scan_ersetzt_bis', 1.10, float),
+        # Mindestens so lange steht er nach dem Ausparken trotzdem: die
+        # Parklinie wird hier im Stand per Lidar gemessen.
+        'ausparken_mess_s':      ('ausparken_mess_s',      0.5,  float),
+        # So lange wird hoechstens auf die Eckengeometrie gewartet. Ohne sie
+        # faehrt er blind zur Spurmitte -- mit Parkluecke stehen die Zeichen
+        # der Startgeraden innen bei 0,60 m, das waeren ~2 cm Luft.
+        'ausparken_geo_timeout_s': ('ausparken_geo_timeout_s', 4.0, float),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
     }
 
@@ -240,6 +302,10 @@ class Round1Controller(Node):
         # sie gehoert.
         self.declare_parameter('ausparken', False)
         self.declare_parameter('ausparken_nur', False)
+        # Einparken am Ende. Greift nur, wenn vorher ausgeparkt wurde -- ohne
+        # Ausparken gibt es keine aufgezeichnete Startpose, und der Regler
+        # haelt wie bisher am Ziel an (Eroeffnungsrennen).
+        self.declare_parameter('einparken', True)
         # Falls meine Herleitung der offenen Seite doch falsch herum ist:
         # ein Schalter statt einer Codeaenderung.
         self.declare_parameter('ausparken_richtung_invertieren', False)
@@ -309,6 +375,7 @@ class Round1Controller(Node):
         self.require_button = bool(self.get_parameter('require_button').value)
         self.ausparken = bool(self.get_parameter('ausparken').value)
         self.ausparken_nur = bool(self.get_parameter('ausparken_nur').value)
+        self.einparken = bool(self.get_parameter('einparken').value)
         self.ausparken_richtung_invertieren = bool(
             self.get_parameter('ausparken_richtung_invertieren').value)
         self.ausparken_setzt_richtung = bool(
@@ -346,6 +413,37 @@ class Round1Controller(Node):
         self.ausp_move_done = None
         self.ausp_theta0 = 0.0
         self.ausp_pose0 = None
+        # 'aus' = Ausparkfolge am Start, 'ein' = Einparkfolge am Ende. Beide
+        # laufen durch DENSELBEN Ausfuehrer (AUSPARK_FAHREN), damit er genau so
+        # einparkt, wie er ausgeparkt hat.
+        self.ausp_modus = 'aus'
+        self.park_ursprung = None     # Pose vor dem Ausparken (Lueckenlage)
+        self.park_start = None        # Pose NACH dem Ausparken = Einpark-Start
+        self.ausp_ende_pose = None    # Pose direkt nach dem letzten Ausparkzug
+        # Wellenstellung aus der letzten Quittung (0,1-grad-Zaehler des ESP,
+        # absolut seit Boot). Innerhalb einer Zugfolge dreht sich die Welle
+        # zwischen zwei Zuegen nicht -- die Differenz ist dann EXAKT die
+        # Drehung dieses Zuges, unabhaengig vom EKF.
+        self.ausp_pos_prev = None
+        self.anfahrt_iter = 0
+        self.park_einpark = []
+        self.park_mittel = []         # Posen zum Mitteln im Stand
+        # Parklinie WANDBEZOGEN: Abstand base_link -> Aussenbande am Ende des
+        # Ausparkens, per Lidar gemessen (/wall_distances). Nicht aus der
+        # gemerkten Pose: die Karte wird beim Start aus der Lueckenlage heraus
+        # ~14 cm / 3,4 grad versetzt platziert (CCW-Einparktest), und das
+        # gleicht der EKF erst waehrend der Runde aus.
+        self.park_q = None
+        self.park_q_luecke = None     # erwarteter Abstand eingeparkt
+        self.park_q_proben = []
+        # Erste Ecke nach dem Ausparken: steht er schon nah davor, ersetzt der
+        # Halt am Ausparkende den Scan-Stopp, und Ecke 1 wird aus der Lage
+        # geplant, in der er steht (kein Querversatz auf kurzem Anlauf).
+        self.erste_ecke_pruefen = False
+        self.erste_ecke_idx = None
+        self.ausp_scan_hier = None    # None = offen, True = am Ausparkende scannen
+        self.erste_ecke_q = None
+        self.park_t0 = 0.0
         self.pose = None
         self.v_ist = 0.0
         self.front_wall_x = None
@@ -363,6 +461,8 @@ class Round1Controller(Node):
         self.start_dodge_aktiv = None     # zuletzt gewaehlter Versatz, nur fuer das Log
         self._start_halt = None           # (obst_x, ziel_y, info) bis zum Passieren
         self.obstacles = None             # full current stand from /obstacles
+        self.obstacles_roh = None         # ungefiltert, fuer Einfrieren und Neufiltern
+        self._phantom_ids = set()         # schon gemeldete Phantome (nur einmal loggen)
         self.obs_path = None              # planned polyline [(x,y)] for this straight
         self.obs_max_slope = 0.0          # steepest lane change in the current plan
         self.obs_path_end_q = None        # lateral offset the path ends on (= corner entry)
@@ -378,6 +478,7 @@ class Round1Controller(Node):
         self.corner_idx = None            # index of the corner currently targeted
         self.corner_count = 0             # corners completed
         self.last_cmd = (0.0, 0.0)        # (v, omega) held during short odom gaps
+        self.cmd_hist = collections.deque(maxlen=200)   # (t, omega) der letzten Befehle
 
         latched = QoSProfile(depth=1)
         latched.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -449,6 +550,15 @@ class Round1Controller(Node):
 
         self.dt = 1.0 / self.control_rate
         self.create_timer(self.dt, self.control_loop)
+        # Aktive Regelwerte ins Log -- sonst muss jede Analyse raten, ob z.B.
+        # die Totzeit-Vorausberechnung lief.
+        self.get_logger().info(
+            'Regler: Totzeit-Vorausberechnung %.3f s (Verstaerkung %.2f), '
+            'k_heading %.2f, k_stanley %.2f, k_ct %.1f, k_th %.1f, '
+            'Bogen verankern bei gestoerter Einfahrt: %s.'
+            % (self.steer_dead_time, self.steer_gain_pred, self.k_heading,
+               self.k_stanley, self.k_ct, self.k_th,
+               'an' if self.turn_anchor_puenktlich else 'aus'))
         if self.ausparken and self.ausparken_nur:
             self.get_logger().info(
                 ">>> Round1Controller bereit: AUSPARKEN, danach ANHALTEN "
@@ -539,12 +649,91 @@ class Round1Controller(Node):
         return self._obs_planner_for_wall(wall_idx).pass_offset(
             q_block, near['color'], self.dir_step() > 0)
 
+    def _parklinie_festlegen(self):
+        """Abstand zur Aussenbande am Ende des Ausparkens -- gemessen, sonst
+        Rueckfallwert. Dazu der erwartete Abstand eingeparkt (Parklinie minus
+        seitlicher Weg des Ausparkens, der ist relativ und damit verlaesslich)."""
+        if not self.ausp_richtung or self.park_start is None:
+            return
+        rueck = (self.einparken_linie_ccw if self.ausp_richtung == 'CCW'
+                 else self.einparken_linie_cw)
+        proben = sorted(v for v in self.park_q_proben if 0.15 <= v <= 0.90)
+        if len(proben) >= 3:
+            self.park_q = proben[len(proben) // 2]
+            quelle = "gemessen (%d Proben)" % len(proben)
+            if abs(self.park_q - rueck) > 0.05:
+                self.get_logger().warn(
+                    "Parklinie gemessen %.3f m, Handmessung %.3f m -- %.1f cm "
+                    "Unterschied. Lidar-Bezugspunkt pruefen."
+                    % (self.park_q, rueck, (self.park_q - rueck) * 100))
+        else:
+            self.park_q = rueck
+            quelle = "Rueckfallwert (nur %d brauchbare Proben)" % len(proben)
+        # Seitlicher Weg des Ausparkens im Startrahmen -- RELATIV, also auch
+        # dann richtig, wenn die Karte versetzt liegt.
+        if self.park_ursprung is not None:
+            ux, uy, uth = self.park_ursprung
+            dx, dy = self.park_start[0] - ux, self.park_start[1] - uy
+            seitlich = abs(-dx * math.sin(uth) + dy * math.cos(uth))
+            self.park_q_luecke = self.park_q - seitlich
+        self.get_logger().info(
+            "Parklinie %.3f m zur Aussenbande (%s)%s."
+            % (self.park_q, quelle,
+               ", eingeparkt erwartet %.3f m" % self.park_q_luecke
+               if self.park_q_luecke is not None else ""))
+
+    def _park_aktiv(self):
+        return self.einparken and self.park_start is not None
+
+    def _park_offset_for_wall(self, wall_idx):
+        """Parklinie: Abstand der aufgezeichneten Einpark-Startpose zur
+        Aussenbande dieser Geraden. Gemessen vom Roboter selbst am Ende des
+        Ausparkens -- keine Konstanten, die fuer CW und CCW verschieden waeren
+        (CW 37,0 cm, CCW 34,5 cm, je nach Schlussbogen).
+
+        None, wenn nicht eingeparkt wird oder der Wert unplausibel ist (dann
+        faehrt die Zielgerade wie bisher die Mitte).
+        """
+        if not self._park_aktiv() or self.park_q is None:
+            return None
+        q = self.park_q
+        breite = (self.lane_width[wall_idx]
+                  if self.lane_width is not None and wall_idx < len(self.lane_width)
+                  else 1.0)
+        if not (0.15 <= q <= breite - 0.10):
+            self.get_logger().warn(
+                "Parklinie %.2f m auf Gerade w%d unplausibel -- ist das die "
+                "Startgerade? Zielgerade faehrt ohne Parklinie." % (q, wall_idx),
+                throttle_duration_sec=5.0)
+            return None
+        return q
+
+    def _zielgerade_folgt(self):
+        """Wird gerade die LETZTE Ecke geplant (ihr Ausgang ist die Zielgerade)?"""
+        return self.corner_count + 1 == self.n_corners
+
+    def _auf_zielgerade(self):
+        return self.corner_count >= self.n_corners
+
     def corner_o_in(self, idx):
         w = self._entry_wall_idx(idx)
+        # Auf der Zielgeraden ist die Ecke dahinter nur noch Rechengroesse --
+        # sie wird nie gefahren. Ihre Eintrittslinie IST die Zielgerade, und die
+        # soll auf der Parklinie liegen. Hindernisse davor erledigt der
+        # Hindernispfad, der danach auf die Parklinie zurueckschwenkt.
+        if self._auf_zielgerade():
+            q = self._park_offset_for_wall(w)
+            if q is not None:
+                return q
         if self.corners is not None:
             q = self._obstacle_offset_near_corner(w, self.corners[idx])
             if q is not None:
                 return q                      # last obstacle before the corner
+        # Erste Ecke direkt nach dem Ausparken: auf der Linie bleiben, auf der
+        # er steht. Ein Hindernis davor hat oben schon Vorrang bekommen.
+        if (self.erste_ecke_q is not None and self.corner_count == 0
+                and idx == self.erste_ecke_idx):
+            return self.erste_ecke_q
         auto = self._lane_default_offset(w) if self.use_auto_offset else None
         if auto is not None:
             return auto
@@ -556,6 +745,13 @@ class Round1Controller(Node):
             q = self._obstacle_offset_near_corner(w, self.corners[idx])
             if q is not None:
                 return q                      # first obstacle after the corner
+        # Letzte Ecke ohne Hindernis dahinter: direkt auf die Parklinie
+        # aus der Kurve kommen, dann muss auf der Zielgeraden nichts mehr
+        # rangiert werden.
+        if self._zielgerade_folgt():
+            q = self._park_offset_for_wall(w)
+            if q is not None:
+                return q
         auto = self._lane_default_offset(w) if self.use_auto_offset else None
         if auto is not None:
             return auto
@@ -700,10 +896,10 @@ class Round1Controller(Node):
         # (we stop at every corner for that). A "new" block appearing in lap 2 or 3
         # can only be a false positive -- and acting on it would wreck a good run.
         if (self.corner_count // 4) >= self.obs_freeze_lap:
-            if self.obstacles is not None and len(msg.obstacles) != len(self.obstacles):
+            if self.obstacles_roh is not None and len(msg.obstacles) != len(self.obstacles_roh):
                 self.get_logger().warn(
                     f"/obstacles nach Runde {self.obs_freeze_lap} ignoriert "
-                    f"({len(msg.obstacles)} statt {len(self.obstacles)} gemeldet) "
+                    f"({len(msg.obstacles)} statt {len(self.obstacles_roh)} gemeldet) "
                     f"-- Hindernisse sind eingefroren.")
             return
 
@@ -711,6 +907,8 @@ class Round1Controller(Node):
         for o in msg.obstacles:
             obs.append(dict(id=int(o.id), x=float(o.position.x), y=float(o.position.y),
                             color=int(o.color), wall=int(o.wall_idx)))
+        self.obstacles_roh = list(obs)
+        obs = self._phantome_filtern(obs)
         changed = (self.obstacles is None or
                    {(o['id'], o['color']) for o in obs} !=
                    {(o['id'], o['color']) for o in self.obstacles})
@@ -722,6 +920,49 @@ class Round1Controller(Node):
                           f"{'gruen' if o['color']==2 else 'rot'})" for o in obs))
         if self.state in ('DRIVE', 'SCAN_PAUSE') and self.arc is not None:
             self.plan_obstacle_path()
+
+    def _start_wand(self):
+        """Index der Startgeraden: die Wand, an der er in der Luecke stand."""
+        if self.walls is None or self.park_ursprung is None:
+            return None
+        ux, uy, _ = self.park_ursprung
+        return min(range(len(self.walls)),
+                   key=lambda i: abs(self.walls[i][0] * ux + self.walls[i][1] * uy
+                                     - self.walls[i][2]))
+
+    def _phantome_filtern(self, obs):
+        """Regelwerk: mit Parkluecke stehen auf der Startgeraden NUR Zeichen in
+        der inneren Spalte. Eine Meldung in der aeusseren Spalte dort kann nur
+        falsch sein -- im CCW-Einparktest war es vermutlich eine Magenta-
+        Parkwand, als Rot gelesen (id20, kein echtes Hindernis auf der Bahn).
+        Sitzkodierung: id = Gruppe*6 + k, gerades k = aeussere Spalte."""
+        if self.ausp_richtung is None and not self.parking_lot_present:
+            return obs
+        w = self._start_wand()
+        if w is None:
+            return obs
+        nx, ny, dw = self.walls[w]
+        breite = (self.lane_width[w] if self.lane_width is not None
+                  and w < len(self.lane_width) else 1.0)
+        behalten, weg = [], []
+        for o in obs:
+            # ZWEI Bedingungen, beide muessen stimmen: Sitzkodierung sagt aussen
+            # UND die Lage liegt wirklich in der aeusseren Spurhaelfte. Ein
+            # echtes inneres Zeichen zu verwerfen hiesse hineinfahren -- falls
+            # die Kodierung einmal nicht stimmt, haelt die Geometrie es fest.
+            q = (nx * o['x'] + ny * o['y']) - dw
+            aussen = (o['id'] % 6) % 2 == 0 and q < 0.5 * breite
+            (weg if (o['wall'] == w and aussen) else behalten).append(o)
+        neu = {o['id'] for o in weg} - self._phantom_ids
+        if neu:
+            self._phantom_ids |= neu
+            self.get_logger().warn(
+                "Phantom verworfen: %s auf der Startgeraden w%d in der AEUSSEREN "
+                "Spalte -- mit Parkluecke stehen dort nur innere Zeichen. "
+                "(Magenta-Parkwand als Rot gelesen?)"
+                % (', '.join('id%d(%s)' % (o['id'], 'gruen' if o['color'] == 2 else 'rot')
+                             for o in weg if o['id'] in neu), w))
+        return behalten
 
     def plan_obstacle_path(self):
         """Plan the (x,y) polyline for the straight we are currently driving.
@@ -769,6 +1010,19 @@ class Round1Controller(Node):
             obs_lane.append((s_o, q_o, o['color']))
         # only what is still ahead of us (plus a little behind for hysteresis)
         obs_lane = [t for t in obs_lane if t[0] > -0.10]
+
+        # Zielgerade mit Einparken: nur Hindernisse, an denen er VOR dem
+        # Haltepunkt vorbeikommt. Was dahinter steht, faehrt er nie an --
+        # darauf auszuweichen hiesse, neben der Parklinie anzuhalten.
+        q_park = None
+        s_stop = None
+        if self._auf_zielgerade():
+            q_park = self._park_offset_for_wall(w_entry)
+            if q_park is not None:
+                fc = self.corners[self.corner_idx]
+                s_stop = ((fc[0] - x) * tx + (fc[1] - y) * ty
+                          - self.finish_front_dist)
+                obs_lane = [t for t in obs_lane if t[0] < s_stop + 0.10]
         if not obs_lane:
             return
 
@@ -783,6 +1037,44 @@ class Round1Controller(Node):
                            q_start=q_now, s_start=0.0,
                            q_default=(self._lane_default_offset(w_entry)
                                       or self.corner_o_in(idx)))
+        # Zielgerade: nach dem letzten Hindernis zurueck auf die Parklinie,
+        # und zwar fertig VOR dem Haltepunkt. Reicht der Platz nicht, bleibt
+        # er auf dem Vorbeifahr-Offset -- die Anfahrtspruefung nach dem Halt
+        # faengt das ab und parkt dann nicht, statt schief einzuparken.
+        if q_park is not None and s_stop is not None:
+            letzte = max(t[0] for t in obs_lane) + self.obs_clear_after
+            behalten = [(sv, qv) for (sv, qv) in pts if sv <= letzte + 1e-6]
+            if not behalten:
+                behalten = [pts[0]]
+            q_letzt = behalten[-1][1]
+            # Laenge, die der Rueckschwenk mindestens braucht, um nicht
+            # steiler als einparken_rueck_steigung_max zu werden. Gemessen
+            # schafft er ~1,0 (40 cm quer auf 40 cm laengs bei 0,45 m/s).
+            noetig = abs(q_letzt - q_park) / max(self.einparken_rueck_steigung_max, 0.1)
+            s_zurueck = min(letzte + max(self.obs_transition_pref, noetig),
+                            s_stop - 0.05)
+            s_bis = max(s_end, s_stop + 0.20)
+            if abs(q_letzt - q_park) < 0.01:
+                behalten.append((s_bis, q_park))
+            elif s_zurueck - letzte >= noetig:
+                behalten += [(letzte, q_letzt), (s_zurueck, q_park), (s_bis, q_park)]
+                self.get_logger().info(
+                    "Zielgerade: nach dem letzten Hindernis zurueck auf die "
+                    "Parklinie (q %.2f -> %.2f ueber %.2f m)."
+                    % (q_letzt, q_park, s_zurueck - letzte))
+            else:
+                behalten.append((s_bis, q_letzt))
+                self.get_logger().warn(
+                    "Zielgerade: zu wenig Platz zwischen letztem Hindernis und "
+                    "Haltepunkt (%.2f m, noetig %.2f m) -- er haelt neben der "
+                    "Parklinie (q %.2f statt %.2f), Einparken wird dann ausfallen."
+                    % (max(s_zurueck - letzte, 0.0), noetig, q_letzt, q_park))
+            # stabil nach s sortieren, gleiche s nur einmal (der erste bleibt)
+            pts = []
+            for sv, qv in sorted(behalten, key=lambda pq: pq[0]):
+                if pts and abs(sv - pts[-1][0]) < 1e-9:
+                    continue
+                pts.append((sv, qv))
         self.obs_max_slope = planner.max_slope(pts)
         dense = planner.densify(pts, 0.05, skew=self.obs_skew)
         self.obs_path = [to_map(s, q) for (s, q) in dense]
@@ -835,6 +1127,10 @@ class Round1Controller(Node):
                     f"(Abw {e0:.3f}/{e1:.3f} m). Kanten-Ecken-Konvention verletzt!")
         if ok:
             self.get_logger().info("Kanten-Ecken-Konvention verifiziert (walls<->corners).")
+        # Hindernisse, die VOR der Geometrie kamen, jetzt nachfiltern: vorher
+        # war die Startwand unbekannt.
+        if self.obstacles_roh is not None:
+            self.obstacles = self._phantome_filtern(list(self.obstacles_roh))
 
     def wall_dist_cb(self, msg):
         """Live side-wall distances [left, right] -- used ONLY on the start straight,
@@ -1027,7 +1323,9 @@ class Round1Controller(Node):
         self._ausparken_pid(self.ausparken_pid_nachher)
         self.publish_stop()
         self.state = 'DONE'
-        self.get_logger().error("Ausparken abgebrochen: %s" % grund)
+        self.get_logger().error("%s abgebrochen: %s"
+                                % ('Einparken' if self.ausp_modus == 'ein'
+                                   else 'Ausparken', grund))
 
     def _ausparken_planen(self):
         """Tabelle auf die erkannte Seite drehen und den Trockenlauf mitloggen."""
@@ -1076,6 +1374,9 @@ class Round1Controller(Node):
                 "von meinem Modell abweichen. Hand an den Nothalt.")
 
         self._ausparken_pid(self.ausparken_pid)
+        self.ausp_modus = 'aus'
+        self.park_ursprung = self.pose       # hier soll er am Ende wieder stehen
+        self.ausp_pos_prev = None
         self.state = 'AUSPARK_FAHREN'
         self.ausp_index = 0
         self.ausp_phase = 'lenken'
@@ -1143,7 +1444,14 @@ class Round1Controller(Node):
         # --- die Zuege abfahren ----------------------------------------
         if self.state == 'AUSPARK_FAHREN':
             if self.ausp_index >= len(self.ausp_schritte):
-                self._ausparken_fertig(x, y, theta)
+                if self.ausp_modus == 'ein':
+                    self._einparken_fertig(x, y, theta)
+                elif self.ausp_modus == 'anfahrt':
+                    self.state = 'PARK_NACHMESSEN'
+                    self.park_t0 = self.now_s()
+                    self.park_mittel = []
+                else:
+                    self._ausparken_fertig(x, y, theta)
                 return
             lenk, cm = self.ausp_schritte[self.ausp_index]
 
@@ -1187,6 +1495,15 @@ class Round1Controller(Node):
                 # ueber Grund misst die Pose den direkten Abstand, und bei
                 # 37 cm Vollkreisbogen sind das schon 2 cm Unterschied.
                 fehlt = abs(gefahren - erwartet)
+                # Besser: der Encoder. Die Differenz zweier Quittungen ist die
+                # Wellendrehung dieses Zuges -- ein Sprung der Lokalisierung
+                # kann den Zug dann nicht mehr faelschlich abbrechen (so
+                # geschehen im CCW-Ausparktest). Nur fuer den ersten Zug einer
+                # Folge fehlt der Vorgaenger, dort bleibt es bei der Pose.
+                if self.ausp_pos_prev is not None:
+                    gedreht = _pos - self.ausp_pos_prev
+                    fehlt = abs(grad_zu_cm(gedreht - cm_zu_grad(cm))) / 100.0
+                self.ausp_pos_prev = _pos
 
                 if status == 1 and fehlt <= self.ausparken_weg_toleranz_cm / 100.0:
                     # Der ESP hat nicht eingeschwungen, ist aber weit genug
@@ -1235,6 +1552,7 @@ class Round1Controller(Node):
     def _ausparken_fertig(self, x, y, theta):
         self._ausparken_pid(self.ausparken_pid_nachher)
         self.publish_stop()
+        self.ausp_ende_pose = (x, y, theta)   # Vergleich nach dem Scan-Halt
         self.get_logger().info(
             "Ausparken fertig: Pose (%.2f, %.2f), Kurs %+.1f grad."
             % (x, y, math.degrees(theta)))
@@ -1251,11 +1569,180 @@ class Round1Controller(Node):
         if self.ausparken_halt_s > 0.0:
             self.state = 'AUSPARK_SCAN'
             self.ausp_t0 = self.now_s()
+            self.ausp_scan_hier = None
             self.get_logger().info(
-                "Scan-Halt: %.1f s stehen bleiben, bevor es losgeht."
-                % self.ausparken_halt_s)
+                "Nach dem Ausparken: warte auf die Eckengeometrie, dann entscheide, "
+                "ob hier gescannt wird.")
             return
         self._ausparken_uebergeben()
+
+    def _park_gerade(self):
+        """Aussenwand (einwaerts gerichtete HNF) und Fahrtrichtung der
+        Zielgeraden = Startgerade."""
+        w = self._entry_wall_idx(self.corner_idx)
+        nx, ny, dw = self.walls[w]
+        tx, ty = self.arc['travel']
+        return nx, ny, dw, tx, ty
+
+    def _park_lage(self, x, y, theta):
+        """Wo liegt die Einpark-Startpose relativ zum Roboter -- WANDBEZOGEN.
+
+        d    laengs, entlang der Geraden (+ voraus). Aus der gemerkten Pose:
+             laengs passen Startrahmen und Karte (front_wall_x und Eckpunkt
+             stimmen ueberein).
+        quer Abstand zur Aussenbande minus Parklinie (+ = zu weit innen).
+             NICHT aus der gemerkten Pose -- die liegt quer ~14 cm daneben.
+        kurs gegen die Richtung der Geraden; das Ausparken endet parallel.
+        """
+        nx, ny, dw, tx, ty = self._park_gerade()
+        px, py, _pth = self.park_start
+        d = (px * tx + py * ty) - (x * tx + y * ty)
+        quer = ((nx * x + ny * y) - dw) - self.park_q
+        kurs = wrap(theta - math.atan2(ty, tx))
+        return d, quer, kurs
+
+    def _park_mittelpose(self):
+        """Mittel der im Stand gesammelten Posen. Ein Einzelwert traegt das
+        EKF-Rauschen voll in den Korrekturzug -- und weil jeder Vorwaertszug
+        ~1 cm Ueberschuss hat, pendelt die Anfahrt dann hin und her. Simuliert
+        mit dem gemessenen Fahrmodell: Einzelwert 89 Prozent, gemittelt 100."""
+        n = len(self.park_mittel)
+        mx = sum(p[0] for p in self.park_mittel) / n
+        my = sum(p[1] for p in self.park_mittel) / n
+        mth = math.atan2(sum(math.sin(p[2]) for p in self.park_mittel),
+                         sum(math.cos(p[2]) for p in self.park_mittel))
+        return mx, my, mth
+
+    def _park_lage_ok(self, d, quer, kurs, max_anfahrt):
+        gruende = []
+        if abs(quer) > self.einparken_quer_tol:
+            gruende.append("%.1f cm seitlich (Grenze %.1f)"
+                           % (quer * 100, self.einparken_quer_tol * 100))
+        if abs(math.degrees(kurs)) > self.einparken_kurs_tol_grad:
+            gruende.append("Kurs %+.1f grad (Grenze %.1f)"
+                           % (math.degrees(kurs), self.einparken_kurs_tol_grad))
+        if abs(d) > max_anfahrt:
+            gruende.append("Anfahrt %.2f m (Grenze %.2f)" % (abs(d), max_anfahrt))
+        return gruende
+
+    def _park_zuege_starten(self, schritte, modus):
+        self.ausp_schritte = schritte
+        self.ausp_modus = modus
+        self.state = 'AUSPARK_FAHREN'
+        self.ausp_index = 0
+        self.ausp_phase = 'lenken'
+        self.ausp_lenk_gesendet = False
+
+    def _park_halt(self, x, y, theta):
+        """Pflichtstillstand nach drei Runden, danach zur Startpose anfahren.
+
+        Eingeparkt wird mit der UMGEKEHRTEN Ausparkfolge, die er zu Beginn
+        selbst gefahren ist -- am Roboter nachgemessen trifft der Rueckweg die
+        Lueckenlage auf rund 2 cm, Achsen parallel. Das gilt aber nur, wenn die
+        Folge exakt an der Pose beginnt, an der das Ausparken endete.
+        """
+        self.publish_stop()
+        rest = self.einparken_halt_s - (self.now_s() - self.park_t0)
+        if rest <= self.einparken_mittel_s:
+            self.park_mittel.append((x, y, theta))
+        if rest > 0.0:
+            self.get_logger().info("Pflichtstillstand, noch %.1f s." % rest,
+                                   throttle_duration_sec=0.5)
+            return
+
+        d, quer, kurs = self._park_lage(*self._park_mittelpose())
+        self.park_mittel = []
+        self.get_logger().info(
+            "Einparken: Startpose %.1f cm %s, %.1f cm seitlich, Kursfehler "
+            "%+.1f grad." % (abs(d) * 100, 'voraus' if d >= 0 else 'zurueck',
+                             quer * 100, math.degrees(kurs)))
+        gruende = self._park_lage_ok(d, quer, kurs, self.einparken_max_anfahrt)
+        if gruende:
+            # Lieber nicht einparken als schief: 4 cm Spiel je Ende vertragen
+            # keinen Kursfehler, der ueber den ganzen Rangierweg mitdreht.
+            self.state = 'DONE'
+            self.get_logger().error(
+                "Einparken NICHT gestartet: %s. Er bleibt hier stehen."
+                % '; '.join(gruende))
+            return
+
+        # Die Ausparkfolge JETZT sichern und umkehren: der Ausfuehrer bekommt
+        # gleich die Anfahrtszuege, und die ueberschreiben ausp_schritte.
+        self.park_einpark = [(lenk, -cm) for lenk, cm in reversed(self.ausp_schritte)]
+        self.ausp_pos_prev = None       # Welle hat sich in den Runden gedreht
+        self.anfahrt_iter = 0
+        self._ausparken_pid(self.ausparken_pid)
+        self._park_anfahren(d)
+
+    def _park_anfahren(self, d):
+        """Ein gerader Zug um d. Danach wird nachgemessen (PARK_NACHMESSEN):
+        die Umrechnung Grad -> cm (R_EFF) liegt real rund 6 Prozent daneben,
+        dazu ~1 cm Ueberschuss je Vorwaertszug. Blind gefahren laege er bei 1 m
+        Anfahrt 7 cm daneben -- nachgemessen nach 1-3 Zuegen auf 1 cm."""
+        if abs(d) < self.einparken_laengs_tol:
+            self._park_folge_starten()
+            return
+        self.anfahrt_iter += 1
+        offen_links = (self.ausp_richtung == 'CCW')
+        self.get_logger().info(
+            "Einparken: Anfahrt %d, %+.1f cm gerade." % (self.anfahrt_iter, d * 100))
+        self._park_zuege_starten(spiegeln([(0.0, d * 100.0)], offen_links), 'anfahrt')
+
+    def _park_nachmessen(self, x, y, theta):
+        """Nach einem Anfahrtszug kurz ruhen lassen, dann Rest bestimmen."""
+        t = self.now_s() - self.park_t0
+        if t < self.einparken_nachmess_s:
+            return                      # Fahrzeug und EKF beruhigen lassen
+        self.park_mittel.append((x, y, theta))
+        if t < self.einparken_nachmess_s + self.einparken_mittel_s:
+            return
+        d, quer, kurs = self._park_lage(*self._park_mittelpose())
+        self.park_mittel = []
+        if abs(d) < self.einparken_laengs_tol:
+            self.get_logger().info(
+                "Einparken: Startpose erreicht (%.1f cm, %.1f cm seitlich, "
+                "%+.1f grad) nach %d Anfahrtszug/-zuegen."
+                % (d * 100, quer * 100, math.degrees(kurs), self.anfahrt_iter))
+            self._park_folge_starten()
+            return
+        gruende = self._park_lage_ok(d, quer, kurs, 0.30)
+        if self.anfahrt_iter >= self.einparken_anfahrt_max_zuege:
+            gruende.append("nach %d Anfahrtszuegen noch %.1f cm daneben"
+                           % (self.anfahrt_iter, d * 100))
+        if gruende:
+            self._ausparken_pid(self.ausparken_pid_nachher)
+            self.state = 'DONE'
+            self.get_logger().error(
+                "Einparken abgebrochen: %s." % '; '.join(gruende))
+            return
+        self._park_anfahren(d)
+
+    def _park_folge_starten(self):
+        self.get_logger().info(
+            "Einparken: %d Zuege aus der umgekehrten Ausparkfolge."
+            % len(self.park_einpark))
+        self._park_zuege_starten(list(self.park_einpark), 'ein')
+
+    def _einparken_fertig(self, x, y, theta):
+        self._ausparken_pid(self.ausparken_pid_nachher)
+        self.publish_stop()
+        self.state = 'DONE'
+        # Wandbezogen berichten -- genau das, was man mit dem Lineal nachmisst.
+        try:
+            nx, ny, dw, tx, ty = self._park_gerade()
+            q = (nx * x + ny * y) - dw
+            kurs = math.degrees(wrap(theta - math.atan2(ty, tx)))
+            achsdiff = 0.105 * math.sin(math.radians(kurs)) * 100   # Radstand
+            self.get_logger().info(
+                "EINGEPARKT. base_link %.1f cm von der Aussenbande (erwartet "
+                "%s), Kurs %+.1f grad zur Bande = %.1f cm Achsdifferenz "
+                "(Regel: hoechstens 2 cm)."
+                % (q * 100,
+                   '%.1f cm' % (self.park_q_luecke * 100)
+                   if self.park_q_luecke is not None else '?',
+                   kurs, abs(achsdiff)))
+        except Exception:
+            self.get_logger().info("EINGEPARKT bei (%.2f, %.2f)." % (x, y))
 
     def _ausparken_scanhalt(self, x, y, theta):
         """Stillstehen, damit die Wahrnehmung die Startgerade aufnehmen kann.
@@ -1266,16 +1753,50 @@ class Round1Controller(Node):
         Startgeraden sind jetzt besser zu sehen als spaeter im Lauf.
         """
         self.publish_stop()
+        # Parklinie messen: Abstand zur Aussenbande, im Stand gemittelt.
+        # CCW -> Aussenbande rechts, CW -> links.
+        if self.wall_dist is not None and self.ausp_richtung:
+            d_l, d_r = self.wall_dist
+            self.park_q_proben.append(d_r if self.ausp_richtung == 'CCW' else d_l)
         # Wiederholen, solange gehalten wird: der Publisher ist nicht latched,
         # und wer erst jetzt zuhoert, soll sie trotzdem bekommen.
         if self.ausparken_setzt_richtung and self.ausp_richtung:
             self.pub_park_dir.publish(String(data=self.ausp_richtung))
-        rest = self.ausparken_halt_s - (self.now_s() - self.ausp_t0)
-        if rest > 0.0:
-            self.get_logger().info(
-                "Scan-Halt, noch %.1f s." % rest, throttle_duration_sec=0.5)
+        t = self.now_s() - self.ausp_t0
+        if self.geometry_ready():
+            if self.ausp_scan_hier is None:
+                vorn = self._abstand_erste_ecke(x, y, theta)
+                self.ausp_scan_hier = (vorn is not None
+                                       and vorn < self.ausparken_scan_ersetzt_bis)
+                self.get_logger().info(
+                    "Ecke 1 liegt %s voraus -> %s." % (
+                        '%.2f m' % vorn if vorn is not None else '?',
+                        'hier scannen (%.1f s Halt)' % self.ausparken_halt_s
+                        if self.ausp_scan_hier else
+                        'gleich losfahren, Scan-Stopp am Ende der Geraden'))
+            halt = self.ausparken_halt_s if self.ausp_scan_hier else self.ausparken_mess_s
+            if t < halt:
+                self.get_logger().info("Halt nach dem Ausparken, noch %.1f s."
+                                       % (halt - t), throttle_duration_sec=0.5)
+                return
+            self._ausparken_uebergeben()
             return
+        if t < self.ausparken_geo_timeout_s:
+            self.get_logger().info("Warte auf die Eckengeometrie (%.1f s)." % t,
+                                   throttle_duration_sec=0.5)
+            return
+        self.get_logger().warn(
+            "Nach %.1f s noch keine Eckengeometrie -- fahre trotzdem los "
+            "(Startmodus, Spurmitte)." % t)
         self._ausparken_uebergeben()
+
+    def _abstand_erste_ecke(self, x, y, theta):
+        """Abstand entlang des Kurses bis zum Eckpunkt der ersten Ecke."""
+        idx = self.pick_first_corner(x, y, theta)
+        if idx is None:
+            return None
+        c = self.corners[idx]
+        return (c[0] - x) * math.cos(theta) + (c[1] - y) * math.sin(theta)
 
     def _ausparken_richtung_uebernehmen(self):
         """Wer hat bei der Fahrtrichtung das letzte Wort?
@@ -1328,6 +1849,48 @@ class Round1Controller(Node):
         Die Richtung ist zu diesem Zeitpunkt schon gesetzt und verschickt --
         das passiert in _ausparken_fertig, vor dem Scan-Halt.
         """
+        # Einpark-Startpose JETZT aufzeichnen, nicht direkt nach dem letzten
+        # Zug: dazwischen liegt der Scan-Halt, in dem die Richtung an den
+        # scan_processor geht und der die Karte umschaltet. Ein Sprung der
+        # Pose beim Umschalten ist damit schon eingerechnet -- genau dieser
+        # Sprung hat den CCW-Ausparktest verfaelscht. Der Roboter hat sich
+        # seit dem letzten Zug nicht bewegt.
+        if self.pose is not None and self.ausp_schritte:
+            self.park_start = self.pose
+            # Selbstdiagnose Kartenwechsel: seit dem letzten Zug steht er still,
+            # jede Posenaenderung ist also ein Sprung der Lokalisierung. Die
+            # Lueckenlage wurde VOR dem Sprung gemerkt und wird mitverschoben,
+            # sonst misst die Schlussmeldung den Sprung statt der Parkgenauigkeit.
+            if self.ausp_ende_pose is not None:
+                ax, ay, ath = self.ausp_ende_pose
+                bx, by, bth = self.park_start
+                dth = wrap(bth - ath)
+                sprung = math.hypot(bx - ax, by - ay)
+                (self.get_logger().warn if (sprung > 0.01 or
+                                            abs(math.degrees(dth)) > 1.0)
+                 else self.get_logger().info)(
+                    "Kartenwechsel im Scan-Halt: Pose um %.1f cm / %+.1f grad "
+                    "gesprungen (Roboter stand still)."
+                    % (sprung * 100, math.degrees(dth)))
+                if self.park_ursprung is not None:
+                    # starre Transformation alt -> neu auf die Lueckenlage
+                    ux, uy, uth = self.park_ursprung
+                    c, sn = math.cos(dth), math.sin(dth)
+                    rx, ry = ux - ax, uy - ay
+                    self.park_ursprung = (bx + c * rx - sn * ry,
+                                          by + sn * rx + c * ry,
+                                          wrap(uth + dth))
+            if self.ausparken_halt_s < 1.0:
+                self.get_logger().warn(
+                    "Einpark-Startpose ohne Beruhigungszeit aufgezeichnet "
+                    "(ausparken_halt_s=%.1f) -- springt die Pose beim "
+                    "Kartenwechsel, stimmt sie nicht." % self.ausparken_halt_s)
+            self.get_logger().info(
+                "Einpark-Startpose gemerkt: (%.3f, %.3f), Kurs %+.1f grad."
+                % (self.park_start[0], self.park_start[1],
+                   math.degrees(self.park_start[2])))
+        self._parklinie_festlegen()
+        self.erste_ecke_pruefen = True
         # Der Taster ist bereits gedrueckt worden, sonst waeren wir nicht hier.
         self.button_pressed = True
         self.state = 'WAIT_INPUTS'
@@ -1374,6 +1937,32 @@ class Round1Controller(Node):
         cmd.angular.z = float(omega)
         self.pub_cmd.publish(cmd)
         self.last_cmd = (float(v), float(omega))
+        self.cmd_hist.append((self.now_s(), float(omega)))
+
+    def _pose_nach_totzeit(self, x, y, theta):
+        """Pose, die der Wagen hat, wenn der JETZT berechnete Befehl wirkt.
+
+        Die Befehle der letzten steer_dead_time Sekunden sind schon unterwegs:
+        sie bestimmen, wie er in dieser Zeit giert. Aufintegriert (mit der
+        gemessenen Lenkverstaerkung) ergibt das Kurs und Lage bei Wirkbeginn."""
+        T = self.steer_dead_time
+        if T <= 0.0 or not self.cmd_hist:
+            return x, y, theta
+        jetzt = self.now_s()
+        t0 = jetzt - T
+        dth = 0.0
+        eintraege = [e for e in self.cmd_hist if e[0] >= t0 - 0.2]
+        for i, (t, om) in enumerate(eintraege):
+            ende = eintraege[i + 1][0] if i + 1 < len(eintraege) else jetzt
+            a, b = max(t, t0), min(ende, jetzt)
+            if b > a:
+                dth += om * (b - a)
+        dth *= self.steer_gain_pred
+        v = max(abs(self.v_ist), 0.0)
+        th_mid = theta + 0.5 * dth
+        return (x + v * T * math.cos(th_mid),
+                y + v * T * math.sin(th_mid),
+                theta + dth)
 
     def republish_last(self):
         """Hold the last command during a short odom gap (don't stop mid-manoeuvre)."""
@@ -1512,8 +2101,8 @@ class Round1Controller(Node):
         u_B = u_exit   # keep exit travel consistent with theta_target
 
         tx, ty = travel
-        self.arc = dict(C=C, s=s, R=R, o_in=o_in, T_A=T_A, T_B=T_B, a0=a0, travel=travel,
-                        LA=LA, LB=LB, u_B=u_B, theta_target=theta_target)
+        self.arc = dict(C=C, s=s, R=R, o_in=o_in, o_out=o_out, T_A=T_A, T_B=T_B, a0=a0,
+                        travel=travel, LA=LA, LB=LB, u_B=u_B, theta_target=theta_target)
         corner = self.corners[idx]
         self.get_logger().info(
             f"DECIDE Ecke {self.corner_count+1}/{self.n_corners} (idx {idx}, {self.race_direction}): "
@@ -1534,6 +2123,56 @@ class Round1Controller(Node):
                 f"LB=({LB[0]:+.2f},{LB[1]:+.2f},{LB[2]:+.2f})")
         return True
 
+    def _bogen_an_pose_verankern(self, x, y, theta, r_max=None):
+        """Bogen so legen, dass er HIER tangential zum Ist-Kurs beginnt und
+        tangential auf der Austrittslinie endet.
+
+        plan_arc kennt kein 'hier': T_A und C kommen aus der Kastengeometrie.
+        Steht der Wagen schon hinter T_A, liegt der Kreis hinter ihm, und die
+        Schrumpfschleife bricht dann sofort ab (room <= 0). Hier dagegen:
+            C = P + R*s*n_links,   Abstand(C, LB) = R
+            ->  R = (B.P - LB) / (1 - s*(B.n_links))
+        Genau an T_A ergibt das den alten Radius, delta dahinter R - delta.
+        Unter min_turn_radius: mit dem kleinsten Radius fahren und dafuer
+        frueher, naeher an der Aussenbande, auf die naechste Gerade kommen.
+        Rueckgabe (fahrbar, Beschreibung).
+        """
+        a = self.arc
+        s = a['s']
+        bx, by, lb = a['LB']
+        nlx, nly = -math.sin(theta), math.cos(theta)
+        nenner = 1.0 - s * (bx * nlx + by * nly)
+        abst = (bx * x + by * y) - lb            # > 0: Austrittslinie noch voraus
+        if nenner < 0.2 or abst <= 0.0:
+            return False, ("Austrittslinie nicht mehr erreichbar (Abstand %.2f m, "
+                           "Kurs passt nicht)" % abst)
+        R = abst / nenner
+        if r_max is not None and R > r_max:
+            return False, ("verankerter Radius %.2f m > %.2f -- Kurs zeigt schon "
+                           "stark in die Kurve" % (R, r_max))
+        o_out = a.get('o_out')
+        verschub = 0.0
+        if R < self.min_turn_radius:
+            verschub = (self.min_turn_radius - R) * nenner
+            if o_out is not None and o_out - verschub < self.turn_anchor_min_out:
+                return False, ("selbst mit Radius %.2f m kaeme er %.2f m vor der "
+                               "Aussenbande heraus (Minimum %.2f)"
+                               % (self.min_turn_radius, o_out - verschub,
+                                  self.turn_anchor_min_out))
+            R = self.min_turn_radius
+        C = (x + R * s * nlx, y + R * s * nly)
+        lb_neu = lb - verschub
+        a.update(C=C, R=R, T_A=(x, y),
+                 T_B=(C[0] - R * bx, C[1] - R * by),
+                 a0=math.atan2(y - C[1], x - C[0]),
+                 LB=(bx, by, lb_neu))
+        if o_out is not None:
+            a['o_out'] = o_out - verschub
+        if verschub > 0.0:
+            return True, ("kleinster Radius %.2f m, Austritt bei %.2f statt %.2f m"
+                          % (R, o_out - verschub, o_out))
+        return True, "Radius %.2f m, Austritt wie geplant" % R
+
     @staticmethod
     def _inward(wall, cx, cy):
         """Return wall HNF with normal pointing toward (cx,cy)."""
@@ -1553,6 +2192,12 @@ class Round1Controller(Node):
         # Ausparkzuege laufen auf dem ESP und brauchen keine frische Pose.
         if self.state.startswith('AUSPARK'):
             self._ausparken_schritt(x, y, theta)
+            return
+        if self.state == 'PARK_HALT':
+            self._park_halt(x, y, theta)
+            return
+        if self.state == 'PARK_NACHMESSEN':
+            self._park_nachmessen(x, y, theta)
             return
 
         if self.state == 'WAIT_INPUTS':
@@ -1646,9 +2291,43 @@ class Round1Controller(Node):
             if self.corner_idx is None:
                 self.get_logger().warn("Keine Ecke voraus gefunden -- nehme idx 0.")
                 self.corner_idx = 0
+        if self.erste_ecke_pruefen and self.corner_count == 0:
+            self._erste_ecke_nach_ausparken(x, y, theta)
         if self.arc is None:
             self.plan_arc(theta)
         self.publish_lap_state()
+
+    def _erste_ecke_nach_ausparken(self, x, y, theta):
+        """Einmalig nach dem Ausparken: steht er schon vor Ecke 1?
+
+        Dann hat er gerade im Stand gescannt -- genau dort, wo sonst der
+        Scan-Stopp waere. Ein zweiter Halt 27 cm weiter bringt nichts, und der
+        Weg dazwischen reichte nicht, um den Querversatz zur Spurmitte
+        abzubauen (CCW-Test: 31 cm auf 45 cm Anlauf, Ecke 1 unruhig).
+        """
+        self.erste_ecke_pruefen = False
+        c = self.corners[self.corner_idx]
+        vorn = (c[0] - x) * math.cos(theta) + (c[1] - y) * math.sin(theta)
+        # Im Halt schon entschieden? Dann dabei bleiben (er hat sich seitdem
+        # nicht bewegt). Sonst (Geometrie kam erst beim Fahren) jetzt pruefen.
+        hier = (self.ausp_scan_hier if self.ausp_scan_hier is not None
+                else vorn < self.ausparken_scan_ersetzt_bis)
+        if not hier:
+            return
+        self.scan_done_this_straight = True
+        w = self._entry_wall_idx(self.corner_idx)
+        nx, ny, dw = self.walls[w]
+        q = (nx * x + ny * y) - dw
+        breite = (self.lane_width[w] if self.lane_width is not None
+                  and w < len(self.lane_width) else 1.0)
+        if 0.15 <= q <= breite - 0.10:
+            self.erste_ecke_idx = self.corner_idx
+            self.erste_ecke_q = q
+        self.get_logger().info(
+            "Nach dem Ausparken %.2f m vor Ecke 1: Halt am Ausparkende ersetzt "
+            "den Scan-Stopp%s."
+            % (vorn, ", Ecke 1 aus der jetzigen Lage (q=%.2f) geplant" % q
+               if self.erste_ecke_q is not None else ""))
 
     def _warnen_wenn_in_der_luecke(self):
         """Steht er beim Losfahren noch in der Parkluecke?
@@ -1763,11 +2442,14 @@ class Round1Controller(Node):
         tA = self.arc['T_A']
         # hold the entry line of THIS straight (LA); Stanley keeps us centred
         # follow the planned obstacle path if there is one, else the plain line
+        # Lenkgesetz mit der Pose bei Wirkbeginn (Totzeit), die Ausloeser
+        # (T_A, Haltepunkt) weiter mit der echten Pose.
+        px_, py_, pth_ = self._pose_nach_totzeit(x, y, theta)
         omega = None
         if self.obs_path:
-            omega = self._stanley_follow_path(x, y, theta, self.obs_path)
+            omega = self._stanley_follow_path(px_, py_, pth_, self.obs_path)
         if omega is None:
-            omega = self._stanley_steer(x, y, theta, self.arc['LA'], tr)
+            omega = self._stanley_steer(px_, py_, pth_, self.arc['LA'], tr)
 
         # signed distance to T_A along travel (positive = T_A still ahead)
         to_TA = (tA[0] - x) * tr[0] + (tA[1] - y) * tr[1]
@@ -1796,11 +2478,19 @@ class Round1Controller(Node):
             remain = front_dist - self.finish_front_dist - lead
 
             if remain <= self.finish_tol:
-                self.state = 'DONE'
                 self.publish_stop()
                 self.get_logger().info(
                     f"ZIEL ({self.corner_count} Ecken, {front_dist:.2f} m vor Frontwand, "
                     f"v={v_now:.2f}). STOP.")
+                if self._park_aktiv():
+                    self.state = 'PARK_HALT'
+                    self.park_t0 = self.now_s()
+                    self.park_mittel = []
+                    self.get_logger().info(
+                        "Einparken: %.1f s Pflichtstillstand, dann einparken."
+                        % self.einparken_halt_s)
+                else:
+                    self.state = 'DONE'
                 return
 
             # look-ahead braking: v = sqrt(2*a*remain) reaches 0 exactly at the
@@ -1850,37 +2540,64 @@ class Round1Controller(Node):
                     f"Falsche Ecke? idx {self.corner_idx}.")
                 return
 
-            # Do NOT start the arc while Stanley is still fighting a lateral error:
-            # the steering has ~0.2 s dead time, so a counter-steer commanded just
-            # before turn-in keeps acting INTO the first part of the arc and throws
-            # the heading the wrong way. Wait until the car runs settled -- but only
-            # for a limited distance, then commit anyway (geometry must not run away).
-            om_last = abs(self.last_cmd[1])
-            unsettled = (lateral > self.turn_in_lat_gate
-                         or om_last > self.turn_in_om_gate)
-            overshoot = -to_TA
-            if unsettled and overshoot < self.turn_in_delay_max:
-                self.get_logger().info(
-                    f"Einlenken verzoegert: lat={lateral:.3f} om={om_last:.2f} "
-                    f"(ueber T_A hinaus {overshoot:.2f}/{self.turn_in_delay_max:.2f} m).",
-                    throttle_duration_sec=0.3)
-                v = self._speed_profile(0.0, dsc)     # creep at turn speed
-                self.publish_cmd(v, omega)
+            # NIE ueber T_A hinaus warten. Der Bogen ist an T_A verankert; jeder
+            # Zentimeter dahinter macht den Kreis unerreichbar, und Neuplanen
+            # hilft nicht (der neue Bogen beginnt dann hinter dem Wagen). Genau
+            # das trug die erste Kurve in Lauf 21 geradeaus in die Wand -- und
+            # im CCW-Einparktest bis auf 4 cm an die Frontwand. Beruhigt wird
+            # VOR T_A durch Langsamerwerden (siehe unten).
+            if -to_TA > self.turn_in_past_max:
+                # nur noch Plausibilitaet -- so weit hinter T_A stimmt etwas
+                # Grundsaetzliches nicht (falsche Ecke?)
+                self.state = 'DONE'
+                self.publish_stop()
+                self.get_logger().error(
+                    f"NOTSTOP: Einlenkpunkt {-to_TA:.2f} m hinter uns "
+                    f"(> {self.turn_in_past_max:.2f}). Falsche Ecke?")
                 return
-
-            if unsettled:
-                self.get_logger().warn(
-                    f"Einlenken trotz Unruhe (lat={lateral:.3f}, om={om_last:.2f}) "
-                    f"-- Verzoegerungsfenster {self.turn_in_delay_max:.2f} m aufgebraucht.")
-            if overshoot > 0.03:
-                # we drifted past T_A while settling -> re-plan the arc from HERE
-                keep_o_in = self.arc.get('o_in')
-                self.arc = None
-                self.plan_arc(theta, o_in_override=keep_o_in)
-                self.get_logger().info(
-                    f"Bogen nach {overshoot:.2f} m Verzoegerung neu geplant.")
-                if self.arc is None:
+            if -to_TA > 0.02:
+                # hinter T_A: den Bogen an der Ist-Pose verankern, statt einem
+                # Kreis nachzufahren, der hinter dem Wagen liegt
+                ok, text = self._bogen_an_pose_verankern(x, y, theta)
+                if not ok:
+                    self.state = 'DONE'
+                    self.publish_stop()
+                    self.get_logger().error(
+                        f"NOTSTOP: {-to_TA:.2f} m hinter T_A, Bogen nicht fahrbar: {text}.")
                     return
+                self.get_logger().warn(
+                    f"Einlenkpunkt {-to_TA:.2f} m hinter uns -- Bogen an der "
+                    f"Ist-Pose verankert: {text}.")
+            elif self.turn_anchor_puenktlich:
+                # Puenktlich, aber gestoert eingefahren (Kurs oder quer neben dem
+                # Kreis): den Kreis so legen, dass er HIER tangential zum Ist-
+                # Kurs beginnt. Der Standardbogen verlangt sofort Kreis und
+                # Tangente -- bei 20 grad Kursfehler springt der Befehl in die
+                # Begrenzung, und der Bogenfehler waechst bis 14 cm (Ecke idx1,
+                # 61 Prozent der Kurve in der Begrenzung). Verankert simuliert:
+                # 3,5-4,2 cm bei jeder Einfahrt. Scheitert es, bleibt der
+                # Standardbogen -- hier kein Nothalt.
+                kurs_fehler = abs(wrap(theta - math.atan2(tr[1], tr[0])))
+                if (kurs_fehler > self.turn_anchor_kurs
+                        or lateral > self.turn_anchor_quer):
+                    r0 = self.arc['R']
+                    sicherung = dict(self.arc)
+                    ok, text = self._bogen_an_pose_verankern(
+                        x, y, theta, r_max=1.5 * r0)
+                    if ok:
+                        self.get_logger().info(
+                            f"Einfahrt gestoert (Kurs {math.degrees(kurs_fehler):.1f} "
+                            f"grad, quer {lateral:.3f} m) -- Bogen verankert: {text}.")
+                    else:
+                        self.arc = sicherung
+                        self.get_logger().info(
+                            f"Einfahrt gestoert, Verankerung verworfen ({text}) "
+                            f"-- Standardbogen.")
+            om_last = abs(self.last_cmd[1])
+            if lateral > self.turn_in_lat_gate or om_last > self.turn_in_om_gate:
+                self.get_logger().warn(
+                    f"Einlenken unruhig: lat={lateral:.3f} om={om_last:.2f} "
+                    f"-- trotzdem an T_A eingelenkt (Geometrie darf nicht weglaufen).")
             self.state = 'TURN'
             if lateral > self.turn_in_lat_warn:
                 self.get_logger().warn(
@@ -1891,6 +2608,16 @@ class Round1Controller(Node):
             return
 
         v = self._speed_profile(to_TA, dsc)
+        # Vor der Ecke beruhigen: laeuft er unruhig auf T_A zu, langsamer werden.
+        # Stanley bekommt so mehr Zeit pro Meter, ohne die Geometrie zu verschieben.
+        if (to_TA < self.turn_in_settle_window
+                and (lateral > self.turn_in_lat_gate
+                     or abs(self.last_cmd[1]) > self.turn_in_om_gate)):
+            v = min(v, self.v_settle)
+            self.get_logger().info(
+                f"Beruhigen vor Ecke: to_TA={to_TA:.2f} lat={lateral:.3f} "
+                f"om={abs(self.last_cmd[1]):.2f} -> v={v:.2f}.",
+                throttle_duration_sec=0.5)
         if self.obs_path:
             # safety before speed on obstacle straights; steeper swap -> slower
             v_cap = (self.v_obstacle_steep
