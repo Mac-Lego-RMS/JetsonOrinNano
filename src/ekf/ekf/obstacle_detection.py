@@ -41,42 +41,80 @@ MAX_OBSTACLE_EXTENT = 0.09     # a pillar spans <= this; longer = noise on a wal
 SECTOR_MARGIN = np.radians(3.0)  # widen each masked sector by this on each side
 
 
+def _cloud_arrays(msg):
+    """Read the whole cloud at once: base_link x, y, packed rgb, validity.
+
+    One np.frombuffer instead of a Python loop over ~2500 points with two
+    struct.unpack calls each. Field offsets come from msg.fields, so a change
+    in the cloud layout does not silently read the wrong bytes.
+    """
+    off = {f.name: f.offset for f in msg.fields}
+    dt = np.dtype({'names': ['x', 'y', 'rgb'], 'formats': ['<f4', '<f4', '<u4'],
+                   'offsets': [off['x'], off['y'], off['rgb']],
+                   'itemsize': msg.point_step})
+    arr = np.frombuffer(msg.data, dtype=dt, count=msg.width * msg.height)
+    x = arr['x'].astype(np.float64)
+    y = arr['y'].astype(np.float64)
+    ok = np.isfinite(x) & np.isfinite(y)
+    # mirror correction (LiDAR mounted 180 deg) + rear-axle offset
+    return -x + LIDAR_OFFSET_X, -y, arr['rgb'] & 0xFFFFFF, ok
+
+
+def _pack(rgb):
+    r, g, b = rgb
+    return (r << 16) | (g << 8) | b
+
+
 def colored_points(msg, colors=(RED, GREEN)):
     """Classified points as (x, y, colour) in the BASE_LINK frame."""
-    wanted = {(r << 16) | (g << 8) | b for (r, g, b) in colors}
+    bx, by, rgb, ok = _cloud_arrays(msg)
     out = []
-    for i in range(msg.width):
-        off = i * msg.point_step
-        rgb = struct.unpack_from('<I', msg.data, off + 12)[0] & 0xFFFFFF
-        if rgb not in wanted:
-            continue
-        x, y, _ = struct.unpack_from('<fff', msg.data, off)
-        if not (np.isfinite(x) and np.isfinite(y)):
-            continue
-        # mirror correction (LiDAR mounted 180 deg) + rear-axle offset
-        out.append((-x + LIDAR_OFFSET_X, -y,
-                    ((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255)))
+    for col in colors:
+        sel = ok & (rgb == _pack(col))
+        out += [(float(a), float(b), col) for a, b in zip(bx[sel], by[sel])]
     return out
 
 
 def _grow_clusters(points, radius):
-    """Spatial region growing. points: (N,2) array. Returns list of index lists.
-    Order-independent, so no +-180 deg wraparound problem."""
+    """Spatial region growing on a grid. points: (N,2) array. Returns a list of
+    index lists. Order-independent, so no +-180 deg wraparound problem.
+
+    Each point only looks at the 3x3 neighbouring cells instead of every other
+    point -- linear instead of quadratic in N. That matters when the camera
+    misclassifies a few hundred wall points as green: the old all-pairs version
+    then cost hundreds of milliseconds per scan and, sharing the node's single
+    thread, delayed the wall corrections by up to 0.6 s.
+    """
     n = len(points)
-    unassigned = set(range(n))
+    if n == 0:
+        return []
+    px = points[:, 0].tolist()
+    py = points[:, 1].tolist()
+    cx = np.floor(points[:, 0] / radius).astype(np.int64).tolist()
+    cy = np.floor(points[:, 1] / radius).astype(np.int64).tolist()
+    grid = {}
+    for i in range(n):
+        grid.setdefault((cx[i], cy[i]), []).append(i)
+    r2 = radius * radius
+    seen = [False] * n
     clusters = []
-    while unassigned:
-        seed = unassigned.pop()
-        cluster = [seed]
-        frontier = [seed]
-        while frontier:
-            i = frontier.pop()
-            close = [j for j in unassigned
-                     if np.hypot(*(points[j] - points[i])) <= radius]
-            for j in close:
-                unassigned.discard(j)
-                cluster.append(j)
-                frontier.append(j)
+    for i in range(n):
+        if seen[i]:
+            continue
+        seen[i] = True
+        stack, cluster = [i], [i]
+        while stack:
+            j = stack.pop()
+            xj, yj, gx, gy = px[j], py[j], cx[j], cy[j]
+            for ddx in (-1, 0, 1):
+                for ddy in (-1, 0, 1):
+                    for k in grid.get((gx + ddx, gy + ddy), ()):
+                        if not seen[k]:
+                            ex, ey = px[k] - xj, py[k] - yj
+                            if ex * ex + ey * ey <= r2:
+                                seen[k] = True
+                                stack.append(k)
+                                cluster.append(k)
         clusters.append(cluster)
     return clusters
 
@@ -109,20 +147,21 @@ def detect_obstacles(msg, min_points=MIN_OBSTACLE_POINTS,
     sight -- and 'sector' = (centre, half_width) in the scan frame, for
     mask_sectors.
     """
-    pts = colored_points(msg)
+    bx, by, rgb, ok = _cloud_arrays(msg)
     obstacles = []
 
     for color_rgb, name in ((RED, 'red'), (GREEN, 'green')):
-        group = np.array([[x, y] for (x, y, c) in pts if c == color_rgb])
-        if len(group) == 0:
+        sel = ok & (rgb == _pack(color_rgb))
+        if not sel.any():
             continue
+        group = np.column_stack((bx[sel], by[sel]))
 
         for idx in _grow_clusters(group, radius):
             if len(idx) < min_points:
                 continue                        # stray misclassified points
             arr = group[idx]
             # compactness: a pillar is small; noise smeared along a wall is not
-            extent = float(max(arr[:, 0].ptp(), arr[:, 1].ptp()))
+            extent = float(max(np.ptp(arr[:, 0]), np.ptp(arr[:, 1])))
             if extent > max_extent:
                 continue
 
