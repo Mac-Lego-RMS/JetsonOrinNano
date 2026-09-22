@@ -480,11 +480,13 @@ def simuliere(schritte, start=None, tiefe=LUECKE_TIEFE,
 #
 # Positive Lenkung heisst ZUR OFFENEN SEITE, negative Strecke rueckwaerts.
 SCHRITTE_STANDARD = [
+    0.0,  0.0,
      100.0,   6.9,     # vorwaerts, voll zur offenen Seite
     -100.0,  -5.4,     # rueckwaerts, voll zur Wandseite
      100.0,   9.6,
-     0.0, 10.0,
-    -100.0, 18.6,     # Bogen aus der Luecke heraus    # Gegenbogen zurueck auf Bahnkurs
+     0.0, 5.0,
+    -100.0, 21.0,     # Bogen aus der Luecke heraus    # Gegenbogen zurueck auf Bahnkurs
+     0.0,  0.0,
 ]
 
 
@@ -496,8 +498,30 @@ SCHRITTE_STANDARD = [
 #
 # Leer heisst: SCHRITTE_STANDARD gilt. Wer nur eine Richtung anders braucht,
 # fuellt nur diese -- die andere bleibt leer und folgt weiter dem Standard.
-SCHRITTE_CW = []
-SCHRITTE_CCW = []
+# Gemessen am 11.09.2026 (je 5-7 Laeufe, Handmessung an den Radnaben):
+# Die Rangierzuege 1-4 sind in beiden Richtungen gleich, nur der Schlussbogen
+# unterscheidet sich -- die Lenkung ist im Rangiertempo asymmetrisch, und das
+# Spiegeln allein gleicht das nicht aus. Beide Folgen enden bei 0 grad.
+#   CW : Schlussbogen 27,0 cm -> Kurs +0,6 grad, base_link 37,0 cm zur Aussenbande
+#   CCW: Schlussbogen 21,0 cm -> Kurs  0,0 grad, base_link 34,5 cm zur Aussenbande
+SCHRITTE_CW = [
+    0.0,  0.0,
+     100.0,   6.9,
+    -100.0,  -5.4,
+     100.0,   9.6,
+     0.0, 5.0,
+    -100.0, 27.0,
+     0.0,  0.0,
+]
+SCHRITTE_CCW = [
+    0.0,  0.0,
+     100.0,   6.9,
+    -100.0,  -5.4,
+     100.0,   9.6,
+     0.0, 5.0,
+    -100.0, 21.0,
+     0.0,  0.0,
+]
 
 
 def schritte_fuer(richtung, gemeinsam=None, cw=None, ccw=None):
