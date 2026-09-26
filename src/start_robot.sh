@@ -332,6 +332,21 @@ fi
 # ------------------------------------------------------------------ #
 # 3. Container starten
 # ------------------------------------------------------------------ #
+# Argus-Socket als leere Datei vorlegen. jetson-containers/run.sh mountet
+# /tmp/argus_socket immer, auch wenn nvargus-daemon nicht laeuft -- und der
+# stuerzt bei uns ab (USB-Kamera, kein CSI-Sensor, Core-Dump). Fehlt der Pfad,
+# legt Docker ihn als VERZEICHNIS an; im Image ist er aber eine Datei, und der
+# Container startet nicht ("not a directory"). Eine leere Datei genuegt:
+# bei v4l2:// wird Argus nicht gebraucht.
+if [ -d /tmp/argus_socket ]; then
+    echo "FEHLER: /tmp/argus_socket ist ein Verzeichnis (Rest eines fehlgeschlagenen"
+    echo "  Starts, gehoert root). Einmal entfernen, dann neu starten:"
+    echo "    sudo rm -rf /tmp/argus_socket && sudo systemctl restart robot.service"
+    exit 1
+elif [ ! -e /tmp/argus_socket ]; then
+    touch /tmp/argus_socket
+fi
+
 /usr/local/bin/jetson-containers run -d \
   --name "$CONTAINER" \
   --privileged \
