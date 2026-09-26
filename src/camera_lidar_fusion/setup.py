@@ -32,6 +32,7 @@ setup(
         'console_scripts': [
             'lidar_pixel_mapper = camera_lidar_fusion.lidar_pixel_mapper:main',
             'rotation_calibration = camera_lidar_fusion.rotation_calibration:main',
+            'kamera_einmessen = camera_lidar_fusion.kamera_einmessen:main',
         ],
     },
 )

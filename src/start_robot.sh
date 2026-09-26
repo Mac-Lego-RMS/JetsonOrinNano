@@ -171,7 +171,22 @@ FUSION_BAND_STEPS=360     # 180 spart 10 Prozent CPU, 2 Grad reichen fuer eine B
 #     mit  Weisspunkt, 12 : rot 3.00 | gruen echt 3.02, gestreut 0.24
 # Bei 16 bleibt das echte Gruen vollstaendig erhalten und die gestreuten
 # Cluster (die Phantomhindernisse) halbieren sich.
-FUSION_RG_DMIN=16
+#
+# 26.09.2026 auf 10 gesenkt, dazu FUSION_RG_ZMIN von 0.15 auf 0.10. Unter
+# reinem Deckenlicht (zwei LED-Lampen 5200 K hoch oben, eingemessen mit
+# kamera_einmessen: 30 ms, gain 0) ist die Matte hell, die senkrechten
+# Pylonseiten aber dunkel -- gruen z.B. RGB (51,72,30): eindeutig gruen,
+# aber |G-R| nach Weisspunkt nur ~6-15. Anteil farbiger Punkte je Pylon,
+# kamera_einmessen --nur-pruefen, 3 s colored_scan:
+#                       gruen nah/fern    rot nah/hinten/fern   Farbe auf Waenden
+#     16 / 0.15 :        11 % / 27 %      60 / -  / 44 %         0.0 / 5.2 je Scan
+#     10 / 0.10 :        60 % / 34 %      60 / 64 / 45 %         0.5 / 6.5 je Scan
+# Rot bleibt gleich, gruen wird erst so brauchbar. Die Wandfarbe bei rot sitzt
+# fast ganz an EINER Stelle: der Innenbande direkt hinter dem Pylon schraeg
+# hinten, im selben Azimut -- dort greift die Zone noch den Pylon ab. Sie liegt
+# auf keinem Pylonplatz und rastet deshalb nicht ein.
+FUSION_RG_DMIN=10
+FUSION_RG_ZMIN=0.10
 FUSION_ZONE_ADAPTIV=0.0
 # --- Neutralpunkt der Kamera je Azimutsektor an der weissen Matte messen ---
 # Zieht den Weissabgleich-Versatz von der rg_kennzahl ab, damit eine farblose
@@ -459,6 +474,15 @@ run_window 3 camera \
 # Im Fahrbetrieb verschmieren 50 ms die Pylonen weiterhin etwas. Wenn das
 # stoert: CAM_EXPOSURE runter UND fuer echte Beleuchtung sorgen.
 #
+# Am Feld eingemessene Werte haben Vorrang (kamera_einmessen, siehe
+# camera_lidar_fusion/kamera_einmessen.py). Die Datei legt das Skript an; wer
+# zu den festen Werten oben zurueck will, loescht sie.
+EINMESSUNG="$WORKSPACE/config/kamera_einmessung.env"
+if [ -f "$EINMESSUNG" ]; then
+    . "$EINMESSUNG"
+    echo "Kamera: eingemessene Werte aus $EINMESSUNG ($(head -1 "$EINMESSUNG" | sed 's/^# *//'))."
+fi
+
 # Erst nach dem Start von video_source setzen, damit das Geraet offen ist.
 sleep 5
 if docker exec "$CONTAINER" v4l2-ctl -d "$CAM_NODE" \
@@ -505,6 +529,7 @@ run_window 7 fusion \
        -p band_steps:=$FUSION_BAND_STEPS \
        -p sample_zone_adaptiv:=$FUSION_ZONE_ADAPTIV \
        -p rg_d_min:=$FUSION_RG_DMIN \
+       -p rg_z_min:=$FUSION_RG_ZMIN \
        -p weisspunkt:=$FUSION_WEISSPUNKT \
        -p weisspunkt_sektoren:=$FUSION_WEISSPUNKT_SEKTOREN \
        -p color.gruen.v_min:=$FUSION_GRUEN_VMIN \
