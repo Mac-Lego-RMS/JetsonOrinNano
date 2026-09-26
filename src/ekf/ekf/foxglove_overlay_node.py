@@ -71,6 +71,10 @@ MAX_RANGE = 4.0
 # is a parameter -- it only changes how the pillar looks, never the geometry.
 PILLAR_EDGE = 0.044
 
+ROBOT_LENGTH = 0.175
+ROBOT_WIDTH = 0.110
+ROBOT_NOSE_PAST_LIDAR = 0.03    # Nase 3 cm vor dem Lidar
+
 PATH_STEP = 0.02        # m of travel between stored path points
 PATH_MAX = 6000
 
@@ -83,6 +87,7 @@ C_PATH = (1.00, 0.85, 0.20, 1.0)
 C_OBST = {1: (0.95, 0.20, 0.20, 0.95),      # Obstacle.COLOR_RED
           2: (0.20, 0.90, 0.35, 0.95)}      # Obstacle.COLOR_GREEN
 C_OBST_UNKNOWN = (0.75, 0.75, 0.80, 0.75)   # seen, colour not yet certain
+C_BAY = (1.00, 0.10, 0.85, 0.95)            # Parkluecke: die Magenta-Waende
 
 
 def yaw_from_quaternion(q):
@@ -310,6 +315,22 @@ class FoxgloveOverlay(Node):
         self.sigma_gain = self.declare_parameter('ellipse_gain', 1.0).value
         # WRO traffic signs are 100 mm tall -- cosmetic only, adjust freely.
         self.pillar_h = self.declare_parameter('pillar_height', 0.10).value
+
+        # Parkluecke, verankert an der Startpose (Ursprung der Karte): der
+        # Roboter startet in ihr. Die Innenseite der vorderen Wand liegt
+        # bay_front_offset vor base_link (Hinterachse) -- gemessen 0,215-0,22 m
+        # in parken_test_9 (CCW) und 0,22 m in parken_test_11 (CW). An einer
+        # Feldlinie laesst sie sich nicht festmachen: CCW stand die vordere
+        # Wand auf der Linie zum Eckfeld, CW 0,8 m davor. Die hintere Wand
+        # folgt nach bay_gap. Gezeichnet wird nur, wenn der Start naeher als
+        # bay_detect_dist an der Aussenbande liegt -- also aus der Luecke.
+        self.bay_gap = self.declare_parameter('bay_gap', 0.2625).value
+        self.bay_depth = self.declare_parameter('bay_depth', 0.20).value
+        self.bay_thick = self.declare_parameter('bay_wall_thickness', 0.02).value
+        self.bay_height = self.declare_parameter('bay_wall_height', 0.10).value
+        self.bay_front = self.declare_parameter('bay_front_offset', 0.22).value
+        self.bay_detect = self.declare_parameter('bay_detect_dist', 0.30).value
+        self.bay = None
 
         # Run timer thresholds, in deg/s of the drive wheel -- the unit
         # /esp_serial_bridge/speed reports (telemetry.speed_deg_s). Start and
@@ -766,8 +787,55 @@ class FoxgloveOverlay(Node):
         self.pub_obst.publish(arr)
 
     def outer_cb(self, msg):
+        # Eine NEUE Eckgeometrie heisst neuer Lauf: die Hindernisse davor
+        # gehoeren zum alten Feld. /obstacles ist gelatcht, und der
+        # scan_processor haelt zwischen zwei Laeufen die alte Liste -- ohne
+        # das hier stuende sie bis zur naechsten Starterkennung im neuen Feld.
+        # Die erste Geometrie nach dem Start des Overlays loescht nichts: sie
+        # und die gelatchte Liste gehoeren zum selben Lauf.
+        alt = self.outer
+        if alt is not None and (msg.header.stamp.sec, msg.header.stamp.nanosec) != (
+                alt.header.stamp.sec, alt.header.stamp.nanosec):
+            self.get_logger().info('neue Eckgeometrie -> neuer Lauf, alte Hindernisse weg')
+            self._reset_obstacles()
         self.outer = msg
         self.get_logger().info('corner_geometry empfangen')
+        bay = self._bay_walls(msg)
+        if bay is None and self.bay is not None:
+            self._delete_ns(self.pub_field, [('bay', 80), ('bay', 81)])
+        self.bay = bay
+        if bay is not None:
+            self.get_logger().info(
+                'Parkluecke im Overlay: Waende bei (%.2f, %.2f) und (%.2f, %.2f), '
+                'Luecke %.1f cm' % (bay[0][0], bay[0][1], bay[1][0], bay[1][1],
+                                   self.bay_gap * 100.0))
+
+    def _bay_walls(self, msg):
+        """Mittelpunkte und Kurs der beiden Buchtwaende, oder None.
+
+        Die Karte ist startverankert: der Ursprung ist die Startpose, +x die
+        Fahrtrichtung beim Start. Die Buchtbande ist die Aussenwand, die dem
+        Ursprung am naechsten liegt.
+        """
+        walls = msg.walls
+        i = min(range(len(walls)), key=lambda k: abs(walls[k].d))
+        w = walls[i]
+        if abs(w.d) > self.bay_detect:
+            return None                     # normaler Start, keine Luecke
+        fx, fy = w.nx * w.d, w.ny * w.d     # Lotfusspunkt des Starts auf der Bande
+        tx, ty = -w.ny, w.nx                # an der Bande entlang ...
+        if tx < 0.0:
+            tx, ty = -tx, -ty               # ... in Fahrtrichtung (+x)
+        ux, uy = -fx, -fy                   # von der Bande ins Feld
+        n = math.hypot(ux, uy) or 1.0
+        ux, uy = ux / n, uy / n
+        yaw = math.atan2(ty, tx)
+        q = self.bay_depth / 2.0
+        out = []
+        for s in (self.bay_front + self.bay_thick / 2.0,
+                  self.bay_front - self.bay_gap - self.bay_thick / 2.0):
+            out.append((fx + tx * s + ux * q, fy + ty * s + uy * q, yaw))
+        return out
 
     def inner_cb(self, msg):
         self.inner = msg
@@ -880,6 +948,13 @@ class FoxgloveOverlay(Node):
                     scale=(0, 0, 0.075), color=(1.0, 1.0, 1.0, 1.0),
                     at=(mx + w.nx * 0.34, my + w.ny * 0.34, 0.06),
                     text='W%d  n=(%+.3f,%+.3f)  d=%+.3f' % (i, w.nx, w.ny, w.d)))
+        for k, (bx, by, yaw) in enumerate(self.bay or []):
+            m = self._marker('bay', 80 + k, Marker.CUBE, 'map',
+                             scale=(self.bay_thick, self.bay_depth, self.bay_height),
+                             color=C_BAY, at=(bx, by, self.bay_height / 2.0))
+            m.pose.orientation.z = math.sin(yaw / 2.0)
+            m.pose.orientation.w = math.cos(yaw / 2.0)
+            arr.markers.append(m)
         if 'field' not in self.hidden:
             self.pub_field.publish(arr)
 
@@ -897,9 +972,13 @@ class FoxgloveOverlay(Node):
         if 'robot' in self.hidden:
             return
         arr = MarkerArray()
+        # 17,5 x 11 cm wie in ausparken.py. base_link sitzt auf der
+        # Hinterachse, die Nase 3 cm vor dem Lidar (Vorderachse).
+        nase = LIDAR_OFFSET_X + ROBOT_NOSE_PAST_LIDAR
         body = self._marker('robot', 0, Marker.CUBE, 'base_link',
-                            scale=(0.26, 0.16, 0.08),
-                            color=(0.25, 0.85, 1.0, 0.75), at=(0.09, 0.0, 0.05))
+                            scale=(ROBOT_LENGTH, ROBOT_WIDTH, 0.08),
+                            color=(0.25, 0.85, 1.0, 0.75),
+                            at=(nase - ROBOT_LENGTH / 2.0, 0.0, 0.05))
         arr.markers.append(body)
         arr.markers.append(self._marker(
             'robot', 1, Marker.ARROW, 'base_link', scale=(0.018, 0.045, 0),
