@@ -22,6 +22,12 @@ import math
 
 BLOCK_HALF = 0.022          # 44 mm / 2
 ROBOT_HALF = 0.06           # 120 mm / 2
+SMALL_SHIFT_IGNORE = 0.03   # so kleine Versaetze gar nicht fahren (Sicherheitsrand)
+SMALL_SHIFT = 0.08          # so kleine Versaetze nicht in zu kurze Rampen quetschen
+PASS_KEEP_CLEAR = 0.08      # so viel Luft (Kante-Kante) reicht, um die Spur zu halten
+SMALL_SHIFT_SLOPE = 0.20    # ... sondern im Mittel hoechstens so steil, mindestens
+                            # transition_min lang (die Kosinusrampe ist in der
+                            # Mitte pi/2-mal steiler als im Mittel)
 
 COLOR_UNKNOWN, COLOR_RED, COLOR_GREEN = 0, 1, 2
 
@@ -29,7 +35,7 @@ COLOR_UNKNOWN, COLOR_RED, COLOR_GREEN = 0, 1, 2
 class ObstaclePathPlanner:
     def __init__(self, lane_width=1.00, clear_before=0.20, clear_after=0.20,
                  transition_pref=0.60, transition_min=0.40, wall_margin=0.12,
-                 anchor_early=True):
+                 anchor_early=True, outer_margin=0.0):
         """
         lane_width      : outer wall -> inner wall [m]
         clear_before    : be ON the new offset this far BEFORE the obstacle [m]
@@ -45,6 +51,9 @@ class ObstaclePathPlanner:
         self.transition_min = transition_min
         self.wall_margin = wall_margin
         self.anchor_early = anchor_early   # start the swap right after the block
+        # Hindernis an der Aussenbande (Magenta-Waende der Parkluecke ragen so
+        # weit ins Feld): Vorbeifahrt aussen mittig zwischen IHM und der Pylone
+        self.outer_margin = outer_margin
 
     # ---------------------------------------------------------------- offsets
     def pass_offset(self, obstacle_q, color, ccw):
@@ -63,16 +72,29 @@ class ObstaclePathPlanner:
         """
         pass_outer = ((color != COLOR_GREEN) == bool(ccw))
         if pass_outer:
-            near, far = 0.0, obstacle_q - BLOCK_HALF
+            near, far = min(self.outer_margin, obstacle_q - BLOCK_HALF), obstacle_q - BLOCK_HALF
         else:
             near, far = obstacle_q + BLOCK_HALF, self.lane_width
         q = 0.5 * (near + far)
         return min(max(q, self.wall_margin), self.lane_width - self.wall_margin)
 
+    def _kommt_vorbei(self, q, obstacle_q, color, ccw):
+        """Passiert er die Pylone von q aus auf der richtigen Seite mit
+        PASS_KEEP_CLEAR Luft, ohne einer Bande naeher als wall_margin (bzw.
+        dem Hindernis an der Aussenbande) zu kommen?"""
+        if ((color != COLOR_GREEN) == bool(ccw)):          # aussen vorbei
+            aussen_min = max(self.wall_margin,
+                             self.outer_margin + ROBOT_HALF + PASS_KEEP_CLEAR
+                             if self.outer_margin > 0.0 else 0.0)
+            return (aussen_min <= q
+                    <= obstacle_q - BLOCK_HALF - ROBOT_HALF - PASS_KEEP_CLEAR)
+        return (obstacle_q + BLOCK_HALF + ROBOT_HALF + PASS_KEEP_CLEAR
+                <= q <= self.lane_width - self.wall_margin)
+
     def gap_width(self, obstacle_q, color, ccw):
         """Free width of the gap we plan to drive through [m] (for diagnostics)."""
         if ((color != COLOR_GREEN) == bool(ccw)):
-            return obstacle_q - BLOCK_HALF
+            return obstacle_q - BLOCK_HALF - self.outer_margin
         return self.lane_width - (obstacle_q + BLOCK_HALF)
 
     # ---------------------------------------------------------------- planning
@@ -108,8 +130,35 @@ class ObstaclePathPlanner:
         for i, (s_obs, q_tgt) in enumerate(targets):
             # must be on q_tgt by this s:
             s_need = s_obs - self.clear_before
+            # Winziger Versatz (Pfad nach einem Halt neu geplant, der Roboter
+            # steht 1-3 cm neben dem Vorbeifahr-Offset): nicht fahren. Als
+            # Rampe geplant wurde daraus 2 cm auf 6 cm -- 29 grad in der
+            # Mitte, e_theta +22 grad, im Stand Volleinschlag in die falsche
+            # Richtung vor der Kurve (parken_test_27, Ende Gerade 3).
+            if 0.0 < abs(q_tgt - q_cur) <= SMALL_SHIFT_IGNORE:
+                q_tgt = q_cur
+            # Kaum Platz bis zur Pylone, aber von hier aus kommt er schon auf
+            # der richtigen Seite mit genug Luft vorbei: Spur halten statt
+            # steil umspuren. Parken_test_28, Gerade 4: Kurve 7 cm neben dem
+            # Plan beendet, Pylone 0,21 m voraus -- 7 cm auf 0,21 m waren bis
+            # 28 grad, Volleinschlag und Schlenker, bei 16 cm Luft auf der
+            # alten Linie.
+            elif (q_tgt != q_cur and s_need - s_cur < self.transition_min
+                  and self._kommt_vorbei(q_cur, obs[i][1], obs[i][2], ccw)):
+                q_tgt = q_cur
             if q_tgt != q_cur:
                 room = max(s_need - s_cur, 0.0)
+                # Kleiner Versatz, kaum Platz (Pfad direkt vor der Pylone neu
+                # geplant): nicht auf s_need quetschen. 5 cm auf 7 cm Laenge war
+                # eine 43-grad-Rampe -- e_theta -40 grad, ein Befehl Volleinschlag
+                # (parken_test_21, 50,4 s). Ein paar cm neben dem Vorbeifahr-
+                # Offset sind ohnehin in dessen Sicherheitsrand; die Rampe darf
+                # bis zur Pylone selbst laufen.
+                dq_klein = abs(q_tgt - q_cur)
+                if dq_klein <= SMALL_SHIFT and room < self.transition_min:
+                    lang = max(self.transition_min, dq_klein / SMALL_SHIFT_SLOPE)
+                    s_need = max(s_need, min(s_obs, s_cur + lang))
+                    room = max(s_need - s_cur, 0.0)
                 if self.anchor_early:
                     # Swap EARLY: start the ramp right where we are (just past the
                     # previous block) and be settled well before the next one.

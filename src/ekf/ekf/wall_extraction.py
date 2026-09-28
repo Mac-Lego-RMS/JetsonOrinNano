@@ -232,7 +232,6 @@ def predict_wall_in_robot_frame(alpha_map, d_map, pose):
     d_robot = d_map - (x * np.cos(alpha_map) + y * np.sin(alpha_map))
     return alpha_robot, d_robot
 
-# unused: overlap gating removed, d-gate suffices
 def _overlap_along_direction(a1, a2, b1, b2, tol=0.05):
     """Do segments [a1,a2] and [b1,b2] overlap when projected onto the line
     through a1->a2? Returns True if the projected intervals overlap (with a
@@ -257,7 +256,7 @@ def _overlap_along_direction(a1, a2, b1, b2, tol=0.05):
 
 
 def match_walls(measured, map_walls, pose,
-                alpha_tol=np.radians(20.0), d_tol=0.30, overlap_tol=0.05):
+                alpha_tol=np.radians(20.0), d_tol=0.30, overlap_tol=None):
     """Match each measured wall to the nearest map wall, with overlap gating.
 
     Args:
@@ -267,7 +266,13 @@ def match_walls(measured, map_walls, pose,
                    then overlap gating is skipped for that wall).
         pose:      (x, y, theta) current estimate.
         alpha_tol, d_tol: innovation gates.
-        overlap_tol: end tolerance (m) for the overlap check.
+        overlap_tol: end tolerance (m) for the overlap check along the wall,
+                   None = no check. The HNF gate only sees the distance
+                   ACROSS the wall -- the line is infinite. Without this
+                   check a segment far beyond the end of a short wall still
+                   matches it (parken_test_20: a pushed pillar 5 cm in front
+                   of the LiDAR, 60 cm past the end of the inner band, taken
+                   for the inner band -- the EKF stuck 50 cm behind).
 
     Returns list of dicts: {measured, map, map_index, innov_alpha, innov_d}.
     """
@@ -295,6 +300,14 @@ def match_walls(measured, map_walls, pose,
 
             if abs(innov_a) > alpha_tol or abs(innov_d) > d_tol:
                 continue
+            if (overlap_tol is not None and has_endpoints
+                    and map_p1 is not None and map_p2 is not None):
+                m1 = _robot_point_to_map(m_start, pose)
+                m2 = _robot_point_to_map(m_end, pose)
+                if not _overlap_along_direction(
+                        np.asarray(map_p1, dtype=float), np.asarray(map_p2, dtype=float),
+                        m1, m2, tol=overlap_tol):
+                    continue
 
             cost = (innov_a / alpha_tol) ** 2 + (innov_d / d_tol) ** 2
             if cost < best_cost:
@@ -309,6 +322,14 @@ def match_walls(measured, map_walls, pose,
     return matches
 
 # unused: overlap gating removed, d-gate suffices
+def _robot_point_to_map(p_robot, pose):
+    """Transform a point from the robot/base_link frame into the map frame."""
+    x, y, th = pose
+    c, s = np.cos(th), np.sin(th)
+    return np.array([x + c * p_robot[0] - s * p_robot[1],
+                     y + s * p_robot[0] + c * p_robot[1]])
+
+
 def _map_point_to_robot(p_map, pose):
     """Transform a point from the map frame into the robot/base_link frame."""
     x, y, th = pose

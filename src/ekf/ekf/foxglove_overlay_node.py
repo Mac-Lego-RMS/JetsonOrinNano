@@ -337,7 +337,10 @@ class FoxgloveOverlay(Node):
         # stop differ on purpose: braking into a corner must not end the run.
         self.speed_start = self.declare_parameter('timer_start_speed', 20.0).value
         self.speed_stop = self.declare_parameter('timer_stop_speed', 8.0).value
-        self.stop_hold = self.declare_parameter('timer_stop_hold', 1.5).value
+        # Laenger als jeder geplante Halt: nach dem Ausparken ~1,8 s, Scan-Halt
+        # 1,5 s, Nachmessen beim Einparken ~2 s. Mit 1,5 s stoppte die Uhr schon
+        # nach dem Ausparken. Die Endzeit bleibt exakt (Moment des Anhaltens).
+        self.stop_hold = self.declare_parameter('timer_stop_hold', 5.0).value
         # How far beyond the field edge the run clock hangs [m].
         self.timer_margin = self.declare_parameter('timer_label_margin', 0.35).value
 

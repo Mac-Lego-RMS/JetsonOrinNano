@@ -480,9 +480,9 @@ def simuliere(schritte, start=None, tiefe=LUECKE_TIEFE,
 #
 # Positive Lenkung heisst ZUR OFFENEN SEITE, negative Strecke rueckwaerts.
 SCHRITTE_STANDARD = [
-    0.0,  0.0,
-     100.0,   6.9,     # vorwaerts, voll zur offenen Seite
-    -100.0,  -5.4,     # rueckwaerts, voll zur Wandseite
+     0.0,  0.0,
+     100.0,   6.0,     # vorwaerts, voll zur offenen Seite
+    -100.0,  -4.5,     # rueckwaerts, voll zur Wandseite
      100.0,   9.6,
      0.0, 5.0,
     -100.0, 21.0,     # Bogen aus der Luecke heraus    # Gegenbogen zurueck auf Bahnkurs
@@ -504,24 +504,132 @@ SCHRITTE_STANDARD = [
 # Spiegeln allein gleicht das nicht aus. Beide Folgen enden bei 0 grad.
 #   CW : Schlussbogen 27,0 cm -> Kurs +0,6 grad, base_link 37,0 cm zur Aussenbande
 #   CCW: Schlussbogen 21,0 cm -> Kurs  0,0 grad, base_link 34,5 cm zur Aussenbande
-SCHRITTE_CW = [
+SCHRITTE_CW_AUSSEN  = [
     0.0,  0.0,
-     100.0,   6.9,
-    -100.0,  -5.4,
+     100.0,   6.0,
+    -100.0,  -4.5,
      100.0,   9.6,
      0.0, 5.0,
     -100.0, 27.0,
      0.0,  0.0,
 ]
-SCHRITTE_CCW = [
+
+SCHRITTE_CW_INNEN = [
     0.0,  0.0,
-     100.0,   6.9,
-    -100.0,  -5.4,
+     100.0,   7.5,
+    -100.0,  -4.5,
      100.0,   9.6,
-     0.0, 5.0,
-    -100.0, 21.0,
+     0.0, 37.0,
+    -100.0, 33.0,
      0.0,  0.0,
 ]
+
+SCHRITTE_CW_MITTE = [
+    0.0,  0.0,
+     100.0,   7.5,
+    -100.0,  -4.5,
+     100.0,   9.6,
+     0.0, 26.5,
+    -100.0, 27.0,
+     0.0,  0.0,
+]
+
+SCHRITTE_CCW_INNEN = [
+      0.0,  0.0,
+     100.0,   6.0,
+    -100.0,  -4.5,
+     100.0,   19.6,
+     0.0, 20.0,
+    -100.0, 30.0,
+     0.0,  0.0,
+]
+
+SCHRITTE_CCW_AUSSEN = [
+    0.0,  0.0,
+     100.0,   6.0,
+    -100.0,  -4.5,
+     100.0,   9.6,
+     0.0, 5.0,
+    -100.0, 19.0,
+     0.0,  0.0,
+]
+
+# Normale Folgen je Richtung. Sie sind die REFERENZ FUERS EINPARKEN (der
+# Regler parkt mit ihrer Umkehrung ein, egal welche Variante ausgeparkt hat)
+# und der Ersatz, wenn eine Variante leer ist. schritte_fuer() braucht sie.
+# CW = bisherige CW-Folge (Schlussbogen 27,0) = identisch mit CW_AUSSEN.
+# CCW = bisherige CCW-Folge (Schlussbogen 21,0), steht in SCHRITTE_STANDARD.
+SCHRITTE_CW = list(SCHRITTE_CW_AUSSEN)
+SCHRITTE_CCW = list(SCHRITTE_STANDARD)
+
+# --- Einparken: eigene Folgen je Richtung --------------------------------
+# Bisher parkt der Regler mit der UMKEHRUNG der normalen Ausparkfolge ein
+# (SCHRITTE_CW / SCHRITTE_CCW: Zuege in umgekehrter Reihenfolge, Strecken mit
+# umgedrehtem Vorzeichen, Lenkung gleich). Kuenftig soll das Einparken eine
+# eigene Folge bekommen koennen -- sie steht hier, in FAHRREIHENFOLGE (erster
+# Zug zuerst), gleiche Konvention wie oben: positive Lenkung heisst zur
+# offenen Seite, negative Strecke rueckwaerts.
+#
+# Vorerst sind es genau die Werte, die der Regler heute faehrt: die Umkehrung
+# von SCHRITTE_CW bzw. SCHRITTE_CCW, uebernommen am 26.09.2026. Der Regler
+# nutzt sie NOCH NICHT -- er bildet die Umkehrung weiter selbst. Vor dem
+# Umstellen beachten: die Kurskorrektur beim Einparken (_park_ziel_kurse)
+# nimmt an, dass Einparkzug k den Ausparkzug n-1-k rueckwaerts faehrt.
+SCHRITTE_EINPARKEN_CW = [
+      0.0,   -0.0,
+   -100.0,  -27.0,
+      0.0,   -5.0,
+    100.0,   -12.0,
+   -100.0,    7.5,
+    100.0,   -5.0,
+      0.0,   -0.0,
+]
+SCHRITTE_EINPARKEN_CCW = [
+      0.0,    0.0,
+   -100.0,  -24.0,
+    100.0,   -14.5,
+   -100.0,    6.0,
+    100.0,   -6.0,
+      0.0,    0.0,
+]
+
+
+def einparkfolge(richtung):
+    """Flache Einparkliste fuer CW oder CCW (Kopie), dazu ihr Name."""
+    richtung = str(richtung).upper()
+    if richtung not in ('CW', 'CCW'):
+        raise ValueError('Fahrtrichtung "%s" ist weder CW noch CCW' % richtung)
+    name = 'SCHRITTE_EINPARKEN_%s' % richtung
+    liste = globals()[name]
+    if not liste:
+        raise ValueError('%s ist leer' % name)
+    return list(liste), name
+
+# Bewusst leer: bei CCW mit freier mittlerer Reihe faehrt der Regler die
+# normale Folge. Der Name muss trotzdem existieren -- schritte_variante()
+# holt die Listen per globals()[name] und wuerde sonst mit KeyError abbrechen.
+SCHRITTE_CCW_MITTE = []
+
+LAGEN = ('innen', 'mitte', 'aussen')
+
+
+def schritte_variante(richtung, lage):
+    """Flache Schrittliste fuer eine der sechs Varianten.
+
+    Rueckgabe: (flache Liste, Name wie SCHRITTE_CCW_MITTE). Die Liste ist eine
+    Kopie; wer sie aendert, aendert nicht die Tabelle hier.
+    """
+    richtung = str(richtung).upper()
+    lage = str(lage).lower()
+    if richtung not in ('CW', 'CCW'):
+        raise ValueError('Fahrtrichtung "%s" ist weder CW noch CCW' % richtung)
+    if lage not in LAGEN:
+        raise ValueError('Lage "%s" -- erlaubt: %s' % (lage, ', '.join(LAGEN)))
+    name = 'SCHRITTE_%s_%s' % (richtung, lage.upper())
+    liste = globals()[name]
+    if not liste:
+        raise ValueError('%s ist leer' % name)
+    return list(liste), name
 
 
 def schritte_fuer(richtung, gemeinsam=None, cw=None, ccw=None):

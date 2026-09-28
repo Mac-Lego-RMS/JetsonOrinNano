@@ -24,13 +24,18 @@ WITHOUT a backwards predict (see STALE_TOLERANCE). Only gaps larger than the
 tolerance -- real transport hiccups -- are still dropped.
 """
 import heapq
+import time
 import numpy as np
 
 import rclpy
+
+from ekf.einzelinstanz import nur_eine_instanz
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
 from nav_msgs.msg import Odometry
+from rclpy.qos import QoSProfile, DurabilityPolicy
+from std_msgs.msg import Bool
 
 from robot_msgs.msg import WallMatchArray
 
@@ -53,6 +58,14 @@ TWIST_MAP = ((0, 3), (5, 4))
 # Covers the ESP32-vs-Jetson clock skew (observed 6-10 ms, slowly growing over
 # a run) while still rejecting real transport gaps (observed one at -98 ms).
 STALE_TOLERANCE = 0.050          # s
+
+# Gyro-Ueberwachung. In parken_test_15 fiel der BNO055 nach I2C-Fehlern
+# ("Remote I/O error") aus: /bno055/imu kam gar nicht mehr, imu_raw nur noch
+# Nullen, und der Treiber richtete den Chip nicht neu ein. Der Filter rechnete
+# den Kurs dann allein aus den Wandtreffern -- bis zu 20 grad daneben, der
+# Wagen schlingerte, und gemerkt hat es niemand. Jetzt wird es gemeldet.
+GYRO_TIMEOUT = 0.5               # s ohne Nachricht -> ausgefallen
+GYRO_NULL_DAUER = 1.0            # s lang exakt 0 auf allen Achsen -> ausgefallen
 
 
 def stamp_to_sec(stamp):
@@ -81,6 +94,18 @@ class EKFNode(Node):
         self.n_dropped = 0
 
         self.create_subscription(Imu, '/bno055/imu', self.gyro_cb, 50)
+
+        # Gyro-Ueberwachung (siehe GYRO_TIMEOUT). Der Zustand geht gelatcht auf
+        # /ekf/gyro_ok; der scan_processor meldet bei False 'lost', und der
+        # Regler faehrt dann langsam und haelt an.
+        self._gyro_letzt = None          # monotonic der letzten Nachricht
+        self._gyro_null_seit = None      # monotonic, seit wann nur Nullen kommen
+        self._gyro_ok = None
+        self._start_mono = time.monotonic()
+        latched = QoSProfile(depth=1)
+        latched.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.gyro_ok_pub = self.create_publisher(Bool, '/ekf/gyro_ok', latched)
+        self.create_timer(0.1, self._gyro_pruefen)
         self.create_subscription(JointState, '/esp_serial_bridge/joint_states',
                                  self.enc_cb, 50)
         self.create_subscription(WallMatchArray, '/wall_matches', self.wall_cb, 10)
@@ -117,9 +142,45 @@ class EKFNode(Node):
 
     # --- gyro / encoder: stamp-ordered queue ------------------------------
     def gyro_cb(self, msg):
+        jetzt = time.monotonic()
+        self._gyro_letzt = jetzt
+        w = msg.angular_velocity
+        if w.x == 0.0 and w.y == 0.0 and w.z == 0.0:
+            # Ein lebender Gyro rauscht, auch im Stand -- exakt null auf allen
+            # drei Achsen liefert nur ein Chip, der nicht mehr misst.
+            if self._gyro_null_seit is None:
+                self._gyro_null_seit = jetzt
+        else:
+            self._gyro_null_seit = None
         t = stamp_to_sec(msg.header.stamp)
         self._push(t, 'gyro', msg.angular_velocity.z * GYRO_SCALE)
         self._drain(t)
+
+    def _gyro_pruefen(self):
+        jetzt = time.monotonic()
+        if self._gyro_letzt is None:
+            grund = (None if jetzt - self._start_mono < 2.0
+                     else 'noch nie eine Nachricht auf /bno055/imu')
+        elif jetzt - self._gyro_letzt > GYRO_TIMEOUT:
+            grund = f'seit {jetzt - self._gyro_letzt:.1f} s keine Nachricht auf /bno055/imu'
+        elif (self._gyro_null_seit is not None
+              and jetzt - self._gyro_null_seit > GYRO_NULL_DAUER):
+            grund = f'seit {jetzt - self._gyro_null_seit:.1f} s nur exakte Nullen'
+        else:
+            grund = ''
+        if grund is None:
+            return                       # Anlauf: dem Treiber Zeit lassen
+        ok = grund == ''
+        if ok != self._gyro_ok:
+            self._gyro_ok = ok
+            self.gyro_ok_pub.publish(Bool(data=ok))
+            if ok:
+                self.get_logger().info('Gyro: ok.')
+        if not ok:
+            self.get_logger().error(
+                f'GYRO AUSGEFALLEN: {grund}. Der Kurs kommt jetzt nur noch aus '
+                f'den Wandtreffern. BNO055-Stecker pruefen und den IMU-Knoten '
+                f'(Fenster 1) neu starten.', throttle_duration_sec=2.0)
 
     def enc_cb(self, msg):
         # Die Bruecke schickt auf diesem Topic DREI Sorten Nachrichten. Nur
@@ -248,6 +309,7 @@ class EKFNode(Node):
 
 def main():
     rclpy.init()
+    nur_eine_instanz('/ekf/odom', 'ekf_node')
     rclpy.spin(EKFNode())
 
 

@@ -248,6 +248,8 @@ N_CORNERS=12
 # Fenster 6 Enter drueckst. Ein "warte mal" von ihm kaeme immer zu spaet.
 # Die Richtung selbst kommt dann sehr wohl ueber ein Topic
 # (/parking_direction), nur eben das Warten nicht.
+# Inzwischen misst der scan_processor die Richtung selbst in der Bucht
+# (start_from_bay, siehe Fenster 9); der Schalter setzt jetzt das.
 AUSPARKEN=true
 
 # Kalibrier-Node nur auf Wunsch (--calib). Im normalen Lauf nicht gebraucht.
@@ -555,8 +557,16 @@ fi
 #
 # Beide erst nach der Hardware starten -- ekf_node will Radstellungen von
 # der Bruecke und Drehraten von der IMU, scan_processor den Lidar.
-run_window 8 ekf   "sleep 10 && ros2 run ekf ekf_node"
-run_window 9 scan  "sleep 12 && ros2 run ekf scan_processor --ros-args -p race_mode:=$RACE_MODE -p wait_for_parking:=$AUSPARKEN"
+#
+# Gestartet werden beide ueber schaetzung_neustart.sh -- dasselbe Skript, das
+# Fenster 6 vor jedem Lauf aufruft; die Startbefehle stehen nur dort.
+# scan_processor mit start_from_bay: er misst Richtung und Pose selbst IN der
+# Bucht und latcht sofort (ersetzt wait_for_parking). Mit wait_for_parking lief
+# hier ein zweiter Knoten neben einem von Hand gestarteten -- in
+# parken_test_14 latchte der mitten in der ersten Kurve eine um 8 grad
+# verdrehte Karte nach. Also: KEINEN weiteren von Hand starten.
+RACE_MODE=$RACE_MODE AUSPARKEN=$AUSPARKEN SESSION=$SESSION CONTAINER=$CONTAINER \
+    "$WORKSPACE/src/schaetzung_neustart.sh" --verzoegerung 10 --ohne-warten
 
 # ------------------------------------------------------------------ #
 # Fenster 6: der Regler -- vorbereitet, aber NICHT gestartet
@@ -565,8 +575,19 @@ run_window 9 scan  "sleep 12 && ros2 run ekf scan_processor --ros-args -p race_m
 # sein Kommando hier nur fertig in der Zeile: hinsehen, ob der Roboter
 # richtig steht, dann Enter. Einstellige Fensternummer, damit Strg-b 6
 # hinfuehrt.
+#
+# Beim Start laesst der Regler EKF und scan_processor selbst neu starten
+# (ekf/schaetzung_neustart.py, ueber den Waechter in Fenster 11) und wartet,
+# bis Gyro und Buchterkennung stehen.
 arm_window 6 round1 \
     "ros2 run ekf round1_controller --ros-args -p n_corners:=$N_CORNERS -p ausparken:=$AUSPARKEN"
+
+# Fenster 11: Neustart-Waechter, auf dem Jetson (nicht im Container). Fuehrt
+# die Neustart-Anfragen von round1_controller und ausparken_varianten_node aus
+# -- die starten Fenster 8/9 neu, und an tmux kommt der Container nicht heran.
+tmux new-window -d -t "$SESSION:11" -n neustart
+tmux send-keys -t "$SESSION:11" \
+    "WORKSPACE=$WORKSPACE RACE_MODE=$RACE_MODE AUSPARKEN=$AUSPARKEN SESSION=$SESSION CONTAINER=$CONTAINER $WORKSPACE/src/schaetzung_waechter.sh" C-m
 
 # ------------------------------------------------------------------ #
 # Optionale Fahr-Nodes -- bei Bedarf einkommentieren

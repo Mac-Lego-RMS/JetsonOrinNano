@@ -32,6 +32,7 @@ setup(
             'approach_corner = ekf.approach_corner_node:main',
             'round1_controller = ekf.round1_controller_node:main',
             'ausparken_test = ekf.ausparken_test_node:main',
+            'ausparken_varianten = ekf.ausparken_varianten_node:main',
             'speed_calib = ekf.speed_calib_node:main',
             'speed_verify = ekf.speed_varify:main',
             'steer_calib = ekf.steer_calib_node:main',

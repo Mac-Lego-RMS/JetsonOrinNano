@@ -57,10 +57,10 @@ from geometry_msgs.msg import Point
 from ekf.ekf import wrap
 from ekf.direction_detection import detect_direction
 from ekf.obstacle_detection import (detect_obstacles, mask_sectors,
-                                    sector_from_robot_point)
+                                    sector_from_robot_point, PILLAR_HALF_WIDTH)
 from ekf.obstacle_map import ObstacleMap, MIN_SEAT_VOTES
 from ekf.wall_extraction import (
-    LIDAR_OFFSET_X,
+    LIDAR_OFFSET_X, BLOCK_ANGLE,
     scan_to_points, cluster_points, merge_wraparound, split_at_corners,
     fit_wall_hnf, lidar_to_base_link, match_walls,
 )
@@ -109,6 +109,58 @@ BAY_INNER_MAX = 1.05
 BAY_OUTER_MAX = 0.25           # ... und die andere Seite leer oder ganz nah sein
 BAY_DEPTH = 0.20               # Buchtwaende ragen 20 cm von der Aussenbande ein
 BAY_CLEAR_MARGIN = 0.03        # LiDAR muss so weit aus der Bucht heraus sein
+BAY_VIEW_MIN_LAT = 0.20        # in der Bucht: Hindernisse nur so weit seitlich
+                               # zur Oeffnung hin (Buchtwaende ~0,04, Pylonen ~0,44)
+
+# Startgerade aus dem Stand abtasten: pro Sitz entscheiden, ob dort etwas steht,
+# nachweislich nichts steht, oder es (noch) nicht zu sagen ist. Ueber den rohen
+# /scan, unabhaengig von der Farberkennung: geht der Strahl in Richtung des
+# Sitzes UEBER ihn hinaus, ist er frei; trifft er AM Sitz, steht dort etwas;
+# trifft er DAVOR, ist der Sitz verdeckt.
+SEAT_RANGE_TOL = 0.10          # Treffer innerhalb +-10 cm um den Sitz = belegt
+SEAT_FREE_SCANS = 5            # so viele Durchblicke, bis ein Sitz als frei gilt
+# Durchblick-Freigabe im ganzen Lauf: ein Sitz mit Stimmen wird wieder frei,
+# wenn der LiDAR mehrmals in Folge klar durch ihn hindurchsieht. Sonst bleibt
+# ein Phantom bis zum Schluss (parken_test_22: beim Start stand etwas neben der
+# Bucht, wurde als gruene #21 gewertet und nie wieder geprueft, obwohl der
+# Strahl danach dutzende Male durch den Sitz ging). Vorsichtig, weil eine
+# faelschlich freigegebene echte Pylone schlimmer ist als ein Phantom:
+#   - Kegel = Pylonenbreite + SEAT_CLEAR_MARGIN (Posenfehler) -- KEIN Strahl
+#     darin darf am Sitz enden, und keiner davor (verdeckt = keine Aussage)
+#   - nur bis SEAT_CLEAR_MAX_DIST, nur bei Lokalisierung 'ok' und kleiner
+#     Gierrate (ein Scan dauert 66 ms -- in der Kurve verzerrt er um Grade)
+#   - SEAT_CLEAR_SCANS Durchblicke in Folge UND insgesamt mindestens doppelt
+#     so viele Durchblicke wie Treffer am Sitz
+# Nachgespielt an parken_test_18..22: nur #21 (Phantom, 22) und #2 (Geist neben
+# #3, 22) werden frei, keine der echten Pylonen.
+SEAT_CLEAR_SCANS = 6
+SEAT_CLEAR_MAX_DIST = 1.20
+SEAT_CLEAR_MARGIN = 0.05
+SEAT_CLEAR_MAX_YAWRATE = 0.5   # rad/s
+SEAT_CLEAR_MIN_RANGE = 0.12    # naeher: eigener Aufbau, kein Verdecker
+# Farbe nur bei ruhigem Kurs werten, Belegung immer. In der Drehung passen Bild
+# und Scan nicht zusammen (Versatz bis ~0,5 s): parken_test_42, rote #17 aus
+# 0,3-0,5 m bei 1,5-1,75 rad/s fuenfmal GRUEN, sonst immer rot -- die Farbe
+# kippte, der Pfad sprang von innen nach aussen (Steigung 3,2).
+FARBE_MAX_GIERRATE = 0.6       # rad/s
+# Nach Runde 1 keine Stimmen und keine Freigaben mehr -- wie der Regler
+# (obs_freeze_lap): alles Relevante ist in Runde 1 gesehen, was danach neu
+# auftaucht, kann nur falsch sein. So zeigt auch Foxglove beim Einparken
+# keine neuen Pylonen mehr.
+OBS_FREEZE_LAP = 1
+START_SCAN_TIMEOUT = 2.0       # s nach dem Commit; danach 'incomplete' melden
+START_SCAN_MAX_ALONG = 0.75    # nur Sitze bis so weit laengs der Geraden (voraus
+                               # oder zurueck) von der Hinterachse. Der ferne Sitz
+                               # (~1 m) ist aus der Bucht nicht einsehbar und fuers
+                               # Ausparken egal -- ihn erkennt die normale Fahrt.
+
+# Ausparken: Stimmen ruhen, sobald der Roboter losfaehrt, bis er aus der Bucht
+# ist UND wieder parallel zur Geraden steht. Aus der Bucht heraus eingeschwenkt,
+# teils noch zwischen den Waenden -- da entstehen nur schlechte Stimmen.
+BAY_MOVE_DIST = 0.03           # Losfahren erkannt ab so viel Weg ...
+BAY_MOVE_ANGLE = np.radians(3.0)   # ... oder so viel Drehung seit dem Commit
+EXIT_HEADING_TOL = np.radians(15.0)  # Kurs gilt als parallel zur Geraden
+EXIT_MAX_DIST = 1.20           # Notausgang: so weit gefahren -> sicher draussen
 FRONT_ALPHA_TOL = np.radians(25.0)
 FRONT_MIN_LEN = 0.50           # Frontwand ist 3 m lang, die Buchtwand 0,20 m
 FRONT_MIN_DIST = 0.60          # die Bucht steht nie direkt an der Ecke
@@ -141,6 +193,16 @@ GATE_LEVELS = [                # (d_tol m, alpha_tol)
     (0.28, np.radians(30.0)),
     (0.35, np.radians(35.0)),
 ]
+# Laengspruefung (match_walls overlap_tol): wie weit ein gemessenes Wandstueck
+# ueber das Ende der Kartenwand hinaus liegen darf. Gerechnet mit der EKF-Pose --
+# ist die laengs verlaufen, liegt auch ein echtes Wandende scheinbar daneben.
+# Deshalb waechst die Toleranz mit dem Tor: wer das Tor quer aufweitet, weil die
+# Zuordnung abgerissen ist, traut der Pose auch laengs weniger.
+GATE_OVERLAP = [0.15, 0.25, 0.35, 0.45]
+# Punkte naeher am LiDAR gehoeren nie zu einer Bande, an der er vorbeifaehrt
+# (Fahrgasse >= 0,19 m, Bucht maskiert): das ist eine angestossene oder
+# mitgeschobene Pylone oder der eigene Aufbau. Nur fuer die Wandextraktion.
+WALL_MIN_RANGE = 0.10
 GATE_EMPTY_SCANS = 4           # enge Stufe: Scans ohne Treffer vor dem Oeffnen
 GATE_LEVEL_SCANS = 3           # weite Stufe: Scans ohne Einrasten vor der naechsten
 GATE_SETTLE_SCANS = 5          # Scans mit kleiner Innovation vor dem Zurueckgehen
@@ -152,7 +214,12 @@ GATE_SETTLE_SCANS = 5          # Scans mit kleiner Innovation vor dem Zurueckgeh
 GATE_WIDE_MIN_MATCHES = 2      # im weiten Tor: eine einzelne Wand reicht nicht
 
 PERF_PERIOD = 5.0              # s zwischen zwei Laufzeit-Zeilen im Log
-PERF_LAT_WARN_MS = 150.0       # Warnung, wenn ein Scan so spaet bearbeitet wird
+# Warnschwelle pro Strom. Die Farbwolke hat schon ab Werk ~155 ms Latenz (Kamera
+# holen, fusionieren, einfaerben im camera_lidar-Node) -- die eigene Rechenzeit
+# liegt bei ~13 ms. Eine gemeinsame Schwelle meldete deshalb dauernd "haelt
+# nicht mit", obwohl der Node mithielt.
+PERF_LAT_WARN_MS = {'scan': 150.0, 'color': 400.0}
+POSE_HIST_LEN = 300            # ~3 s Posenhistorie bei ~100 Hz Odometrie
 
 COLOR_CODE = {'red': Obstacle.COLOR_RED, 'green': Obstacle.COLOR_GREEN}
 
@@ -188,9 +255,45 @@ class ScanProcessor(Node):
             'start_from_bay', False).get_parameter_value().bool_value
         if self.start_from_bay:
             self.parking_lot_present = True    # Buchtstart heisst: Luecke steht
+        # Einpark-Test: der Roboter steht auf der STARTGERADEN (Nordgasse), in
+        # Fahrtrichtung start_gerade (CCW/CW), z. B. am Anfang der letzten
+        # Geraden. Frontwand und Aussenbande messen -> Feldpose, dann Karte wie
+        # beim Buchtstart. Die Luecke selbst sieht er nicht: ihre Lage fuer die
+        # Maske kommt aus test_bucht_front / test_bucht_q (Mittel frueherer
+        # Laeufe, 0 = Standard je Richtung). Setzt round1_controller mit
+        # einparken_test:=true selbst beim Neustart.
+        self.start_gerade = self.declare_parameter(
+            'start_gerade', '').get_parameter_value().string_value.strip().upper()
+        self.test_bucht_front = self.declare_parameter(
+            'test_bucht_front', 0.0).get_parameter_value().double_value
+        self.test_bucht_q = self.declare_parameter(
+            'test_bucht_q', 0.159).get_parameter_value().double_value
+        if self.start_gerade not in ('', 'CW', 'CCW'):
+            self.get_logger().error(
+                f'start_gerade={self.start_gerade!r} -- nur CW oder CCW. Aus.')
+            self.start_gerade = ''
+        if self.start_gerade:
+            self.start_from_bay = False
+            self.parking_lot_present = True
+        self.test_pose_field = None  # Feldpose beim Start auf der Geraden
+        self.gerade_votes = []
         self.bay_votes = []          # (richtung, front_d, d_innen) pro Scan
         self.bay_pose_field = None   # Feldpose des Roboters, in der Bucht gemessen
         self.bay_left = False        # LiDAR hat die Bucht verlassen (klebt)
+        # None (vor dem Commit) | 'parked' | 'exiting' | 'clear'
+        self.bay_phase = None
+        self.start_scan_state = None # None | 'scanning' | 'complete' | 'incomplete'
+        self.start_scan_t0 = None
+        self.seat_free = {}          # Sitz-ID -> Scans, die ueber den Sitz hinaussahen
+        self.seat_hit = {}           # Sitz-ID -> Scans mit Treffer am Sitz
+        # Durchblick-Freigabe (Index in obstacle_map.seats):
+        self.clear_run = {}          # Durchblicke in Folge
+        self.clear_durch = {}        # Durchblicke insgesamt
+        self.clear_treffer = {}      # Treffer am Sitz insgesamt
+        self.yaw_rate = 0.0          # aus /ekf/odom, fuer die Freigabe
+        self.bay_odo_weg = 0.0       # Eigenbewegung seit dem Commit in der Bucht
+        self.bay_odo_dreh = 0.0
+        self.bay_odo_t = None
 
         # Rueckweg der Wandzuordnung
         self.gate_level = 0
@@ -199,6 +302,7 @@ class ScanProcessor(Node):
         self.gate_settle = 0         # ruhige Scans in Folge (im weiten Tor)
         self.loc_state = None        # zuletzt publizierter Zustand
         self.perf = {}               # Laufzeitmessung pro Callback
+        self.pose_hist = deque(maxlen=POSE_HIST_LEN)   # (stamp, pose)
         self.perf_t = time.monotonic()
 
         self.pose = (0.0, 0.0, 0.0)
@@ -279,6 +383,9 @@ class ScanProcessor(Node):
         # 'ok' | 'recovering' | 'lost' -- damit der Regler weiss, wann er blind
         # faehrt (langsamer werden, nicht einparken, keinen Erfolg melden)
         self.loc_pub = self.create_publisher(String, '/localization_state', latched)
+        # Startgerade aus der Bucht abgetastet? 'scanning' -> 'complete' |
+        # 'incomplete'. Erst dann ist /obstacles fuer die Startgerade vollstaendig.
+        self.start_scan_pub = self.create_publisher(String, '/start_scan_state', latched)
 
         self.get_logger().info(
             f'start detection running (mode={self.race_mode}, '
@@ -299,6 +406,50 @@ class ScanProcessor(Node):
         y = msg.pose.pose.position.y
         theta = yaw_from_quaternion(msg.pose.pose.orientation)
         self.pose = (x, y, theta)
+        self.yaw_rate = float(msg.twist.twist.angular.z)
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.pose_hist.append((t, self.pose))
+        # Losfahren in der Bucht: Weg und Drehung aus der EIGENBEWEGUNG
+        # (Encoder, Gyro), nicht aus der Pose -- die springt, wenn der
+        # Wandabgleich nach dem Kartencommit nachzieht (parken_test_29, CW:
+        # 4-9 cm im Stand, als "losgefahren" gewertet, Startabtastung
+        # abgebrochen, rote Pylone vor der Luecke unbekannt).
+        if self.bay_phase == 'parked':
+            if self.bay_odo_t is not None and 0.0 < t - self.bay_odo_t < 0.5:
+                dt = t - self.bay_odo_t
+                self.bay_odo_weg += float(msg.twist.twist.linear.x) * dt
+                self.bay_odo_dreh += self.yaw_rate * dt
+            self.bay_odo_t = t
+
+    def _pose_at(self, stamp):
+        """Pose zum Zeitpunkt einer Messung statt der aktuellen.
+
+        Die Farbwolke kommt ~155 ms nach ihrem Scan an. In einer Kurve mit
+        90 Grad/s hat sich der Roboter bis dahin um 14 Grad weitergedreht; mit
+        der aktuellen Pose verrechnet, laege ein Hindernis in 1 m Abstand 25 cm
+        daneben -- auf dem falschen Sitz. Linear interpoliert zwischen den zwei
+        naechsten Odometrie-Nachrichten; ausserhalb der Historie die naechste.
+        """
+        t = stamp.sec + stamp.nanosec * 1e-9
+        h = self.pose_hist
+        if not h:
+            return self.pose
+        if t <= h[0][0]:
+            return h[0][1]
+        if t >= h[-1][0]:
+            return h[-1][1]
+        lo, hi = 0, len(h) - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if h[mid][0] <= t:
+                lo = mid
+            else:
+                hi = mid
+        (t0, p0), (t1, p1) = h[lo], h[hi]
+        w = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+        dth = np.arctan2(np.sin(p1[2] - p0[2]), np.cos(p1[2] - p0[2]))
+        return (p0[0] + w * (p1[0] - p0[0]), p0[1] + w * (p1[1] - p0[1]),
+                p0[2] + w * dth)
 
     def lap_state_cb(self, msg):
         prev = self.lap_state
@@ -342,7 +493,7 @@ class ScanProcessor(Node):
             cpu_ms = 1000 * np.array(st['cpu'])
             teile.append(f"{kind}: Latenz {np.median(lat_ms):.0f}/{lat_ms.max():.0f} ms, "
                          f"Rechenzeit {np.median(cpu_ms):.1f}/{cpu_ms.max():.1f} ms")
-            zu_langsam |= lat_ms.max() > PERF_LAT_WARN_MS
+            zu_langsam |= lat_ms.max() > PERF_LAT_WARN_MS.get(kind, 150.0)
             st['lat'].clear()
             st['cpu'].clear()
         if not teile:
@@ -359,6 +510,9 @@ class ScanProcessor(Node):
         self._publish_wall_distances(measured)
 
         if self.map_walls is None:
+            if self.start_gerade and self.race_mode == 'obstacle':
+                self._gerade_start_step(measured)
+                return
             if self.start_from_bay and self.race_mode == 'obstacle':
                 self._bay_start_step(measured)
                 return
@@ -383,6 +537,9 @@ class ScanProcessor(Node):
         matches = self._match_with_recovery(measured)
         self._update_direction(measured)
         self._learn_lane_width(measured)
+        self._update_bay_phase()
+        self._scan_start_seats(msg)
+        self._seats_durchblick(msg)
 
         out = WallMatchArray()
         out.header = msg.header
@@ -409,6 +566,14 @@ class ScanProcessor(Node):
         if self.race_mode != 'obstacle':
             return
         dets = detect_obstacles(msg)
+        # Hintere Sperrzone des LiDAR (Platine, |Rohwinkel| <= BLOCK_ANGLE, im
+        # Roboterframe also 180 +- 60 grad): die Wandextraktion wirft sie weg,
+        # die Farbscan-Detektion bisher nicht. Dort entstand eine gruene
+        # Phantom-Pylone, immer an derselben Stelle RELATIV zum Roboter
+        # (base_link -0,18/+0,29, 135 grad vom LiDAR) -- Sitz #21 in
+        # parken_test_22 und 24.
+        dets = [d for d in dets
+                if abs(np.arctan2(d['y'], d['x'] - LIDAR_OFFSET_X)) < np.pi - BLOCK_ANGLE]
 
         # hand the pillar directions to the wall extraction. Set every scan,
         # including the empty case, so the mask clears once a pillar is passed.
@@ -421,18 +586,35 @@ class ScanProcessor(Node):
         if not dets:
             return
 
-        if self._in_parking_bay():
-            # Noch in der Bucht: eingeschlossen von Waenden, Pylonen teils
-            # verdeckt, Nahes unter der Untergrenze der Fusion -- die
-            # Detektionen sind schlecht und wuerden Geister erzeugen.
-            # /obstacles_live hat sie oben trotzdem bekommen.
+        if self.start_from_bay:
+            if self.bay_phase is None:
+                return                     # vor dem Commit: Richtung unbekannt
+            if self.bay_phase == 'parked':
+                # Im Stand: eingeschlossen ist der Roboter nur nach vorn, hinten
+                # und zur Aussenbande; zur Oeffnung hin ist der Blick frei. Die
+                # Pylonen der Startgeraden stehen genau dort, und von ihnen
+                # haengt die Wahl des Ausparkmanoevers ab.
+                dets = self._bay_opening_filter(dets)
+                if not dets:
+                    return
+            elif self.bay_phase == 'exiting':
+                return                     # beim Ausparken ruhen die Stimmen
+            # 'clear': alles zaehlt
+        elif self._in_parking_bay():
+            # Parkluecken-Start ohne Buchtmessung (wait_for_parking): die Pose
+            # haengt noch nicht am endgueltigen Frame -- nichts werten.
             return
 
         if self.obstacle_map is None:
-            self.pending_dets.append((dets, self.pose))
+            self.pending_dets.append((dets, self._pose_at(msg.header.stamp)))
+            return
+        if self._hindernisse_eingefroren():
             return
 
-        self.obstacle_map.add_detections(dets, self.pose,
+        if abs(self.yaw_rate) > FARBE_MAX_GIERRATE:
+            # nur Belegung zaehlen: dist=inf -> Stimme 'far' (obstacle_map)
+            dets = [dict(d, dist=float('inf')) for d in dets]
+        self.obstacle_map.add_detections(dets, self._pose_at(msg.header.stamp),
                                          allowed=self._seat_allowed)
         self._publish_obstacles_if_changed()
 
@@ -468,6 +650,8 @@ class ScanProcessor(Node):
 
     def _extract(self, msg):
         pts = scan_to_points(msg)
+        if self.map_walls is not None and len(pts):
+            pts = pts[np.hypot(pts[:, 0], pts[:, 1]) >= WALL_MIN_RANGE]
         # drop the directions occupied by pillars, so they cannot end up inside
         # a wall cluster. A missing slice of wall is harmless (gap clustering
         # splits it, both parts still match the same map wall); a pillar inside
@@ -668,6 +852,8 @@ class ScanProcessor(Node):
     def _start_pose_for_direction(self):
         if self.race_mode == 'open':
             return self._open_start_pose()
+        if self.test_pose_field is not None:
+            return self._verankert(self.test_pose_field)
         if self.bay_pose_field is not None:
             return self._verankert(self.bay_pose_field)
         poses = START_POSES_CW if self.direction == 'CW' else START_POSES_CCW
@@ -741,6 +927,256 @@ class ScanProcessor(Node):
             msg.obstacles.append(o)
         self.obstacle_live_pub.publish(msg)
 
+    # ------------------------------------------------------------------ #
+    # Buchtstart: Phasen und Abtasten der Startgeraden
+    # ------------------------------------------------------------------ #
+
+    def _update_bay_phase(self):
+        """parked -> exiting (losgefahren) -> clear (draussen und parallel)."""
+        if not self.start_from_bay or self.bay_phase in (None, 'clear'):
+            return
+        cx, cy, cth = self.commit_pose
+        px, py, th = self.pose
+        weg = float(np.hypot(px - cx, py - cy))
+        dth = abs(float(np.arctan2(np.sin(th - cth), np.cos(th - cth))))
+
+        if self.bay_phase == 'parked':
+            if (abs(self.bay_odo_weg) > BAY_MOVE_DIST
+                    or abs(self.bay_odo_dreh) > BAY_MOVE_ANGLE):
+                self.bay_phase = 'exiting'
+                self.get_logger().info(
+                    'Ausparken beginnt -- Hindernisstimmen ruhen bis zum Ende')
+                if self.start_scan_state == 'scanning':
+                    self._finish_start_scan('incomplete',
+                                            'losgefahren, bevor alles entschieden war')
+            return
+
+        # exiting
+        draussen = self._bay_cleared()
+        parallel = dth < EXIT_HEADING_TOL
+        if (draussen and parallel) or weg > EXIT_MAX_DIST:
+            self.bay_phase = 'clear'
+            grund = ('aus der Bucht und parallel zur Geraden'
+                     if draussen and parallel else f'{weg:.2f} m gefahren')
+            self.get_logger().info(
+                f'Ausparken beendet ({grund}) -- Hindernisse zaehlen wieder, '
+                f'in alle Richtungen')
+
+    def _start_seats(self):
+        """Die Sitze der Startgeraden, die aus der Bucht geprueft werden:
+        [(sitz_id, map-Punkt)].
+
+        Nur Sitze, die belegt sein duerfen (mit Parkluecke: innere Spalte), und
+        nur bis START_SCAN_MAX_ALONG laengs der Geraden. Der ferne Sitz am Ende
+        der Geraden ist aus der Bucht nicht einsehbar -- bliebe er in der
+        Liste, stuende er ewig auf "offen", und jede Abtastung endete mit
+        'incomplete'. Fuers Ausparken zaehlt er nicht; auf der Geraden hat die
+        normale Erkennung ihn laengst, bevor der Roboter dort ist.
+        """
+        if self.obstacle_map is None or self.start_seat_group is None:
+            return []
+        cx, cy, cth = self.commit_pose
+        ux, uy = np.cos(cth), np.sin(cth)       # Richtung der Geraden beim Start
+        out = []
+        for sid, (si, k, sp, col, row) in enumerate(self.obstacle_map.seats):
+            if si != self.start_seat_group or not self._seat_allowed(si, col):
+                continue
+            laengs = (sp[0] - cx) * ux + (sp[1] - cy) * uy
+            # nur VOR dem Roboter: nur dort kann eine Pylone das Ausparken
+            # beeinflussen (CCW ein Sitz, CW zwei). Was dahinter steht, sieht
+            # er erst auf der Runde -- beim Start stand dort schon ein Phantom.
+            if 0.0 < laengs <= START_SCAN_MAX_ALONG:
+                out.append((sid, sp))
+        return out
+
+    def _scan_start_seats(self, msg):
+        """Im Stand: jeden Sitz der Startgeraden als belegt / frei / offen
+        entscheiden, und 'complete' melden, sobald alle entschieden sind.
+
+        Frei ist ein Sitz nur mit Beleg: SEAT_FREE_SCANS Scans, in denen der
+        Strahl in seine Richtung weiter reichte als bis zum Sitz. Belegt ist
+        er, wenn die Hinderniskarte ihn mit Farbe fuehrt. Alles andere bleibt
+        offen -- ein Sitz, den man nicht sieht, ist nicht frei.
+        """
+        if self.bay_phase != 'parked' or self.start_scan_state != 'scanning':
+            return
+        seats = self._start_seats()
+        if not seats:
+            return
+
+        pts = scan_to_points(msg)              # roh, OHNE Masken: die Pylonen-
+        if len(pts) == 0:                      # maske wuerde genau diese Strahlen
+            return                             # wegschneiden
+        ang = np.arctan2(pts[:, 1], pts[:, 0])
+        rng = np.hypot(pts[:, 0], pts[:, 1])
+        px, py, th = self._pose_at(msg.header.stamp)
+        lx = px + LIDAR_OFFSET_X * np.cos(th)
+        ly = py + LIDAR_OFFSET_X * np.sin(th)
+
+        for sid, sp in seats:
+            dx, dy = sp[0] - lx, sp[1] - ly
+            d = float(np.hypot(dx, dy))
+            if d < 1e-3:
+                continue
+            b = np.arctan2(dy, dx) - th        # Peilung im Scanframe
+            half = np.arctan2(PILLAR_HALF_WIDTH, d) + np.radians(1.0)
+            im_kegel = np.abs((ang - b + np.pi) % (2 * np.pi) - np.pi) < half
+            if not im_kegel.any():
+                continue                       # kein Strahl (Abschattung o. ae.)
+            r = float(rng[im_kegel].min())
+            if r > d + SEAT_RANGE_TOL:
+                self.seat_free[sid] = self.seat_free.get(sid, 0) + 1
+            elif r >= d - SEAT_RANGE_TOL:
+                self.seat_hit[sid] = self.seat_hit.get(sid, 0) + 1
+            # sonst: verdeckt, zaehlt nicht
+
+        belegt = {self._seat_id(o): o['color']
+                  for o in self.obstacle_map.occupied_seats()}
+        offen = []
+        for sid, _ in seats:
+            if belegt.get(sid) in ('red', 'green'):
+                continue
+            if (self.seat_free.get(sid, 0) >= SEAT_FREE_SCANS
+                    and self.seat_hit.get(sid, 0) * 4 <= self.seat_free.get(sid, 0)):
+                continue
+            offen.append(sid)
+
+        if not offen:
+            self._finish_start_scan('complete')
+        elif time.monotonic() - self.start_scan_t0 > START_SCAN_TIMEOUT:
+            self._finish_start_scan('incomplete', f'Zeitlimit {START_SCAN_TIMEOUT:.1f} s')
+
+    def _hindernisse_eingefroren(self):
+        """Nach Runde OBS_FREEZE_LAP (lap_state vom Regler) steht die Karte."""
+        if self.lap_state is None or len(self.lap_state) < 3:
+            return False
+        if self.lap_state[2] >= OBS_FREEZE_LAP:
+            if not getattr(self, '_frost_gemeldet', False):
+                self._frost_gemeldet = True
+                self.get_logger().info(
+                    f'Runde {OBS_FREEZE_LAP} vorbei -- Hinderniskarte eingefroren '
+                    f'(keine neuen Stimmen, keine Freigaben).')
+            return True
+        return False
+
+    def _seats_durchblick(self, msg):
+        """Sitze mit Stimmen wieder freigeben, wenn der LiDAR durch sie
+        hindurchsieht (Konstanten und Begruendung bei SEAT_CLEAR_SCANS)."""
+        om = self.obstacle_map
+        if om is None or not om.votes or self.loc_state != 'ok':
+            return
+        if self._hindernisse_eingefroren():
+            return
+        if abs(self.yaw_rate) > SEAT_CLEAR_MAX_YAWRATE:
+            return
+        kand = [sid for sid, keys in om.votes.items() if sum(keys.values()) > 0]
+        if not kand:
+            return
+        pts = scan_to_points(msg)              # roh: die Pylonenmaske wuerde
+        if len(pts) == 0:                      # genau diese Strahlen schneiden
+            return
+        ang = np.arctan2(pts[:, 1], pts[:, 0])
+        rng = np.hypot(pts[:, 0], pts[:, 1])
+        px, py, th = self._pose_at(msg.header.stamp)
+        lx = px + LIDAR_OFFSET_X * np.cos(th)
+        ly = py + LIDAR_OFFSET_X * np.sin(th)
+        frei = []
+        for sid in kand:
+            sp = om.seats[sid][2]
+            dx, dy = sp[0] - lx, sp[1] - ly
+            d = float(np.hypot(dx, dy))
+            if d > SEAT_CLEAR_MAX_DIST or d < 0.15:
+                continue
+            b = np.arctan2(dy, dx) - th
+            half = np.arctan2(PILLAR_HALF_WIDTH + SEAT_CLEAR_MARGIN, d)
+            kegel = ((np.abs((ang - b + np.pi) % (2 * np.pi) - np.pi) < half)
+                     & (rng > SEAT_CLEAR_MIN_RANGE))
+            if kegel.sum() < 3:
+                continue                       # kein Strahl (Sperrzone, ins Leere)
+            r = rng[kegel]
+            if (r < d - SEAT_RANGE_TOL).any():
+                continue                       # verdeckt: keine Aussage
+            if (r <= d + SEAT_RANGE_TOL).any():
+                self.clear_run[sid] = 0
+                self.clear_treffer[sid] = self.clear_treffer.get(sid, 0) + 1
+                continue
+            self.clear_run[sid] = self.clear_run.get(sid, 0) + 1
+            self.clear_durch[sid] = self.clear_durch.get(sid, 0) + 1
+            if (self.clear_run[sid] >= SEAT_CLEAR_SCANS
+                    and self.clear_durch[sid] >= 2 * self.clear_treffer.get(sid, 0)):
+                frei.append((sid, d))
+        if not frei:
+            return
+        for sid, d in frei:
+            stimmen = dict(om.votes.pop(sid))
+            self.clear_run[sid] = 0
+            si, k, sp, col, row = om.seats[sid]
+            nr = self._seat_id({'straight': si, 'row': row, 'column': col})
+            self.get_logger().warn(
+                f'Sitz #{nr} freigegeben: der LiDAR sieht aus {d:.2f} m '
+                f'{self.clear_durch[sid]}x hindurch (Treffer '
+                f'{self.clear_treffer.get(sid, 0)}), Stimmen waren {stimmen}')
+        self._publish_obstacles_if_changed()
+
+    def _finish_start_scan(self, state, grund=''):
+        self.start_scan_state = state
+        self.start_scan_pub.publish(String(data=state))
+        belegt = {} if self.obstacle_map is None else {
+            self._seat_id(o): o['color'] for o in self.obstacle_map.occupied_seats()}
+        teile, n_belegt = [], 0
+        for sid, _ in self._start_seats():
+            farbe = belegt.get(sid)
+            if farbe in ('red', 'green'):
+                teile.append(f'#{sid} {"rot" if farbe == "red" else "gruen"}')
+                n_belegt += 1
+            elif (self.seat_free.get(sid, 0) >= SEAT_FREE_SCANS
+                  and self.seat_hit.get(sid, 0) * 4 <= self.seat_free.get(sid, 0)):
+                teile.append(f'#{sid} frei')
+            elif self.seat_hit.get(sid, 0) > 0:
+                teile.append(f'#{sid} belegt, Farbe unbekannt')
+                n_belegt += 1
+            else:
+                teile.append(f'#{sid} offen')
+        text = f'Startgerade {state}: ' + ', '.join(teile)
+        if grund:
+            text += f' ({grund})'
+        # Mehr als zwei kann nicht sein (Regel: 1-2 pro Gerade). Null ist
+        # moeglich: die Pylone kann auf dem fernen, nicht geprueften Sitz stehen.
+        if n_belegt > 2:
+            text += f' -- laut Regel hoechstens 2 Pylonen, erkannt {n_belegt}'
+        elif n_belegt == 0:
+            text += ' -- keine in den geprueften Sitzen (ferner Sitz folgt auf der Geraden)'
+        # getrennte Aufrufstellen (rclpy: eine Stufe pro Zeile)
+        if state == 'complete' and n_belegt <= 2:
+            self.get_logger().info(text)
+        else:
+            self.get_logger().warn(text)
+
+    def _bay_opening_filter(self, dets):
+        """Nur Detektionen, die durch die Oeffnung der Bucht gesehen werden.
+
+        Die Buchtwaende enden bei Feld-y = 1,30, der LiDAR steht bei ~1,34 --
+        er schaut also schon ueber die Wandenden hinaus. Zur Innenbande hin
+        ist ein Faecher von rund 146 Grad frei (Wandenden bei etwa -17 und
+        -163 Grad fuer CW). Die Oeffnung liegt bei CW rechts (y < 0 im
+        Roboterframe), bei CCW links.
+
+        Mindestens BAY_VIEW_MIN_LAT seitlich: die Buchtwaende liegen ~4 cm
+        neben dem LiDAR, eine fehlklassifizierte Buchtwand kommt also nicht
+        durch. Die Pylonen der Startgeraden (innere Spalte, Feld-y = 0,9)
+        liegen ~0,44 m seitlich.
+        """
+        if self.direction == 'CW':
+            seite = -1.0
+        elif self.direction == 'CCW':
+            seite = +1.0
+        else:
+            return []                      # Richtung noch nicht bekannt
+        # und nur VOR dem Roboter (x > 0 im base_link, Hinterachse): hinter
+        # ihm steht kein Sitz, der das Ausparken betrifft (siehe _start_seats)
+        return [d for d in dets
+                if seite * d['y'] >= BAY_VIEW_MIN_LAT and d['x'] > 0.0]
+
     def _in_parking_bay(self):
         """Steht der Roboter noch in der Parkluecke?
 
@@ -778,7 +1214,7 @@ class ScanProcessor(Node):
             self.bay_left = True
             self.get_logger().info(
                 f'LiDAR hat die Parkluecke verlassen (Feld-y={y_feld:.2f}) -- '
-                f'Hindernisse zaehlen ab jetzt')
+                f'warte auf Kurs parallel zur Geraden')
         return self.bay_left
 
     # ------------------------------------------------------------------ #
@@ -798,7 +1234,8 @@ class ScanProcessor(Node):
         """
         d_tol, a_tol = GATE_LEVELS[self.gate_level]
         matches = match_walls(measured, self.map_walls, self.pose,
-                              alpha_tol=a_tol, d_tol=d_tol)
+                              alpha_tol=a_tol, d_tol=d_tol,
+                              overlap_tol=GATE_OVERLAP[self.gate_level])
 
         # im weiten Tor ist eine einzelne Wand zu wenig -- das kann genauso
         # ein Rest von Pylone oder Bucht sein wie die richtige Bande
@@ -904,7 +1341,7 @@ class ScanProcessor(Node):
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _front_distance(measured):
+    def _front_distance(measured, kreuzen=False):
         """Abstand zur Frontwand (alpha ~ +-180), oder None.
 
         NICHT einfach die naechste Wand in Fahrtrichtung: aus der Bucht heraus
@@ -927,6 +1364,15 @@ class ScanProcessor(Node):
             d = abs(w[1])
             if d < FRONT_MIN_DIST:
                 continue
+            # kreuzen: das Stueck muss die Fahrlinie (y = 0) schneiden. Nur fuer
+            # den Start auf der Geraden (Einpark-Test): am Anfang der
+            # Startgeraden stand die Westseite der Innenbande 0,66 m voraus --
+            # quer, 1 m lang, aber schraeg rechts vor ihm; als Frontwand
+            # genommen lag die Karte 2 m daneben. Aus der BUCHT geht das nicht:
+            # dort verdeckt die vordere Buchtwand genau die Fahrlinie, sichtbar
+            # ist die Frontwand erst ~0,4 m seitlich.
+            if kreuzen and float(w[2][1]) * float(w[3][1]) > 0.0:
+                continue
             if best is None or d < best:
                 best = d
         return best
@@ -940,9 +1386,6 @@ class ScanProcessor(Node):
         Roboter nicht in der Bucht -- dann keine Stimme.
         """
         left, right = self._side_distances(measured)
-        front = self._front_distance(measured)
-        if front is None:
-            return None
 
         def innen(d):
             return d is not None and BAY_INNER_MIN <= d <= BAY_INNER_MAX
@@ -951,10 +1394,75 @@ class ScanProcessor(Node):
             return d is None or d < BAY_OUTER_MAX
 
         if innen(right) and aussen_frei(left):
-            return ('CW', front, right)
-        if innen(left) and aussen_frei(right):
-            return ('CCW', front, left)
-        return None
+            richtung, d_innen, seite = 'CW', right, -1.0
+        elif innen(left) and aussen_frei(right):
+            richtung, d_innen, seite = 'CCW', left, 1.0
+        else:
+            return None
+        front = self._front_distance(measured)
+        if front is None:
+            front = self._front_ueber_innenbande(measured, seite)
+        if front is None:
+            front = self._front_stueck(measured)
+        if front is None:
+            return None
+        return (richtung, front, d_innen)
+
+    @staticmethod
+    def _front_stueck(measured):
+        """Letzter Rueckfall aus der Bucht: ein kurzes Stueck Frontwand
+        (>= 0,25 m, quer, mindestens FRONT_MIN_DIST voraus).
+
+        In CW sieht er die Ostwand nur durch ein schmales Fenster neben der
+        Innenbande; steht dort eine Pylone, bleiben ~45 cm Wand, 1,4-1,9 m
+        seitlich. Den HNF-Abstand eines so kurzen, seitlich weit entfernten
+        Stuecks verdreht schon ein Fitfehler von 3-4 grad um 10 cm -- also die
+        Lage der Stueckmitte in Fahrtrichtung. Der Roboter steht in der Bucht
+        parallel; der Rest faellt spaeter beim Wandabgleich heraus.
+        Die Buchtwaende (0,20 m, ~0,24 m voraus) fallen ueber den Abstand weg."""
+        best = None
+        for w in measured:
+            if abs(wrap(w[0] - np.pi)) >= FRONT_ALPHA_TOL:
+                continue
+            p1, p2 = np.asarray(w[2]), np.asarray(w[3])
+            if float(np.hypot(*(p2 - p1))) < 0.25:
+                continue
+            x_mitte = 0.5 * float(p1[0] + p2[0])
+            if x_mitte < FRONT_MIN_DIST:
+                continue
+            if best is None or x_mitte < best:
+                best = x_mitte
+        return best
+
+    @staticmethod
+    def _front_ueber_innenbande(measured, seite):
+        """Rueckfall, wenn die Frontwand aus der Bucht nicht zu sehen ist:
+        das vordere Ende der Innenbande neben dem Roboter liegt immer
+        OUTER_HALF - INNER_HALF (1,0 m) vor der Frontwand.
+
+        Aus der Bucht verdeckt die vordere Buchtwand die Fahrlinie; die
+        Frontwand ist nur durch ein Fenster zwischen Buchtwand und Innenbande
+        zu sehen. In CW stand dort eine Pylone -- uebrig blieben 45 cm Wand,
+        als Stueck zu kurz. Die Innenbande dagegen liegt in voller Laenge da.
+        Nur wenn sie praktisch ganz sichtbar ist (>= 0,9 m): dann sind beide
+        Enden echte Enden und keine Abschattung."""
+        best = None
+        for w in measured:
+            # Seitenwand auf der Innenseite: alpha ~ -90 (links) / +90 (rechts)
+            if abs(wrap(w[0] + seite * np.pi / 2.0)) >= SIDE_ALPHA_TOL:
+                continue
+            if not (BAY_INNER_MIN <= abs(w[1]) <= BAY_INNER_MAX):
+                continue
+            p1, p2 = np.asarray(w[2]), np.asarray(w[3])
+            if float(np.hypot(*(p2 - p1))) < 0.9:
+                continue
+            vorn = max(float(p1[0]), float(p2[0]))
+            if vorn <= 0.0:
+                continue
+            f = vorn + (OUTER_HALF - INNER_HALF)
+            if best is None or f < best:
+                best = f
+        return best
 
     def _bay_start_step(self, measured):
         """Im Stand in der Bucht abstimmen, dann Karte, Richtung und Sitzraster
@@ -1001,6 +1509,99 @@ class ScanProcessor(Node):
 
         # Karte, Eckengeometrie, Innenband, Sitzraster -- alles an der Richtung
         self._latch_direction(richtung, 'bay')
+        self.get_logger().info(
+            f'Hindernisse aus der Bucht: nur zur Oeffnung '
+            f'({"rechts" if richtung == "CW" else "links"}), mindestens '
+            f'{BAY_VIEW_MIN_LAT:.2f} m seitlich')
+        self.bay_phase = 'parked'
+        self.bay_odo_weg = 0.0
+        self.bay_odo_dreh = 0.0
+        self.bay_odo_t = None
+        self.start_scan_state = 'scanning'
+        self.start_scan_t0 = time.monotonic()
+        self.start_scan_pub.publish(String(data='scanning'))
+        self._publish_front_wall_x()
+
+    def _gerade_front(self, measured, richtung):
+        """Abstand zur Frontwand beim Start auf der Startgeraden, und woher.
+
+        1. Frontwand: quer, lang, kreuzt die Fahrlinie.
+        2. Sonst die nahe Stirnseite der Innenbande: quer, ganz auf der
+           Innenseite (CW rechts, CCW links), 0,35-1,8 m seitlich. Ihre nahe
+           Stirnseite steht immer 2,0 m vor der Frontwand (Innenbande +-0,5,
+           Bande +-1,5). Am
+           Anfang der Geraden ist sie oft die einzige sichtbare Querwand --
+           im CW-Test lag etwas quer auf der Spur und verdeckte die Ostwand.
+        (None, None), wenn keins von beiden.
+        """
+        innen = -1.0 if richtung == 'CW' else 1.0
+        front = stirn = None
+        for w in measured:
+            if abs(wrap(w[0] - np.pi)) >= FRONT_ALPHA_TOL:
+                continue
+            d = abs(w[1])
+            if d < 0.3:
+                continue
+            laenge = float(np.hypot(*(np.asarray(w[3]) - np.asarray(w[2]))))
+            y1, y2 = float(w[2][1]), float(w[3][1])
+            if y1 * y2 <= 0.0:
+                if laenge >= FRONT_MIN_LEN and d >= FRONT_MIN_DIST:
+                    front = d if front is None else min(front, d)
+                continue
+            if (innen * y1 > 0.0 and laenge >= 0.40
+                    and min(abs(y1), abs(y2)) >= 0.35 and max(abs(y1), abs(y2)) <= 1.8):
+                stirn = d if stirn is None else min(stirn, d)
+        if front is not None:
+            return front, 'Frontwand'
+        if stirn is not None:
+            return stirn + OUTER_HALF + INNER_HALF, 'Innenbande'
+        return None, None
+
+    def _gerade_start_step(self, measured):
+        """Einpark-Test: im Stand auf der Startgeraden Frontwand und
+        Aussenbande messen, dann Karte, Richtung und Sitzraster aufbauen."""
+        richtung = self.start_gerade
+        links, rechts = self._side_distances(measured)
+        aussen = rechts if richtung == 'CCW' else links
+        front, quelle = self._gerade_front(measured, richtung)
+        if front is None or aussen is None or not (0.10 <= aussen <= 0.95):
+            return
+        if front < 1.0:
+            # Am Anfang der Startgeraden liegen 2,3-2,7 m vor ihm. So nah: er
+            # steht am Ende der Geraden oder falsch herum.
+            self.get_logger().warn(
+                f"[Einpark-Test] Frontwand nur {front:.2f} m voraus -- er muss am "
+                f"ANFANG der Startgeraden stehen, Nase Richtung Luecke "
+                f"({richtung}). Warte.", throttle_duration_sec=2.0)
+            return
+        self.gerade_votes.append((front, aussen, quelle))
+        if len(self.gerade_votes) < START_VOTES:
+            return
+        front_d = float(np.median([v[0] for v in self.gerade_votes]))
+        d_aussen = float(np.median([v[1] for v in self.gerade_votes]))
+        quellen = '/'.join(sorted({v[2] for v in self.gerade_votes}))
+        y = OUTER_HALF - d_aussen
+        if richtung == 'CCW':
+            self.test_pose_field = (front_d - OUTER_HALF, y, np.pi)
+        else:
+            self.test_pose_field = (OUTER_HALF - front_d, y, 0.0)
+        self.position = 'gerade'
+        self.lane_width = 1.0
+        self.commit_pose = self.pose
+        # Luecke fuer die Maske (sonst werden die Magenta-Waende zu Waenden)
+        fb = self.test_bucht_front if self.test_bucht_front > 0.0 else (
+            1.245 if richtung == 'CCW' else 1.96)
+        yb = OUTER_HALF - self.test_bucht_q
+        self.bay_pose_field = ((fb - OUTER_HALF, yb, np.pi) if richtung == 'CCW'
+                               else (OUTER_HALF - fb, yb, 0.0))
+        xf, yf, thf = self.test_pose_field
+        self.get_logger().info(
+            f'[Einpark-Test] Start auf der Startgeraden: {richtung}, '
+            f'Front={front_d:.3f} m (aus {quellen}), Aussenbande={d_aussen:.3f} m -> Feldpose '
+            f'({xf:+.3f}, {yf:+.3f}, {np.degrees(thf):+.0f} deg); Luecke '
+            f'angenommen {fb:.3f} m vor der Frontwand, {self.test_bucht_q:.3f} m '
+            f'von der Aussenbande')
+        self._latch_direction(richtung, 'Einpark-Test')
         self._publish_front_wall_x()
 
     def _init_obstacle_map(self, start_pose):

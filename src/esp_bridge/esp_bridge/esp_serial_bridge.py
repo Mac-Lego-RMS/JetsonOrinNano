@@ -1052,11 +1052,17 @@ def _build_node_class():
                 self._v_ramp = 0.0
                 return
 
-            # kein aktuelles /cmd_vel -> anhalten, Integrator zuruecksetzen
+            # kein aktuelles /cmd_vel -> anhalten, Integrator UND Rampe
+            # zuruecksetzen. Ohne die Rampe blieb nach einem mitten in der
+            # Fahrt beendeten Lauf v_ramp auf ~0,35 m/s stehen; das erste
+            # /cmd_vel des naechsten Laufs (v = 0) rampte dann erst von 0,35
+            # herunter und fuhr ihn dabei 7-13 cm vor -- aus der Parkluecke,
+            # vor dem ersten Ausparkzug (parken_test_21, 22, 25).
             if (self._cmd_vel_timeout > 0 and
                     (self._last_cmd_vel == 0.0 or
                      now - self._last_cmd_vel > self._cmd_vel_timeout)):
                 self._vel_integral = 0.0
+                self._v_ramp = 0.0
                 self.link.motor(0)
                 return
 
