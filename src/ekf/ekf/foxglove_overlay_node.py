@@ -32,9 +32,12 @@ Publishes:  /tf, /tf_static
             /jtop/temp/{cpu,gpu,soc,tj}  thermal zones [degC]
             /diagnostics       the same numbers with WARN/ERROR levels
 """
+import array
 import math
 import threading
+import time
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, DurabilityPolicy, ReliabilityPolicy,
@@ -307,6 +310,10 @@ class FoxgloveOverlay(Node):
 
         self.field_hz = self.declare_parameter('field_rate', 2.0).value
         self.robot_hz = self.declare_parameter('robot_rate', 10.0).value
+        # Die Unsicherheits-Ellipse kam mit jeder Odometrie (45 Hz) -- fuers
+        # Auge reichen 10 Hz, und der Rechner ist im Lauf ausgelastet.
+        self.unc_hz = self.declare_parameter('uncertainty_rate', 10.0).value
+        self._unc_letzt = 0.0
         self.publish_scan_used = self.declare_parameter('publish_scan_used', True).value
         # 2.0 = ~86 % confidence in 2D. Use 2.448 for a proper 95 % ellipse
         # (sqrt of the chi-square 2-DOF quantile).
@@ -722,6 +729,11 @@ class FoxgloveOverlay(Node):
         """Covariance ellipse + heading wedge from /ekf/odom.pose.covariance."""
         if 'uncertainty' in self.hidden:
             return
+        if self.unc_hz > 0.0:
+            jetzt = time.monotonic()
+            if jetzt - self._unc_letzt < 1.0 / self.unc_hz:
+                return
+            self._unc_letzt = jetzt
         c = msg.pose.covariance
         cxx, cxy, cyy, cthth = c[0], c[1], c[7], c[35]
         if cxx <= 0.0 and cyy <= 0.0:
@@ -856,15 +868,15 @@ class FoxgloveOverlay(Node):
         out.scan_time = msg.scan_time
         out.range_min = msg.range_min
         out.range_max = msg.range_max
-        nan = float('nan')
-        keep = []
-        for i, r in enumerate(msg.ranges):
-            a = msg.angle_min + i * msg.angle_increment
-            ok = (r == r and msg.range_min <= r <= msg.range_max
-                  and r <= MAX_RANGE and abs(a) > BLOCK_ANGLE)
-            keep.append(r if ok else nan)
-        out.ranges = keep
-        out.intensities = list(msg.intensities)
+        # numpy statt Python-Schleife: ~3200 Punkte je Scan, 15 Hz. Die Schleife
+        # plus Zuweisung einer Liste (rclpy prueft dann jedes Element einzeln)
+        # kostete 7,9 ms je Scan; als array.array geht es ungeprueft durch.
+        r = np.asarray(msg.ranges, dtype=np.float32)
+        a = msg.angle_min + np.arange(r.size) * msg.angle_increment
+        ok = (np.isfinite(r) & (r >= msg.range_min)
+              & (r <= min(msg.range_max, MAX_RANGE)) & (np.abs(a) > BLOCK_ANGLE))
+        out.ranges = array.array('f', np.where(ok, r, np.float32('nan')).tobytes())
+        out.intensities = msg.intensities
         self.pub_scan.publish(out)
 
     def wm_cb(self, msg):

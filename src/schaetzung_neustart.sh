@@ -29,7 +29,11 @@ SESSION=${SESSION:-robot_session}
 CONTAINER=${CONTAINER:-yolo_dev}
 RACE_MODE=${RACE_MODE:-obstacle}
 AUSPARKEN=${AUSPARKEN:-true}
-ROS_SETUP="source /opt/ros/humble/setup.bash && source /workspace/install/setup.bash"
+# OPENBLAS_NUM_THREADS=1: numpy (OpenBLAS) startet sonst bei np.linalg.inv
+# schon auf einer 2x2-Matrix einen Worker-Thread, der danach aktiv wartet. Im
+# ekf_node (inv bei jedem Wandtreffer, ~14 Hz) verbrannte der dauerhaft 0,9
+# Kerne -- im Stand gemessen, ohne jeden Nutzen. Mit 1 Thread: 0 %.
+ROS_SETUP="export OPENBLAS_NUM_THREADS=1 && source /opt/ros/humble/setup.bash && source /workspace/install/setup.bash"
 WARTEN=1
 VERZ=0
 BEREIT_TIMEOUT=30

@@ -121,8 +121,9 @@ CAM_WB_TEMP=4600
 # FUSION_DEBUG im Wettkampflauf auf false: das Debug-Bild ist mit Abstand der
 # teuerste Posten (38 Prozent eines Kerns, obwohl es nur mit 5 Hz laeuft --
 # Zeichnen und Polar-Entzerrung auf 1280x960 kosten). Ohne Debug bleiben rund
-# 56 Prozent fuer Klassifikation und Bandenerkennung.
-FUSION_DEBUG=true
+# 56 Prozent fuer Klassifikation und Bandenerkennung. Seit 29.09. aus: alle
+# 6 Kerne standen im Lauf bei ~90 %.
+FUSION_DEBUG=false
 FUSION_ZONE_FRAC=0.5      # Stimmenanteil; bei 0.5 blieben genau die echten
                           # Pylonen uebrig, bei 0.2 waren es 7 statt 2 Cluster
 FUSION_RANGE_MIN=0.15     # darunter sieht das Lidar den eigenen Aufbau
@@ -261,7 +262,11 @@ START_CALIB=0
 # fast nie die Pylone.
 CALIB_TARGET_COLOR=gruen
 
-ROS_SETUP="source /opt/ros/humble/setup.bash && source /workspace/install/setup.bash"
+# OPENBLAS_NUM_THREADS=1: numpy (OpenBLAS) startet sonst bei np.linalg.inv
+# schon auf einer 2x2-Matrix einen Worker-Thread, der danach aktiv wartet. Im
+# ekf_node (inv bei jedem Wandtreffer, ~14 Hz) verbrannte der dauerhaft 0,9
+# Kerne -- im Stand gemessen, ohne jeden Nutzen. Mit 1 Thread: 0 %.
+ROS_SETUP="export OPENBLAS_NUM_THREADS=1 && source /opt/ros/humble/setup.bash && source /workspace/install/setup.bash"
 
 # ------------------------------------------------------------------ #
 # Hilfsfunktion: ein Kommando in einem eigenen tmux-Fenster im Container
