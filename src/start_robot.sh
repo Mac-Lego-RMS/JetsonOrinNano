@@ -235,6 +235,13 @@ RACE_MODE=obstacle
 # Runden. Nur fuer die vorbereitete Zeile in Fenster 6.
 N_CORNERS=12
 
+# Tempo-Profil fuer round1: langsam | mittel | schnell | eigen (= die
+# Einzelwerte v_drive, v_turn, ... im Regler). TEMPO_RUNDE1 gilt nur fuer die
+# Scan-Runde, gleich = wie TEMPO. Die Werte stehen in TEMPO_PROFILE in
+# round1_controller_node.py.
+TEMPO=schnell
+TEMPO_RUNDE1=gleich
+
 # Startet der Roboter in der Parkluecke?
 #
 # EIN Schalter fuer zwei Knoten, absichtlich: er setzt den Regler auf
@@ -585,7 +592,7 @@ RACE_MODE=$RACE_MODE AUSPARKEN=$AUSPARKEN SESSION=$SESSION CONTAINER=$CONTAINER 
 # (ekf/schaetzung_neustart.py, ueber den Waechter in Fenster 11) und wartet,
 # bis Gyro und Buchterkennung stehen.
 arm_window 6 round1 \
-    "ros2 run ekf round1_controller --ros-args -p n_corners:=$N_CORNERS -p ausparken:=$AUSPARKEN"
+    "ros2 run ekf round1_controller --ros-args -p n_corners:=$N_CORNERS -p ausparken:=$AUSPARKEN -p tempo:=$TEMPO -p tempo_runde1:=$TEMPO_RUNDE1"
 
 # Fenster 11: Neustart-Waechter, auf dem Jetson (nicht im Container). Fuehrt
 # die Neustart-Anfragen von round1_controller und ausparken_varianten_node aus

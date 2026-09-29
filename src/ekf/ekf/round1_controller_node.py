@@ -41,6 +41,8 @@ import sys
 import time
 import math
 
+import numpy as np
+
 import rclpy
 import rclpy.logging
 from rclpy.node import Node
@@ -57,7 +59,7 @@ from ekf.ausparken import (FZ_BREITE, FZ_HECK, FZ_NASE, LUECKE_LAENGE, LUECKE_TI
                            LENK_KENNLINIE, RADSTAND,
                            bahn, cm_zu_grad, grad_zu_cm, richtung_aus_scan,
                            schritte_aus_flach, schritte_fuer, simuliere,
-                           spiegeln, einparkfolge)
+                           spiegeln, einparkfolge, lenk_auf_leitung)
 from ekf.wall_extraction import scan_to_points
 import ekf.ausparken as _ausparken_modul
 # Folgen einzeln und robust holen: ein fehlender Name in ausparken.py soll den
@@ -85,6 +87,21 @@ AUSPARK_VARIANTEN = {
 # zusaetzlichen Import auskommt.
 OBST_UNBEKANNT, OBST_ROT, OBST_GRUEN = 0, 1, 2
 BLOCK_HALB = 0.022          # 44 mm / 2
+
+# Tempo-Profile: -p tempo:=langsam|mittel|schnell setzt diese fuenf Tempi auf
+# einmal ('eigen' = die Einzelparameter). tempo_runde1 gilt nur in der
+# Scan-Runde -- dort entscheidet die Kamera, und die erkennt Gruen bisher nur
+# im Stand oder langsam. Einzeln per -p gesetzte Tempi haben Vorrang.
+TEMPO_PROFILE = {
+    'langsam': dict(v_drive=0.35, v_turn=0.35, v_obstacle=0.35,
+                    v_obstacle_steep=0.35, v_steiler_pfad=0.22),
+    'mittel':  dict(v_drive=0.55, v_turn=0.45, v_obstacle=0.45,
+                    v_obstacle_steep=0.40, v_steiler_pfad=0.30),
+    'schnell': dict(v_drive=0.75, v_turn=0.55, v_obstacle=0.55,
+                    v_obstacle_steep=0.55, v_steiler_pfad=0.35),
+}
+TEMPO_KEYS = ('v_drive', 'v_turn', 'v_obstacle', 'v_obstacle_steep', 'v_steiler_pfad')
+LIDAR_X = 0.1101            # LiDAR vor der Hinterachse (wall_extraction.LIDAR_OFFSET_X)
 
 
 def yaw_from_quaternion(q):
@@ -480,12 +497,35 @@ class Round1Controller(Node):
         'v_park_anfahrt':        ('v_park_anfahrt',        0.15, float),
         'steiler_pfad_ab':       ('steiler_pfad_ab',       0.60, float),   # quer je laengs
         'v_steiler_pfad':        ('v_steiler_pfad',        0.35, float),
+        # Tempo-Profil (TEMPO_PROFILE), 'eigen' = Einzelwerte. tempo_runde1:
+        # eigenes Profil fuer die Scan-Runde, 'gleich' = wie tempo.
+        'tempo':                 ('tempo',                 'eigen', str),
+        'tempo_runde1':          ('tempo_runde1',          'gleich', str),
+        # VORHALT in der Scan-Runde, zusaetzlich zum Scan-Halt: so weit vor der
+        # Frontwand kurz stehen, dass er die LETZTE Pylone der Geraden (Reihe 0,
+        # ~1 m vor der Frontwand) im Stand sieht und noch ausweichen kann. Der
+        # Scan-Halt bei 1,10 m stand genau neben ihr -- Gruen erkennt die
+        # Kamera erst im Stand, und dann fehlte der Platz (Lauf 48: falsche
+        # Seite, Lauf 49: in die Innenbande und wieder falsche Seite). 0 = aus.
+        'scan_vorhalt_front':    ('scan_vorhalt_front',    1.85, float),
+        'scan_vorhalt_s':        ('scan_vorhalt_s',        1.2, float),
+        # NOTFALL-RANGIEREN statt Nothalt: ist der Bogen hinter T_A nicht mehr
+        # fahrbar oder steht etwas direkt vor der Nase, setzt er zurueck und
+        # plant neu. rangier_anstoss: so nah (m vor der Nase, in Wagenbreite)
+        # darf der LiDAR etwas sehen, dann Stopp. rangier_max je Ecke.
+        'rangieren':             ('rangieren',             1.0, lambda v: bool(float(v))),
+        'rangier_max':           ('rangier_max',           2, int),
+        'rangier_anstoss':       ('rangier_anstoss',       0.04, float),
+        'rangier_weg':           ('rangier_weg',           0.15, float),
         # Startpose um so viel UEBERFAHREN, anhalten und geregelt rueckwaerts
         # (PARK_RUECK) zurueck. Vorwaerts bleiben nach der letzten Kurve nur
         # ~0,3 m bis zur Startpose -- zu wenig, um Kurs und Querlage
         # einzuschwingen (Lauf 35: +20 grad an der Startpose). Rueckwaerts
         # regelt er Kurs UND Querlage stetig nach. 0 = aus (wie bisher).
-        'einparken_ueberfahren': ('einparken_ueberfahren', 0.30, float),
+        # _cw/_ccw je Richtung: in CCW (Lauf 48) blieb nach dem Zuruecksetzen
+        # -7 grad Kurs, und der zweite Einparkzug fuhr in die Magenta-Wand.
+        'einparken_ueberfahren_cw':  ('einparken_ueberfahren_cw',  0.30, float),
+        'einparken_ueberfahren_ccw': ('einparken_ueberfahren_ccw', 0.0, float),
         # Die geregelte Anfahrt haelt so weit VOR der Startpose an. Nach dem
         # Stopp rollt er noch nach (Totzeit + Bremsweg) und lag in den Laeufen
         # 9/15/16 dadurch 1,7-4 cm HINTER der Startpose -- der Restzug in
@@ -749,6 +789,9 @@ class Round1Controller(Node):
         self.obs_path_end_q = None        # lateral offset the path ends on (= corner entry)
         self._path_idx = 0                # nearest-segment cursor for path following
         self.scan_done_this_straight = False   # scan pause fires once per straight
+        self.vorhalt_done_this_straight = False  # Vorhalt ebenso (nur Scan-Runde)
+        self.scan_halt_dauer = 1.5             # Dauer des laufenden Halts
+        self.rangier_versuche = 0              # Notfall-Rangieren je Ecke
         self.scan_pause_t0 = 0.0
         self.last_odom_time = None
         self.button_pressed = False
@@ -812,6 +855,11 @@ class Round1Controller(Node):
         # data = [corner_idx, corner_count, lap]  (lap = corner_count // 4)
         # latched: a later-starting perception node still gets the current state.
         self.pub_lap = self.create_publisher(Int32MultiArray, '~/lap_state', latched)
+
+        # Anstoss-Schutz: sieht der LiDAR etwas direkt vor der Nase, anhalten
+        # und rangieren, statt weiter gegen die Bande zu druecken (Lauf 49:
+        # 3 s mit drehenden Raedern an der Innenbande).
+        self.create_subscription(LaserScan, '/scan', self.anstoss_scan_cb, 5)
 
         # Nur fuers Ausparken (und den Einpark-Test, der dieselben ESP-Zuege
         # faehrt). Bewusst nicht immer angelegt -- sonst haengt der Regler ohne
@@ -886,6 +934,12 @@ class Round1Controller(Node):
         for name, (attr, _default, conv) in self._PARAMS.items():
             setattr(self, attr, conv(self.get_parameter(name).value))
         self._load_lists()
+        # Tempo: Einzelwerte merken; per -p gesetzte schlagen das Profil.
+        self._tempo_einzeln = {k: getattr(self, k) for k in TEMPO_KEYS}
+        ueber = getattr(self, '_parameter_overrides', None) or {}
+        self._tempo_explizit = {k for k in TEMPO_KEYS if k in ueber}
+        self._tempo_stand = None
+        self._tempo_anwenden()
 
     def _load_lists(self):
         self.o_in_list = [float(v) for v in self.get_parameter('o_in_list').value]
@@ -903,7 +957,43 @@ class Round1Controller(Node):
                 self.o_out_list = [float(v) for v in p.value]
             elif p.name == 'turn_radius_list':
                 self.R_list = [float(v) for v in p.value]
+        tempo_neu = False
+        for p in params:
+            if p.name in TEMPO_KEYS:
+                self._tempo_einzeln[p.name] = float(p.value)
+                self._tempo_explizit.add(p.name)
+                tempo_neu = True
+            elif p.name in ('tempo', 'tempo_runde1'):
+                tempo_neu = True
+        if tempo_neu:
+            self._tempo_anwenden()
         return SetParametersResult(successful=True)
+
+    def _tempo_anwenden(self):
+        """Tempo-Profil der aktuellen Runde auf v_drive & Co. legen."""
+        runde = getattr(self, 'corner_count', 0) // 4
+        name = self.tempo
+        if runde == 0 and self.tempo_runde1 not in ('', 'gleich'):
+            name = self.tempo_runde1
+        profil = TEMPO_PROFILE.get(name)
+        if profil is None and name != 'eigen':
+            self.get_logger().warn(
+                "Tempo-Profil '%s' unbekannt (%s oder eigen) -- nimmt die Einzelwerte."
+                % (name, '/'.join(TEMPO_PROFILE)))
+        werte = {}
+        for k in TEMPO_KEYS:
+            werte[k] = (self._tempo_einzeln[k] if profil is None or k in self._tempo_explizit
+                        else profil[k])
+            setattr(self, k, werte[k])
+        stand = (name, tuple(werte[k] for k in TEMPO_KEYS))
+        if stand != self._tempo_stand:
+            self._tempo_stand = stand
+            einzeln = sorted(self._tempo_explizit) if profil is not None else []
+            self.get_logger().info(
+                "Tempo Runde %d: Profil '%s' -- %s%s."
+                % (runde + 1, name if profil is not None else 'eigen',
+                   ', '.join('%s %.2f' % (k, werte[k]) for k in TEMPO_KEYS),
+                   (' (einzeln gesetzt: %s)' % ', '.join(einzeln)) if einzeln else ''))
 
     def _entry_wall_idx(self, idx):
         """Wall index of the straight the robot is currently ON (entering corner idx).
@@ -1446,6 +1536,12 @@ class Round1Controller(Node):
         changed = (self.obstacles is None or
                    {(o['id'], o['color']) for o in obs} !=
                    {(o['id'], o['color']) for o in self.obstacles})
+        o_out_alt = None
+        if changed and self.state == 'DRIVE' and self.arc is not None:
+            try:
+                o_out_alt = self.corner_o_out(self.corner_idx)
+            except Exception:
+                o_out_alt = None
         self.obstacles = obs
         if changed:
             self.get_logger().info(
@@ -1453,7 +1549,38 @@ class Round1Controller(Node):
                 ", ".join(f"id{o['id']}(w{o['wall']},"
                           f"{'gruen' if o['color']==2 else 'rot'})" for o in obs))
         if self.state in ('DRIVE', 'SCAN_PAUSE') and self.arc is not None:
+            if o_out_alt is not None and self._ecke_neu_planen(o_out_alt):
+                return
             self.plan_obstacle_path()
+
+    def _ecke_neu_planen(self, o_out_alt):
+        """Pylone auf der Geraden NACH der Ecke kam erst nach dem Planen der
+        Ecke herein: Ecke neu planen, wie nach dem Scan-Halt. Lauf 48: das
+        Rot am Anfang von Gerade 2 hatte 0,17 s nach dem Scan-Halt genug
+        Stimmen, die Ecke blieb bei o_out 0,50, und er fuhr innen am Rot
+        vorbei. True = neu geplant (inkl. Hindernispfad)."""
+        try:
+            o_out = self.corner_o_out(self.corner_idx)
+        except Exception:
+            return False
+        if abs(o_out - o_out_alt) < 0.05 or self.pose is None:
+            return False
+        alt_arc = self.arc
+        old_TA = alt_arc['T_A']
+        self.arc = None
+        if not self.plan_arc(self.pose[2], o_in_override=alt_arc.get('o_in')) \
+                or self.arc is None:
+            self.arc = alt_arc
+            return False
+        self.plan_obstacle_path()
+        tr = self.arc['travel']
+        new_TA = self.arc['T_A']
+        shift = (new_TA[0] - old_TA[0]) * tr[0] + (new_TA[1] - old_TA[1]) * tr[1]
+        self.get_logger().warn(
+            f"Neue Pylone hinter Ecke {self.corner_count + 1}: Ausfahrt o_out "
+            f"{o_out_alt:.2f} -> {o_out:.2f}, Ecke neu geplant (Einlenkpunkt "
+            f"{shift:+.2f} m).")
+        return True
 
     def _start_wand(self):
         """Index der Startgeraden: die Wand, an der er in der Luecke stand."""
@@ -2274,6 +2401,8 @@ class Round1Controller(Node):
                     self.park_mittel = []
                 elif self.ausp_modus == 'zurueck':
                     self._erste_ecke_zurueck_fertig(x, y, theta)
+                elif self.ausp_modus == 'rangieren':
+                    self._rangieren_fertig(x, y, theta)
                 else:
                     self._ausparken_fertig(x, y, theta)
                 return
@@ -2351,6 +2480,12 @@ class Round1Controller(Node):
                         "Weg stimmt aber (%.1f statt %.1f cm) -- weiter. "
                         "Wenn das bei jedem Zug passiert, minduty erhoehen."
                         % (self.ausp_index + 1, gefahren * 100, erwartet * 100))
+                elif status != 0 and self.ausp_modus == 'rangieren':
+                    # Rangieren: auch ein halber Rueckweg hilft -- neu planen.
+                    self.get_logger().warn(
+                        "Rangieren: Zug nicht ganz gefahren (Status %d, %.1f statt "
+                        "%.1f cm) -- plant trotzdem neu."
+                        % (status, gefahren * 100, erwartet * 100))
                 elif status != 0:
                     # MOVE_OK/TIMEOUT/ABORTED aus esp_serial_bridge.py. Status 2
                     # heisst: irgendetwas hat einen Motorbefehl geschickt und
@@ -2817,7 +2952,8 @@ class Round1Controller(Node):
         nicht, und rueckwaerts faehrt er stur die Parklinie). Unter der
         Rueckfahr-Schwelle lohnt es nicht -- dann wie bisher."""
         self.park_ueber = 0.0
-        weite = self.einparken_ueberfahren
+        weite = (self.einparken_ueberfahren_ccw if self.race_direction == 'CCW'
+                 else self.einparken_ueberfahren_cw)
         if weite <= 0.0 or self.park_start is None or self.park_lok_unsicher:
             return
         try:
@@ -3446,6 +3582,87 @@ class Round1Controller(Node):
             "Zurueckgesetzt: Pose (%.2f, %.2f), Kurs %+.1f grad. Weiter zum Rennen."
             % (x, y, math.degrees(theta)))
 
+    # ------------------------------------------------ Notfall-Rangieren
+    def _rangieren(self, weg, grund):
+        """Statt Nothalt: ein Stueck zuruecksetzen und neu planen. Rueckwaerts
+        wird dabei zur Fahrtrichtung der Geraden hin gelenkt, damit er nach
+        dem Zug nicht wieder schraeg auf dieselbe Bande zeigt. True = Zug laeuft."""
+        if (not self.rangieren or self.pose is None or not hasattr(self, 'pub_move')
+                or self.rangier_versuche >= self.rangier_max):
+            if self.rangieren and self.rangier_versuche >= self.rangier_max:
+                self.get_logger().error(
+                    "Rangieren: schon %d Versuche an dieser Ecke -- gibt auf (%s)."
+                    % (self.rangier_versuche, grund))
+            return False
+        x, y, th = self.pose
+        lenk = 0.0
+        if self.arc is not None:
+            tr = self.arc['travel']
+            fehler = wrap(th - math.atan2(tr[1], tr[0]))
+            # rueckwaerts dreht Linkseinschlag den Kurs nach rechts
+            lenk = max(-100.0, min(100.0, 100.0 * fehler / math.radians(30.0)))
+        weg = max(0.08, min(weg, 0.40))
+        befehl = -weg / max(self.einparken_zug_skala, 0.5)
+        self.rangier_versuche += 1
+        self.publish_stop()
+        self.get_logger().warn(
+            "NOTFALL-RANGIEREN %d/%d: %s -- setzt %.0f cm zurueck (Lenkung %+.0f %%, "
+            "Kurs %+.0f grad zur Geraden), dann neu planen."
+            % (self.rangier_versuche, self.rangier_max, grund, weg * 100, lenk,
+               math.degrees(fehler) if self.arc is not None else 0.0))
+        self.rangier_zustand_vorher = self.state
+        self.ausp_schritte_vor_rangieren = list(self.ausp_schritte)
+        self.ausp_pos_prev = None
+        self._ausparken_pid(self.ausparken_pid)
+        self._park_zuege_starten([(lenk_auf_leitung(lenk), befehl * 100.0)], 'rangieren')
+        return True
+
+    def _rangieren_fertig(self, x, y, theta):
+        self.ausp_schritte = self.ausp_schritte_vor_rangieren
+        self.ausp_pos_prev = None
+        self._ausparken_pid(self.ausparken_pid_nachher)
+        self.publish_stop()
+        keep_o_in = self.arc.get('o_in') if self.arc else None
+        self.arc = None
+        self.obs_path = None
+        self.plan_arc(theta, o_in_override=keep_o_in)
+        self.plan_obstacle_path()
+        if not self.obs_path:
+            self._rueckfuehr_pfad()
+        self.state = 'DRIVE'
+        self.get_logger().info(
+            "Rangiert: Pose (%.2f, %.2f), Kurs %+.1f grad -- neu geplant, weiter."
+            % (x, y, math.degrees(theta)))
+
+    def anstoss_scan_cb(self, msg):
+        """Etwas direkt vor der Nase (in Wagenbreite)? Dann anhalten und
+        rangieren. Nur vorwaerts in DRIVE/TURN -- Aus- und Einparken fahren
+        absichtlich dicht an die Waende."""
+        if (not self.rangieren or self.rangier_anstoss <= 0.0
+                or self.state not in ('DRIVE', 'TURN') or self.last_cmd[0] < 0.05):
+            return
+        r = np.asarray(msg.ranges, dtype=np.float64)
+        a = msg.angle_min + np.arange(r.size) * msg.angle_increment
+        ok = np.isfinite(r) & (r >= msg.range_min) & (r < 0.5)
+        if not ok.any():
+            return
+        r, a = r[ok], a[ok]
+        bx = -r * np.cos(a) + LIDAR_X          # Hinterachse, +x vorn
+        by = -r * np.sin(a)
+        vorn = (bx > FZ_NASE - 0.03) & (np.abs(by) < FZ_BREITE / 2.0 + 0.01)
+        luft = bx[vorn] - FZ_NASE
+        if np.count_nonzero(luft < self.rangier_anstoss) < 3:
+            return
+        abstand = float(np.sort(luft)[2])
+        if not self._rangieren(self.rangier_weg,
+                               "etwas %.0f cm vor der Nase (Zustand %s)"
+                               % (abstand * 100, self.state)):
+            self.state = 'DONE'
+            self.publish_stop()
+            self.get_logger().error(
+                "NOTSTOP: etwas %.0f cm vor der Nase, Rangieren nicht moeglich."
+                % (abstand * 100))
+
     def publish_lap_state(self):
         """Publish [corner_idx, corner_count, lap] for the perception side.
         corner_idx = corner currently being approached (0..3, box index)
@@ -3485,7 +3702,10 @@ class Round1Controller(Node):
         v0 = self.v_finish_min
         nachlauf = (v0 * self.scan_nachlauf_t + v0 * v0 / (2.0 * max(self.scan_brems_a, 0.1))
                     if self.scan_brems_a > 0.0 else self.scan_nachlauf)
-        rest = front_dist - self.scan_front_dist - nachlauf
+        ziel = self.scan_front_dist
+        if not self.vorhalt_done_this_straight and self.scan_vorhalt_front > 0.0:
+            ziel = max(ziel, self.scan_vorhalt_front)
+        rest = front_dist - ziel - nachlauf
         return max(self.v_finish_min,
                    math.sqrt(2.0 * self.scan_verzoegerung * max(rest, 0.0)))
 
@@ -4056,7 +4276,7 @@ class Round1Controller(Node):
         the new T_A already lies behind us.
         """
         self.publish_stop()
-        left = self.scan_pause_s - (self.now_s() - self.scan_pause_t0)
+        left = self.scan_halt_dauer - (self.now_s() - self.scan_pause_t0)
         if left > 0.0:
             self.get_logger().info(
                 f"SCAN-HALT ({left:.1f}s verbleibend) bei ({x:.2f},{y:.2f}).",
@@ -4122,6 +4342,7 @@ class Round1Controller(Node):
         if not hier:
             return
         self.scan_done_this_straight = True
+        self.vorhalt_done_this_straight = True
         w = self._entry_wall_idx(self.corner_idx)
         nx, ny, dw = self.walls[w]
         q = (nx * x + ny * y) - dw
@@ -4340,8 +4561,26 @@ class Round1Controller(Node):
                             + v_n * v_n / (2.0 * self.scan_brems_a))
             else:
                 nachlauf = self.scan_nachlauf
+            if (not self.vorhalt_done_this_straight and self.scan_vorhalt_front > 0.0
+                    and front_dist <= self.scan_vorhalt_front + nachlauf):
+                self.vorhalt_done_this_straight = True
+                # Nur, wenn danach noch Platz fuer den Scan-Halt bleibt -- kommt
+                # er schon naeher aus der Kurve, entfaellt der Vorhalt.
+                if front_dist - nachlauf >= self.scan_front_dist + 0.25:
+                    self.scan_halt_dauer = self.scan_vorhalt_s
+                    self.scan_pause_t0 = self.now_s()
+                    self.state = 'SCAN_PAUSE'
+                    self.publish_stop()
+                    self.get_logger().info(
+                        f"VORHALT (Runde {self.corner_count // 4 + 1}): "
+                        f"{self.scan_vorhalt_s:.1f}s, Frontwand {front_dist:.2f} m "
+                        f"(Soll {self.scan_vorhalt_front:.2f}, Nachlauf "
+                        f"{nachlauf*100:.0f} cm) -- letzte Pylone der Geraden im Stand ansehen.")
+                    return
             if front_dist <= self.scan_front_dist + nachlauf:
                 self.scan_done_this_straight = True
+                self.vorhalt_done_this_straight = True
+                self.scan_halt_dauer = self.scan_pause_s
                 self.scan_pause_t0 = self.now_s()
                 self.state = 'SCAN_PAUSE'
                 self.publish_stop()
@@ -4388,6 +4627,10 @@ class Round1Controller(Node):
                 # hinter T_A: den Bogen an der Ist-Pose verankern, statt einem
                 # Kreis nachzufahren, der hinter dem Wagen liegt
                 ok, text = self._bogen_an_pose_verankern(vx_, vy_, vth_)
+                if not ok and self._rangieren(
+                        -to_TA + self.rangier_weg,
+                        f"{-to_TA:.2f} m hinter T_A, Bogen nicht fahrbar ({text})"):
+                    return
                 if not ok:
                     self.state = 'DONE'
                     self.publish_stop()
@@ -4518,6 +4761,9 @@ class Round1Controller(Node):
             self.get_logger().info(
                 f"TURN fertig Ecke {self.corner_count} (theta={math.degrees(theta):.1f}, "
                 f"ziel={math.degrees(self.arc['theta_target']):.1f}).")
+            self.rangier_versuche = 0
+            if self.corner_count % 4 == 0:
+                self._tempo_anwenden()        # neue Runde: ggf. anderes Profil
             self.corner_idx = (self.corner_idx + self.dir_step()) % 4
             self.publish_lap_state()
             self.arc = None
@@ -4525,6 +4771,7 @@ class Round1Controller(Node):
             self.ct_integral = 0.0        # fresh cross-track integrator for the new straight
             self.obs_path = None          # new straight -> plan its obstacle path below
             self.scan_done_this_straight = False
+            self.vorhalt_done_this_straight = False
             self.plan_arc(theta)
             self.plan_obstacle_path()     # obstacles of the NEW straight
             if not self.obs_path:
