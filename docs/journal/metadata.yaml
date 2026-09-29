@@ -1,0 +1,20 @@
+title: "MäcLEGO — Engineering Journal"
+subtitle: "WRO Future Engineers 2026 · Self-Driving Cars"
+author:
+  - "Team MäcLEGO, Rabanus-Maurus-Schule Fulda"
+date: "2026"
+lang: en
+papersize: a4
+fontsize: 10.5pt
+margin:
+  x: 2.2cm
+  y: 2.2cm
+section-numbering: "1.1"
+toc: true
+toc-depth: 2
+linkcolor: "#1f4e9a"
+header-includes: |
+  ```{=typst}
+  #show heading.where(level: 1): it => pagebreak(weak: true) + it
+  #set table(stroke: 0.5pt + luma(180))
+  ```
