@@ -1,43 +1,43 @@
 #!/bin/bash
-# Neustart-Waechter: laeuft auf dem Jetson (tmux-Fenster 11) und fuehrt
-# Neustart-Anfragen aus dem Container aus.
+# Restart watchdog: runs on the Jetson (tmux window 11) and carries out
+# restart requests from the container.
 #
-# round1_controller und ausparken_varianten_node wollen beim Start frische
-# EKF- und scan_processor-Knoten (siehe ekf/schaetzung_neustart.py). Die laufen
-# in den Fenstern 8 und 9, und an tmux kommt der Container nicht heran. Also
-# legen sie eine Anfrage in den gemeinsamen Workspace, und dieses Skript startet
-# die beiden ueber schaetzung_neustart.sh neu und antwortet.
+# round1_controller and unpark_variants_node want fresh EKF and
+# scan_processor nodes at start-up (see ekf/estimation_restart.py). Those run
+# in windows 8 and 9, and the container cannot reach tmux. So they put a
+# request into the shared workspace, and this script restarts the two through
+# estimation_restart.sh and replies.
 #
-# Umgebung: WORKSPACE, RACE_MODE, AUSPARKEN, SESSION, CONTAINER (setzt
+# Environment: WORKSPACE, RACE_MODE, UNPARK, SESSION, CONTAINER (set by
 # start_robot.sh).
 
 set -u
 WORKSPACE=${WORKSPACE:-/home/macjetson/ros2_ws}
-ANFRAGE="$WORKSPACE/.schaetzung_neustart_anfrage"
-ANTWORT="$WORKSPACE/.schaetzung_neustart_antwort"
-HIER=$(dirname "$(readlink -f "$0")")
+REQUEST_FILE="$WORKSPACE/.estimation_restart_request"
+REPLY_FILE="$WORKSPACE/.estimation_restart_reply"
+HERE=$(dirname "$(readlink -f "$0")")
 
-rm -f "$ANFRAGE" "$ANTWORT"
-echo "Neustart-Waechter bereit -- wartet auf Anfragen von round1_controller /"
-echo "ausparken_varianten_node ($ANFRAGE)."
+rm -f "$REQUEST_FILE" "$REPLY_FILE"
+echo "Restart watchdog ready -- waiting for requests from round1_controller /"
+echo "unpark_variants_node ($REQUEST_FILE)."
 
 while true; do
-    if [ -f "$ANFRAGE" ]; then
-        KENNUNG=$(head -1 "$ANFRAGE")
-        # Zeile 2: Zusatzargumente fuer den scan_processor (Einpark-Test).
-        # Nur harmlose Zeichen -- sie landen in einer tmux-Befehlszeile.
-        EXTRA=$(sed -n 2p "$ANFRAGE" | tr -cd 'A-Za-z0-9_:=.+ -')
-        rm -f "$ANFRAGE"
+    if [ -f "$REQUEST_FILE" ]; then
+        REQ_ID=$(head -1 "$REQUEST_FILE")
+        # Line 2: extra arguments for the scan_processor (parking test).
+        # Only harmless characters -- they end up in a tmux command line.
+        EXTRA=$(sed -n 2p "$REQUEST_FILE" | tr -cd 'A-Za-z0-9_:=.+ -')
+        rm -f "$REQUEST_FILE"
         echo
-        echo "$(date +%T) Neustart angefragt ($KENNUNG)${EXTRA:+ -- scan_processor: $EXTRA}"
-        if SCAN_EXTRA="$EXTRA" "$HIER/schaetzung_neustart.sh" --ohne-warten; then
-            ERG=ok
+        echo "$(date +%T) Restart requested ($REQ_ID)${EXTRA:+ -- scan_processor: $EXTRA}"
+        if SCAN_EXTRA="$EXTRA" "$HERE/estimation_restart.sh" --no-wait; then
+            RESULT=ok
         else
-            ERG=fehler
+            RESULT=error
         fi
-        echo "$ERG $KENNUNG" > "$ANTWORT.tmp"
-        mv "$ANTWORT.tmp" "$ANTWORT"
-        echo "$(date +%T) $ERG -- der Knoten wartet jetzt selbst auf Gyro und Bucht."
+        echo "$RESULT $REQ_ID" > "$REPLY_FILE.tmp"
+        mv "$REPLY_FILE.tmp" "$REPLY_FILE"
+        echo "$(date +%T) $RESULT -- the node now waits for gyro and bay itself."
     fi
     sleep 0.2
 done
