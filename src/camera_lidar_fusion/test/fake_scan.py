@@ -1,4 +1,4 @@
-"""Synthetischer 360-Grad-Scan auf /scan, nur zum Testen der Fusion-Node."""
+"""Synthetic 360 degree scan on /scan, only for testing the fusion node."""
 import math, rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan

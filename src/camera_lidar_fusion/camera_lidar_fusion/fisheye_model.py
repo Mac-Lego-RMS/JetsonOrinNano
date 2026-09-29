@@ -1,29 +1,29 @@
-"""Fisheye-Projektionsmodell und Kalibrier-IO fuer die liegende 360-Grad-Kamera.
+"""Fisheye projection model and calibration IO for the upward-facing 360 degree camera.
 
-Konventionen
-------------
-Roboter-/Lidar-Frame (ROS REP-103): X vorne, Y links, Z oben.
-LaserScan-Winkel zaehlen CCW ab +X.
+Conventions
+-----------
+Robot/lidar frame (ROS REP-103): X forward, Y left, Z up.
+LaserScan angles count CCW from +X.
 
-Optischer Kamera-Frame: Z = optische Achse (zeigt aus der Linse heraus),
-X = im Bild nach rechts, Y = im Bild nach unten.
+Optical camera frame: Z = optical axis (points out of the lens),
+X = to the right in the image, Y = downwards in the image.
 
-Die Kamera haengt liegend, die optische Achse zeigt also nominell nach OBEN.
-Fuer genau diesen Nominalfall faellt der optische Frame mit dem Roboter-Frame
-zusammen (X vorne = rechts im Bild, Y links = unten im Bild, Z oben = optische
-Achse) -- die Rotationsmatrix ist dann die Einheitsmatrix. Die drei Winkel
-beschreiben die Abweichung davon:
+The camera is mounted lying flat, so the optical axis nominally points UP.
+For exactly this nominal case the optical frame coincides with the robot frame
+(X forward = right in the image, Y left = down in the image, Z up = optical
+axis) -- the rotation matrix is then the identity. The three angles
+describe the deviation from that:
 
-    yaw   Drehung um die optische Achse. Das ist die "Verdrehung der Kamera",
-          die rotation_calibration bestimmt.
-    pitch/roll  Verkippung der optischen Achse aus der Senkrechten
-          (Montage nicht exakt waagerecht).
+    yaw   rotation about the optical axis. This is the "twist of the camera"
+          that rotation_calibration determines.
+    pitch/roll  tilt of the optical axis away from the vertical
+          (mount not exactly level).
 
     P_cam = R @ (P_robot - t),   R = Rx(roll) @ Ry(pitch) @ Rz(yaw)
 
-Radialmodell: equidistant (r = f * theta), optional mit ungeraden
-Polynomtermen r = theta * (k0 + k1*theta^2 + k2*theta^4 + ...), falls das
-echte Objektiv abweicht.
+Radial model: equidistant (r = f * theta), optionally with odd
+polynomial terms r = theta * (k0 + k1*theta^2 + k2*theta^4 + ...), in case the
+real lens deviates.
 """
 
 from dataclasses import dataclass, field, asdict
@@ -36,53 +36,53 @@ import yaml
 
 @dataclass
 class FisheyeCalib:
-    """Alle Groessen, die Lidar-Punkt -> Pixel beschreiben."""
+    """All quantities that describe lidar point -> pixel."""
 
-    # --- Bildkreis (intrinsisch) ---
-    cx: float = 678.5           # Mittelpunkt Bildkreis in px
+    # --- image circle (intrinsic) ---
+    cx: float = 678.5           # centre of the image circle in px
     cy: float = 451.0
-    radius_px: float = 452.0    # Radius des Bildkreises in px
-    fov_deg: float = 270.0      # voller Oeffnungswinkel des Objektivs
-    f_px: float = 0.0           # 0 => aus radius_px/theta_max abgeleitet
+    radius_px: float = 452.0    # radius of the image circle in px
+    fov_deg: float = 270.0      # full field of view of the lens
+    f_px: float = 0.0           # 0 => derived from radius_px/theta_max
     poly_coeffs: list = field(default_factory=list)
-    mirror: bool = False        # True, falls das Bild seitenverkehrt ist
+    mirror: bool = False        # True if the image is mirrored
 
-    # --- Lage der Kamera im Roboter-Frame (extrinsisch) ---
-    yaw_deg: float = 0.0        # Drehung um die optische Achse
+    # --- pose of the camera in the robot frame (extrinsic) ---
+    yaw_deg: float = 0.0        # rotation about the optical axis
     pitch_deg: float = 0.0
     roll_deg: float = 0.0
-    cam_x: float = 0.0          # Kameraposition relativ zum Lidar-Ursprung [m]
+    cam_x: float = 0.0          # camera position relative to the lidar origin [m]
     cam_y: float = 0.0
-    cam_z: float = 0.05         # Kamera sitzt ueber der Lidar-Ebene
+    cam_z: float = 0.05         # camera sits above the lidar plane
 
-    # --- Lidar: verbaute Sektoren ---
-    # Paare [von_grad, bis_grad] im Lidar-Frame, die dauerhaft blockiert sind
-    # (Kabel, Elektronik, Aufbauten). Dort misst der Scanner nur sich selbst --
-    # meist ein paar Zentimeter -- und genau diese Kurz-Returns waeren sonst
-    # immer die naechsten Punkte. Laeuft ein Sektor ueber +-180, einfach
-    # von > bis schreiben, das wird zyklisch verstanden.
+    # --- lidar: obstructed sectors ---
+    # Pairs [from_deg, to_deg] in the lidar frame that are permanently blocked
+    # (cables, electronics, superstructure). There the scanner only measures itself --
+    # usually a few centimetres -- and exactly these short returns would otherwise
+    # always be the nearest points. If a sector runs across +-180, simply
+    # write from > to, that is understood cyclically.
     lidar_blind_sectors_deg: list = field(default_factory=list)
 
-    # --- Abgriffszone, empirisch kalibriert (Kommando "zone") ---
-    # Wo im Bild liegt die farbige Flaeche einer Pylone? Statt das aus cam_z und
-    # der Brennweite zu RECHNEN, wird es gemessen: die Zonengrenzen laufen als
+    # --- sampling zone, calibrated empirically (command "zone") ---
+    # Where in the image does the coloured area of a pylon lie? Instead of COMPUTING
+    # that from cam_z and the focal length, it is measured: the zone limits run as
     #     r(rho) = r0 + k / rho
-    # Diese Form folgt aus der Geometrie -- fuer theta nahe 90 Grad ist
-    # atan2(rho, dz) ~ pi/2 - dz/rho, also r ~ f*pi/2 - f*dz/rho. Der 1/rho-Term
-    # traegt die Hoehe, der konstante Term die Brennweite.
+    # This form follows from the geometry -- for theta near 90 degrees
+    # atan2(rho, dz) ~ pi/2 - dz/rho, so r ~ f*pi/2 - f*dz/rho. The 1/rho term
+    # carries the height, the constant term the focal length.
     #
-    # Der Witz am Messen statt Rechnen: der konstante Term faengt nebenbei den
-    # Modellfehler mit ein. Am Aufbau lag er bei 403 px, waehrend das
-    # equidistante Modell 412 px vorhersagt -- 9 px Unterschied, weil das
-    # Objektiv am Bildrand von r = f*theta abweicht und poly_coeffs leer ist.
-    # Genau diese 9 px haben jeden Versuch verdorben, die Zone ueber Hoehen zu
-    # setzen. Ist zone_k_out gleich 0, ist die Kurve nicht kalibriert.
+    # The point of measuring instead of computing: the constant term also absorbs
+    # the model error along the way. On the setup it was 403 px, while the
+    # equidistant model predicts 412 px -- 9 px difference, because the
+    # lens deviates from r = f*theta at the image edge and poly_coeffs is empty.
+    # Exactly these 9 px spoiled every attempt to set the zone from heights.
+    # If zone_k_out is 0, the curve is not calibrated.
     zone_r0_in: float = 0.0
     zone_k_in: float = 0.0
     zone_r0_out: float = 0.0
     zone_k_out: float = 0.0
 
-    # --- Metadaten ---
+    # --- metadata ---
     image_width: int = 1280
     image_height: int = 960
     note: str = ''
@@ -94,23 +94,23 @@ class FisheyeCalib:
 
     @property
     def focal_px(self) -> float:
-        """Brennweite in px; aus dem Bildkreis abgeleitet, wenn nicht gesetzt."""
+        """Focal length in px; derived from the image circle if not set."""
         if self.f_px > 0.0:
             return self.f_px
         return self.radius_px / self.theta_max_rad
 
     @property
-    def zone_kalibriert(self) -> bool:
+    def zone_calibrated(self) -> bool:
         return self.zone_k_out != 0.0 or self.zone_r0_out != 0.0
 
-    def zone_radien(self, rho) -> tuple:
-        """Entfernung -> (r_innen, r_aussen) der Abgriffszone in px."""
+    def zone_radii(self, rho) -> tuple:
+        """Distance -> (r_inner, r_outer) of the sampling zone in px."""
         rho = np.maximum(np.asarray(rho, dtype=float), 1e-3)
         return (self.zone_r0_in + self.zone_k_in / rho,
                 self.zone_r0_out + self.zone_k_out / rho)
 
     def rotation_matrix(self) -> np.ndarray:
-        """R mit P_cam = R @ (P_robot - t)."""
+        """R with P_cam = R @ (P_robot - t)."""
         cr, sr = math.cos(math.radians(self.roll_deg)), math.sin(math.radians(self.roll_deg))
         cp, sp = math.cos(math.radians(self.pitch_deg)), math.sin(math.radians(self.pitch_deg))
         cy_, sy = math.cos(math.radians(self.yaw_deg)), math.sin(math.radians(self.yaw_deg))
@@ -135,7 +135,7 @@ class FisheyeCalib:
 
     @classmethod
     def load(cls, path: str, fallback: str = '') -> 'FisheyeCalib':
-        """Laedt path; faellt auf fallback und dann auf die Defaults zurueck."""
+        """Loads path; falls back to fallback and then to the defaults."""
         for candidate in (path, fallback):
             if candidate and os.path.exists(candidate):
                 with open(candidate, 'r') as fh:
@@ -145,7 +145,7 @@ class FisheyeCalib:
 
 # ---------------------------------------------------------------------- #
 def theta_to_radius(calib: FisheyeCalib, theta: np.ndarray) -> np.ndarray:
-    """Winkel zur optischen Achse -> Bildradius in px."""
+    """Angle to the optical axis -> image radius in px."""
     if calib.poly_coeffs:
         acc = np.zeros_like(theta)
         for i, k in enumerate(calib.poly_coeffs):
@@ -155,7 +155,7 @@ def theta_to_radius(calib: FisheyeCalib, theta: np.ndarray) -> np.ndarray:
 
 
 def radius_to_theta(calib: FisheyeCalib, radius: np.ndarray) -> np.ndarray:
-    """Umkehrung von theta_to_radius: Bildradius in px -> Winkel zur Achse."""
+    """Inverse of theta_to_radius: image radius in px -> angle to the axis."""
     radius = np.asarray(radius, dtype=float)
     if calib.poly_coeffs:
         grid = np.linspace(0.0, calib.theta_max_rad, 2048)
@@ -164,11 +164,11 @@ def radius_to_theta(calib: FisheyeCalib, radius: np.ndarray) -> np.ndarray:
 
 
 def project(calib: FisheyeCalib, pts_robot: np.ndarray):
-    """Projiziert 3D-Punkte (N,3) im Roboter-Frame in Pixelkoordinaten.
+    """Projects 3D points (N,3) in the robot frame into pixel coordinates.
 
-    Rueckgabe: u, v, theta, phi, in_fov  (jeweils Arrays der Laenge N).
-    ``in_fov`` ist False fuer Punkte hinter dem Oeffnungswinkel des Objektivs;
-    die Bildgrenzen pruefen die Nodes selbst.
+    Returns: u, v, theta, phi, in_fov  (each an array of length N).
+    ``in_fov`` is False for points beyond the field of view of the lens;
+    the nodes check the image bounds themselves.
     """
     pts = np.asarray(pts_robot, dtype=float).reshape(-1, 3)
     p_cam = (pts - calib.translation()) @ calib.rotation_matrix().T
@@ -187,12 +187,12 @@ def project(calib: FisheyeCalib, pts_robot: np.ndarray):
 
 def scan_to_points(ranges: np.ndarray, angle_min: float, angle_increment: float,
                    z_offset: float = 0.0):
-    """LaserScan-Ranges -> (N,3)-Punkte im Roboter-Frame + zugehoerige Winkel.
+    """LaserScan ranges -> (N,3) points in the robot frame + the matching angles.
 
-    ``z_offset`` hebt die Punkte ueber die Lidar-Ebene an, damit nicht der
-    Fusspunkt (Matte, Schatten) sondern die Mitte des Klotzes gesampelt wird.
-    Skalar oder ein Wert je Punkt -- letzteres braucht der geneigte Ring, dessen
-    Hoehe mit der Entfernung mitlaeuft.
+    ``z_offset`` lifts the points above the lidar plane so that not the
+    foot point (mat, shadow) but the middle of the block is sampled.
+    Scalar or one value per point -- the latter is needed by the tilted ring, whose
+    height follows the distance.
     """
     ranges = np.asarray(ranges, dtype=float)
     angles = angle_min + np.arange(ranges.size, dtype=float) * angle_increment
@@ -205,10 +205,10 @@ def scan_to_points(ranges: np.ndarray, angle_min: float, angle_increment: float,
 
 
 def visible_mask(angles_rad: np.ndarray, sectors_deg: list) -> np.ndarray:
-    """True fuer Strahlen ausserhalb aller Blindsektoren.
+    """True for beams outside all blind sectors.
 
-    ``sectors_deg`` ist eine flache Liste [von1, bis1, von2, bis2, ...] in Grad.
-    Ein Sektor mit von > bis laeuft ueber +-180 hinweg (z.B. 135 bis -153).
+    ``sectors_deg`` is a flat list [from1, to1, from2, to2, ...] in degrees.
+    A sector with from > to runs across +-180 (e.g. 135 to -153).
     """
     angles = np.degrees(np.asarray(angles_rad, dtype=float))
     keep = np.ones(angles.shape, dtype=bool)
@@ -219,7 +219,7 @@ def visible_mask(angles_rad: np.ndarray, sectors_deg: list) -> np.ndarray:
         lo, hi = float(sectors_deg[i]), float(sectors_deg[i + 1])
         if lo <= hi:
             keep &= ~((angles >= lo) & (angles <= hi))
-        else:                       # laeuft ueber +-180
+        else:                       # runs across +-180
             keep &= ~((angles >= lo) | (angles <= hi))
     return keep
 
@@ -227,18 +227,18 @@ def visible_mask(angles_rad: np.ndarray, sectors_deg: list) -> np.ndarray:
 def find_blind_sectors(scans, angle_min: float, angle_increment: float,
                        near_m: float = 0.15, min_valid_frac: float = 0.35,
                        min_width_deg: float = 3.0):
-    """Sucht dauerhaft blockierte Sektoren aus mehreren Scans.
+    """Finds permanently blocked sectors from several scans.
 
-    Blockiert heisst: der Median ueber alle Scans liegt unter ``near_m`` (der
-    Scanner sieht sich selbst) oder es kommen kaum gueltige Messungen an.
-    Rueckgabe: flache Liste [von1, bis1, ...] in Grad, absteigend nach Breite.
+    Blocked means: the median over all scans is below ``near_m`` (the
+    scanner sees itself) or hardly any valid measurements arrive.
+    Returns: flat list [from1, to1, ...] in degrees, sorted by width, widest first.
     """
     stack = np.asarray(scans, dtype=float)
     finite = np.isfinite(stack) & (stack > 0)
     valid_frac = finite.mean(0)
 
-    # Strahlen ohne eine einzige gueltige Messung vor dem Median ausschliessen,
-    # sonst warnt numpy ueber All-NaN-Spalten. Sie gelten ohnehin als blockiert.
+    # Exclude beams without a single valid measurement before the median,
+    # otherwise numpy warns about all-NaN columns. They count as blocked anyway.
     has_any = finite.any(0)
     median = np.zeros(stack.shape[1], dtype=float)
     if has_any.any():
@@ -263,7 +263,7 @@ def find_blind_sectors(scans, angle_min: float, angle_increment: float,
             start = i
         prev = i
     runs.append((start, prev))
-    # Laeuft ein Bereich ueber den Index-Umbruch, die beiden Enden verbinden.
+    # If a range runs across the index wrap-around, join the two ends.
     if len(runs) > 1 and runs[0][0] == 0 and runs[-1][1] == count - 1:
         runs = [(runs[-1][0], runs[0][1] + count)] + runs[1:-1]
 
@@ -277,28 +277,28 @@ def find_blind_sectors(scans, angle_min: float, angle_increment: float,
 
 
 def detect_image_circle(image_bgr: np.ndarray, threshold: int = 12):
-    """Schaetzt (cx, cy, radius) des Fisheye-Bildkreises aus dem dunklen Rand.
+    """Estimates (cx, cy, radius) of the fisheye image circle from the dark border.
 
-    Kleinste-Quadrate-Kreisfit nach Kasa ueber die Aussenkontur des hellen
-    Bereichs. Gibt None zurueck, wenn nichts passt.
+    Least-squares circle fit after Kasa over the outer contour of the bright
+    area. Returns None if nothing fits.
 
-    WARUM NICHT DIE BOUNDING BOX (so war es bis 16.09.2026): der Bildkreis ragt
-    bei der verbauten Kamera rund 7 px UEBER die Sensoroberkante hinaus. Die
-    Bounding-Box wird dort bei y=0 gekappt statt bei cy-r, also rutscht
-    cy = y + h/2 um die halbe Kappung nach unten. Am Fahrt-Frame gemessen:
-    Bounding-Box cy=455.0, Kreisfit cy=450.5 -- 4.6 px Versatz, systematisch.
+    WHY NOT THE BOUNDING BOX (that is how it was until 16.09.2026): with the
+    fitted camera the image circle sticks out about 7 px ABOVE the top edge of the sensor. The
+    bounding box gets clipped there at y=0 instead of at cy-r, so
+    cy = y + h/2 slides down by half the clipping. Measured on a driving frame:
+    bounding box cy=455.0, circle fit cy=450.5 -- 4.6 px offset, systematic.
 
-    Das ist nicht harmlos: classify_zone tastet RADIAL von (cx, cy) aus ab. Ein
-    verschobenes Zentrum laesst den Abgriffsradius azimutabhaengig wandern, eine
-    Periode pro Umdrehung. Bei 2 bis 3 m ist die Zone nur 5 bis 8 px dick -- der
-    Versatz wirft sie dort ueber einen Teil des Azimuts komplett von der Pylone.
-    Dazu kommen rund 0.9 Grad scheinbarer Azimutfehler (tangentialer Anteil bei
+    That is not harmless: classify_zone samples RADIALLY from (cx, cy). A
+    shifted centre makes the sampling radius wander with azimuth, one
+    period per revolution. At 2 to 3 m the zone is only 5 to 8 px thick -- there the
+    offset throws it completely off the pylon over part of the azimuth range.
+    On top of that come about 0.9 degrees of apparent azimuth error (tangential part at
     r=400 px).
 
-    Konturpunkte am BILDRAND werden verworfen: genau dort ist der Kreis
-    abgeschnitten, und sie wuerden den Fit wieder verziehen.
+    Contour points at the IMAGE BORDER are discarded: exactly there the circle is
+    cut off, and they would distort the fit again.
     """
-    import cv2  # lokal, damit das Modell selbst ohne OpenCV importierbar bleibt
+    import cv2  # local, so that the model itself stays importable without OpenCV
 
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     _, mask = cv2.threshold(gray, int(threshold), 255, cv2.THRESH_BINARY)
@@ -315,19 +315,19 @@ def detect_image_circle(image_bgr: np.ndarray, threshold: int = 12):
         return None
 
     pts = contour.reshape(-1, 2).astype(np.float64)
-    hoehe, breite = gray.shape[:2]
-    frei = ((pts[:, 0] > 2) & (pts[:, 0] < breite - 3) &
-            (pts[:, 1] > 2) & (pts[:, 1] < hoehe - 3))
-    if frei.sum() < 50:
-        # Kreis ringsum angeschnitten -- dann bleibt nur die alte Schaetzung.
+    img_h, img_w = gray.shape[:2]
+    clear = ((pts[:, 0] > 2) & (pts[:, 0] < img_w - 3) &
+             (pts[:, 1] > 2) & (pts[:, 1] < img_h - 3))
+    if clear.sum() < 50:
+        # Circle clipped all the way round -- then only the old estimate is left.
         return x + w / 2.0, y + h / 2.0, (w + h) / 4.0
 
-    px, py = pts[frei, 0], pts[frei, 1]
-    # Kasa: x^2 + y^2 = a*x + b*y + c  ist linear in (a, b, c)
+    px, py = pts[clear, 0], pts[clear, 1]
+    # Kasa: x^2 + y^2 = a*x + b*y + c  is linear in (a, b, c)
     A = np.c_[px, py, np.ones(px.size)]
-    loesung, *_ = np.linalg.lstsq(A, px ** 2 + py ** 2, rcond=None)
-    cx, cy = loesung[0] / 2.0, loesung[1] / 2.0
-    radius = float(np.sqrt(max(loesung[2] + cx ** 2 + cy ** 2, 0.0)))
+    sol, *_ = np.linalg.lstsq(A, px ** 2 + py ** 2, rcond=None)
+    cx, cy = sol[0] / 2.0, sol[1] / 2.0
+    radius = float(np.sqrt(max(sol[2] + cx ** 2 + cy ** 2, 0.0)))
     if not (np.isfinite(cx) and np.isfinite(cy)) or radius < 25.0:
         return x + w / 2.0, y + h / 2.0, (w + h) / 4.0
     return float(cx), float(cy), radius
