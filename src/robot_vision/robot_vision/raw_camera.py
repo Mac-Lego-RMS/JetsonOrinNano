@@ -15,24 +15,24 @@ class CsiCameraPublisher(Node):
         self.publisher_ = self.create_publisher(Image, '/camera/image_raw', qos_profile_sensor_data)
         self.bridge = CvBridge()
         
-        # In der __init__ den Aufruf ändern:
+        # Change the call in __init__:
         pipeline = self.gstreamer_pipeline(
-            capture_width=640, capture_height=480, # Kleinstmöglicher nativer Modus
+            capture_width=640, capture_height=480, # smallest possible native mode
             display_width=640, display_height=360, 
-            framerate=20, # 20 FPS reicht für WRO völlig und spart massiv RAM
+            framerate=20, # 20 FPS is plenty for WRO and saves a lot of RAM
             flip_method=0
         )
         
-        self.get_logger().info('Starte CSI-Kamera...')
+        self.get_logger().info('Starting CSI camera...')
         self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
         
         if not self.cap.isOpened():
-            self.get_logger().error('FEHLER: Konnte die Kamera nicht öffnen! CSI-Kabel prüfen.')
-            sys.exit(1) # Beendet das Skript hart, damit es nicht weiterläuft
+            self.get_logger().error('ERROR: could not open the camera! Check the CSI cable.')
+            sys.exit(1) # Ends the script hard so it does not keep running
             
-        self.error_counter = 0 # Zähler für Fehlversuche
+        self.error_counter = 0 # counter for failed attempts
         self.timer = self.create_timer(1.0 / 30.0, self.timer_callback)
-        self.get_logger().info('Kamera Node läuft. Publiziert auf Topic: /camera/image_raw')
+        self.get_logger().info('Camera node running. Publishing on topic: /camera/image_raw')
 
     def gstreamer_pipeline(self, capture_width, capture_height, display_width, display_height, framerate, flip_method):
         return (
@@ -42,7 +42,7 @@ class CsiCameraPublisher(Node):
             f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
             "videoconvert ! "
             "video/x-raw, format=(string)BGR ! "
-            # --- DER FIX: HARDWARE-DROSSELUNG ---
+            # --- THE FIX: HARDWARE THROTTLING ---
             "videorate ! "
             "video/x-raw, framerate=8/1 ! "
             "appsink drop=true max-buffers=1 sync=false"
@@ -56,25 +56,25 @@ class CsiCameraPublisher(Node):
             msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
             self.publisher_.publish(msg)
             
-            # --- MANUELLE SPEICHERREINIGUNG ---
-            # Wir löschen die Referenzen explizit
+            # --- MANUAL MEMORY CLEANUP ---
+            # We delete the references explicitly
             del frame
             del msg
             
-            # Alle 300 Frames (ca. alle 10 Sek.) den Müllsammler zwingen
+            # Force the garbage collector every 300 frames (about every 10 s)
             if self.get_clock().now().nanoseconds % 300 == 0:
                 gc.collect()
         else:
             self.error_counter += 1
-            self.get_logger().warning(f'Fehler beim Lesen des Bild-Frames. Versuch {self.error_counter}/10')
+            self.get_logger().warning(f'Error reading the image frame. Attempt {self.error_counter}/10')
             
-            # Wenn 10 Frames nacheinander scheitern, Node abschießen
+            # If 10 frames in a row fail, kill the node
             if self.error_counter >= 10:
-                self.get_logger().error('Kamera blockiert dauerhaft. Beende Node aus Sicherheitsgründen!')
+                self.get_logger().error('Camera blocked permanently. Stopping node for safety reasons!')
                 sys.exit(1)
 
     def destroy_node(self):
-        self.get_logger().info('Gebe Kamera-Ressourcen frei...')
+        self.get_logger().info('Releasing camera resources...')
         if hasattr(self, 'cap') and self.cap.isOpened():
             self.cap.release()
         super().destroy_node()
@@ -89,7 +89,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     except SystemExit:
-        pass # Fängt unseren sys.exit(1) aus dem Error-Counter auf
+        pass # Catches our sys.exit(1) from the error counter
     finally:
         node.destroy_node()
         if rclpy.ok():

@@ -1,5 +1,5 @@
 {
-    "messwerte_pixel_y": [
+    "samples_pixel_y": [
         403,
         335,
         295,
@@ -9,7 +9,7 @@
         99,
         92
     ],
-    "messwerte_dist_m": [
+    "samples_dist_m": [
         0.2,
         0.25,
         0.3,
