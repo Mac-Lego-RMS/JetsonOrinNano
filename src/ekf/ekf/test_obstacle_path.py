@@ -36,19 +36,19 @@ def check(name, obstacles):
     for (s_o, q_o, c) in obstacles:
         q_at = min(dense, key=lambda p: abs(p[0] - s_o))[1]
         gap = clearance_ok(q_at, q_o)
-        side = "links" if q_at > q_o else "rechts"
-        want = "links" if c == COLOR_GREEN else "rechts"
+        side = "left" if q_at > q_o else "right"
+        want = "left" if c == COLOR_GREEN else "right"
         if side != want:
-            ok = False; msgs.append(f"FALSCHE SEITE bei s={s_o}: {side}, erwartet {want}")
+            ok = False; msgs.append(f"WRONG SIDE at s={s_o}: {side}, expected {want}")
         if gap < 0.02:
-            ok = False; msgs.append(f"ZU ENG bei s={s_o}: nur {gap*100:.1f} cm frei")
+            ok = False; msgs.append(f"TOO TIGHT at s={s_o}: only {gap*100:.1f} cm clear")
         else:
-            msgs.append(f"s={s_o:.1f} {('gruen' if c==COLOR_GREEN else 'rot')}: "
-                        f"q={q_at:.2f} ({side}), {gap*100:.1f} cm frei")
+            msgs.append(f"s={s_o:.1f} {('green' if c==COLOR_GREEN else 'red')}: "
+                        f"q={q_at:.2f} ({side}), {gap*100:.1f} cm clear")
 
     for s, q in dense:
         if q < ROBOT_HALF or q > LANE - ROBOT_HALF:
-            ok = False; msgs.append(f"AUSSERHALB Gasse bei s={s:.2f}: q={q:.2f}")
+            ok = False; msgs.append(f"OUTSIDE lane at s={s:.2f}: q={q:.2f}")
             break
 
     # 3: steepest lane change
@@ -59,35 +59,35 @@ def check(name, obstacles):
         if ds > 1e-6 and dq > 1e-6:
             sl = dq / ds
             if sl > max_slope:
-                max_slope, seg = sl, f"{dq*100:.0f}cm quer in {ds*100:.0f}cm laengs"
+                max_slope, seg = sl, f"{dq*100:.0f}cm lat in {ds*100:.0f}cm long"
     if max_slope > 1.05:
-        ok = False; msgs.append(f"ZU STEIL: {seg} (Faktor {max_slope:.2f})")
+        ok = False; msgs.append(f"TOO STEEP: {seg} (factor {max_slope:.2f})")
     elif seg:
-        msgs.append(f"steilster Wechsel: {seg} (Faktor {max_slope:.2f})")
+        msgs.append(f"steepest change: {seg} (factor {max_slope:.2f})")
 
-    print(f"\n{name}: {'OK' if ok else 'FEHLER <<<'}")
+    print(f"\n{name}: {'OK' if ok else 'ERROR <<<'}")
     for m in msgs:
         print("   ", m)
     return ok
 
 
-print("=== Pfadplanung: alle legalen Konstellationen ===")
-print(f"Gasse {LANE} m, Sitze bei q={Q_OUTER_SEAT}/{Q_INNER_SEAT}, "
-      f"Roboter {ROBOT_HALF*2*100:.0f} cm breit, Kloetze {BLOCK_HALF*2*100:.1f} cm\n")
+print("=== Path planning: all legal constellations ===")
+print(f"Lane {LANE} m, seats at q={Q_OUTER_SEAT}/{Q_INNER_SEAT}, "
+      f"robot {ROBOT_HALF*2*100:.0f} cm wide, blocks {BLOCK_HALF*2*100:.1f} cm\n")
 
 all_ok = True
-# --- ein Hindernis ---
-for q, qn in ((Q_OUTER_SEAT, "aussen"), (Q_INNER_SEAT, "innen")):
-    for c, cn in ((COLOR_RED, "rot"), (COLOR_GREEN, "gruen")):
-        all_ok &= check(f"1 Hindernis {qn} {cn}", [(S_ROW0, q, c)])
+# --- one obstacle ---
+for q, qn in ((Q_OUTER_SEAT, "outer"), (Q_INNER_SEAT, "inner")):
+    for c, cn in ((COLOR_RED, "red"), (COLOR_GREEN, "green")):
+        all_ok &= check(f"1 obstacle {qn} {cn}", [(S_ROW0, q, c)])
 
-# --- zwei Hindernisse, 1 m auseinander, alle 4 Spalten-Kombis x 4 Farb-Kombis ---
-for q1, n1 in ((Q_OUTER_SEAT, "a"), (Q_INNER_SEAT, "i")):
-    for q2, n2 in ((Q_OUTER_SEAT, "a"), (Q_INNER_SEAT, "i")):
-        for c1, cn1 in ((COLOR_RED, "rot"), (COLOR_GREEN, "gruen")):
-            for c2, cn2 in ((COLOR_RED, "rot"), (COLOR_GREEN, "gruen")):
-                all_ok &= check(f"2 Hindernisse {n1}{cn1[0]} -> {n2}{cn2[0]}",
+# --- two obstacles, 1 m apart, all 4 column combos x 4 colour combos ---
+for q1, n1 in ((Q_OUTER_SEAT, "o"), (Q_INNER_SEAT, "i")):
+    for q2, n2 in ((Q_OUTER_SEAT, "o"), (Q_INNER_SEAT, "i")):
+        for c1, cn1 in ((COLOR_RED, "red"), (COLOR_GREEN, "green")):
+            for c2, cn2 in ((COLOR_RED, "red"), (COLOR_GREEN, "green")):
+                all_ok &= check(f"2 obstacles {n1}{cn1[0]} -> {n2}{cn2[0]}",
                                 [(S_ROW0, q1, c1), (S_ROW2, q2, c2)])
 
 print("\n" + "="*60)
-print("ALLE KONSTELLATIONEN OK" if all_ok else "MINDESTENS EINE KONSTELLATION PROBLEMATISCH")
+print("ALL CONSTELLATIONS OK" if all_ok else "AT LEAST ONE CONSTELLATION PROBLEMATIC")

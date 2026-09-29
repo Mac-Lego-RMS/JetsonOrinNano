@@ -72,7 +72,7 @@ def dist_point_to_line(px, py, line):
 def run_case(name, corners, walls, idx, theta, o_in, o_out, R, s):
     g = plan_arc_geom(corners, walls, idx, theta, o_in, o_out, R, s)
     if g is None:
-        print(f"  {name}: FEHLER -- Linien parallel")
+        print(f"  {name}: ERROR -- lines parallel")
         return False
 
     C, T_A, T_B, LA, LB = g['C'], g['T_A'], g['T_B'], g['LA'], g['LB']
@@ -82,14 +82,14 @@ def run_case(name, corners, walls, idx, theta, o_in, o_out, R, s):
     # 1 & 2: tangent points on the offset lines
     dA = abs(dist_point_to_line(*T_A, LA))
     dB = abs(dist_point_to_line(*T_B, LB))
-    if dA > tol: ok = False; print(f"  {name}: T_A NICHT auf LA (d={dA:.2e})")
-    if dB > tol: ok = False; print(f"  {name}: T_B NICHT auf LB (d={dB:.2e})")
+    if dA > tol: ok = False; print(f"  {name}: T_A NOT on LA (d={dA:.2e})")
+    if dB > tol: ok = False; print(f"  {name}: T_B NOT on LB (d={dB:.2e})")
 
     # 3: centre at distance R from both offset lines
     cA = abs(abs(dist_point_to_line(*C, LA)) - R)
     cB = abs(abs(dist_point_to_line(*C, LB)) - R)
-    if cA > tol: ok = False; print(f"  {name}: C nicht R von LA (|dev|={cA:.2e})")
-    if cB > tol: ok = False; print(f"  {name}: C nicht R von LB (|dev|={cB:.2e})")
+    if cA > tol: ok = False; print(f"  {name}: C not R from LA (|dev|={cA:.2e})")
+    if cB > tol: ok = False; print(f"  {name}: C not R from LB (|dev|={cB:.2e})")
 
     # 4: |C - T| == R
     rA = abs(math.hypot(C[0]-T_A[0], C[1]-T_A[1]) - R)
@@ -97,7 +97,7 @@ def run_case(name, corners, walls, idx, theta, o_in, o_out, R, s):
     if rA > tol: ok = False; print(f"  {name}: |C-T_A| != R ({rA:.2e})")
     if rB > tol: ok = False; print(f"  {name}: |C-T_B| != R ({rB:.2e})")
 
-    status = "OK" if ok else "FALSCH <<<"
+    status = "OK" if ok else "WRONG <<<"
     print(f"  {name:32} o_in={o_in:.2f} o_out={o_out:.2f} R={R:.2f}  "
           f"T_A=({T_A[0]:+.2f},{T_A[1]:+.2f}) T_B=({T_B[0]:+.2f},{T_B[1]:+.2f})  {status}")
     return ok
@@ -123,7 +123,7 @@ def main():
     corners = [(1.5, -1.5), (1.5, 1.5), (-1.5, 1.5), (-1.5, -1.5)]
     walls = box_from_corners(corners)
 
-    print("=== plan_arc Geometrie-Test (4 Ecken x mehrere Offsets/Radien) ===\n")
+    print("=== plan_arc geometry test (4 corners x several offsets/radii) ===\n")
     all_ok = True
 
     # travel heading per corner (approx): robot arrives along the entry wall.
@@ -131,22 +131,22 @@ def main():
     headings = {0: 0.0, 1: math.pi/2, 2: math.pi, 3: -math.pi/2}
 
     combos = [
-        ("mitte 0.5/0.5 R0.5", 0.5, 0.5, 0.5),
-        ("eng   0.3/0.3 R0.4", 0.3, 0.3, 0.4),
+        ("mid   0.5/0.5 R0.5", 0.5, 0.5, 0.5),
+        ("tight 0.3/0.3 R0.4", 0.3, 0.3, 0.4),
         ("asym  0.3/0.6 R0.5", 0.3, 0.6, 0.5),
-        ("weit  0.7/0.7 R0.6", 0.7, 0.7, 0.6),
+        ("wide  0.7/0.7 R0.6", 0.7, 0.7, 0.6),
         ("mini  0.4/0.4 R0.2", 0.4, 0.4, 0.2),
     ]
 
     for idx in range(4):
-        print(f"-- Ecke idx {idx} (heading {math.degrees(headings[idx]):+.0f}) --")
+        print(f"-- corner idx {idx} (heading {math.degrees(headings[idx]):+.0f}) --")
         for label, oi, oo, R in combos:
             ok = run_case(label, corners, walls, idx, headings[idx], oi, oo, R, s=1.0)
             all_ok = all_ok and ok
         print()
 
     print("=" * 60)
-    print("ALLE FAELLE OK" if all_ok else "MINDESTENS EIN FALL FALSCH -- Geometriefehler!")
+    print("ALL CASES OK" if all_ok else "AT LEAST ONE CASE WRONG -- geometry error!")
 
 
 if __name__ == '__main__':
