@@ -76,7 +76,7 @@ PILLAR_EDGE = 0.044
 
 ROBOT_LENGTH = 0.175
 ROBOT_WIDTH = 0.110
-ROBOT_NOSE_PAST_LIDAR = 0.03    # Nase 3 cm vor dem Lidar
+ROBOT_NOSE_PAST_LIDAR = 0.03    # nose 3 cm ahead of the lidar
 
 PATH_STEP = 0.02        # m of travel between stored path points
 PATH_MAX = 6000
@@ -90,7 +90,7 @@ C_PATH = (1.00, 0.85, 0.20, 1.0)
 C_OBST = {1: (0.95, 0.20, 0.20, 0.95),      # Obstacle.COLOR_RED
           2: (0.20, 0.90, 0.35, 0.95)}      # Obstacle.COLOR_GREEN
 C_OBST_UNKNOWN = (0.75, 0.75, 0.80, 0.75)   # seen, colour not yet certain
-C_BAY = (1.00, 0.10, 0.85, 0.95)            # Parkluecke: die Magenta-Waende
+C_BAY = (1.00, 0.10, 0.85, 0.95)            # parking bay: the magenta walls
 
 
 def yaw_from_quaternion(q):
@@ -310,10 +310,10 @@ class FoxgloveOverlay(Node):
 
         self.field_hz = self.declare_parameter('field_rate', 2.0).value
         self.robot_hz = self.declare_parameter('robot_rate', 10.0).value
-        # Die Unsicherheits-Ellipse kam mit jeder Odometrie (45 Hz) -- fuers
-        # Auge reichen 10 Hz, und der Rechner ist im Lauf ausgelastet.
+        # The uncertainty ellipse came with every odometry (45 Hz) -- 10 Hz is
+        # enough for the eye, and the computer is fully loaded during a run.
         self.unc_hz = self.declare_parameter('uncertainty_rate', 10.0).value
-        self._unc_letzt = 0.0
+        self._unc_last = 0.0
         self.publish_scan_used = self.declare_parameter('publish_scan_used', True).value
         # 2.0 = ~86 % confidence in 2D. Use 2.448 for a proper 95 % ellipse
         # (sqrt of the chi-square 2-DOF quantile).
@@ -323,14 +323,14 @@ class FoxgloveOverlay(Node):
         # WRO traffic signs are 100 mm tall -- cosmetic only, adjust freely.
         self.pillar_h = self.declare_parameter('pillar_height', 0.10).value
 
-        # Parkluecke, verankert an der Startpose (Ursprung der Karte): der
-        # Roboter startet in ihr. Die Innenseite der vorderen Wand liegt
-        # bay_front_offset vor base_link (Hinterachse) -- gemessen 0,215-0,22 m
-        # in parken_test_9 (CCW) und 0,22 m in parken_test_11 (CW). An einer
-        # Feldlinie laesst sie sich nicht festmachen: CCW stand die vordere
-        # Wand auf der Linie zum Eckfeld, CW 0,8 m davor. Die hintere Wand
-        # folgt nach bay_gap. Gezeichnet wird nur, wenn der Start naeher als
-        # bay_detect_dist an der Aussenbande liegt -- also aus der Luecke.
+        # Parking bay, anchored at the start pose (origin of the map): the
+        # robot starts inside it. The inner face of the front wall lies
+        # bay_front_offset ahead of base_link (rear axle) -- measured 0.215-0.22 m
+        # in parken_test_9 (CCW) and 0.22 m in parken_test_11 (CW). It cannot be
+        # tied to a field line: CCW the front wall stood on the line to the
+        # corner square, CW 0.8 m before it. The rear wall follows after
+        # bay_gap. Only drawn if the start is closer than bay_detect_dist to
+        # the outer wall -- i.e. out of the bay.
         self.bay_gap = self.declare_parameter('bay_gap', 0.2625).value
         self.bay_depth = self.declare_parameter('bay_depth', 0.20).value
         self.bay_thick = self.declare_parameter('bay_wall_thickness', 0.02).value
@@ -344,9 +344,9 @@ class FoxgloveOverlay(Node):
         # stop differ on purpose: braking into a corner must not end the run.
         self.speed_start = self.declare_parameter('timer_start_speed', 20.0).value
         self.speed_stop = self.declare_parameter('timer_stop_speed', 8.0).value
-        # Laenger als jeder geplante Halt: nach dem Ausparken ~1,8 s, Scan-Halt
-        # 1,5 s, Nachmessen beim Einparken ~2 s. Mit 1,5 s stoppte die Uhr schon
-        # nach dem Ausparken. Die Endzeit bleibt exakt (Moment des Anhaltens).
+        # Longer than any planned stop: after unparking ~1.8 s, scan stop
+        # 1.5 s, remeasuring while parking ~2 s. With 1.5 s the clock already
+        # stopped after unparking. The end time stays exact (moment of stopping).
         self.stop_hold = self.declare_parameter('timer_stop_hold', 5.0).value
         # How far beyond the field edge the run clock hangs [m].
         self.timer_margin = self.declare_parameter('timer_label_margin', 0.35).value
@@ -730,10 +730,10 @@ class FoxgloveOverlay(Node):
         if 'uncertainty' in self.hidden:
             return
         if self.unc_hz > 0.0:
-            jetzt = time.monotonic()
-            if jetzt - self._unc_letzt < 1.0 / self.unc_hz:
+            now_mono = time.monotonic()
+            if now_mono - self._unc_last < 1.0 / self.unc_hz:
                 return
-            self._unc_letzt = jetzt
+            self._unc_last = now_mono
         c = msg.pose.covariance
         cxx, cxy, cyy, cthth = c[0], c[1], c[7], c[35]
         if cxx <= 0.0 and cyy <= 0.0:
@@ -802,46 +802,46 @@ class FoxgloveOverlay(Node):
         self.pub_obst.publish(arr)
 
     def outer_cb(self, msg):
-        # Eine NEUE Eckgeometrie heisst neuer Lauf: die Hindernisse davor
-        # gehoeren zum alten Feld. /obstacles ist gelatcht, und der
-        # scan_processor haelt zwischen zwei Laeufen die alte Liste -- ohne
-        # das hier stuende sie bis zur naechsten Starterkennung im neuen Feld.
-        # Die erste Geometrie nach dem Start des Overlays loescht nichts: sie
-        # und die gelatchte Liste gehoeren zum selben Lauf.
-        alt = self.outer
-        if alt is not None and (msg.header.stamp.sec, msg.header.stamp.nanosec) != (
-                alt.header.stamp.sec, alt.header.stamp.nanosec):
-            self.get_logger().info('neue Eckgeometrie -> neuer Lauf, alte Hindernisse weg')
+        # A NEW corner geometry means a new run: the obstacles before it
+        # belong to the old field. /obstacles is latched, and the
+        # scan_processor keeps the old list between two runs -- without
+        # this it would stay in the new field until the next start detection.
+        # The first geometry after the overlay starts deletes nothing: it
+        # and the latched list belong to the same run.
+        prev = self.outer
+        if prev is not None and (msg.header.stamp.sec, msg.header.stamp.nanosec) != (
+                prev.header.stamp.sec, prev.header.stamp.nanosec):
+            self.get_logger().info('new corner geometry -> new run, old obstacles removed')
             self._reset_obstacles()
         self.outer = msg
-        self.get_logger().info('corner_geometry empfangen')
+        self.get_logger().info('corner_geometry received')
         bay = self._bay_walls(msg)
         if bay is None and self.bay is not None:
             self._delete_ns(self.pub_field, [('bay', 80), ('bay', 81)])
         self.bay = bay
         if bay is not None:
             self.get_logger().info(
-                'Parkluecke im Overlay: Waende bei (%.2f, %.2f) und (%.2f, %.2f), '
-                'Luecke %.1f cm' % (bay[0][0], bay[0][1], bay[1][0], bay[1][1],
+                'Parking bay in the overlay: walls at (%.2f, %.2f) and (%.2f, %.2f), '
+                'gap %.1f cm' % (bay[0][0], bay[0][1], bay[1][0], bay[1][1],
                                    self.bay_gap * 100.0))
 
     def _bay_walls(self, msg):
-        """Mittelpunkte und Kurs der beiden Buchtwaende, oder None.
+        """Centres and heading of the two bay walls, or None.
 
-        Die Karte ist startverankert: der Ursprung ist die Startpose, +x die
-        Fahrtrichtung beim Start. Die Buchtbande ist die Aussenwand, die dem
-        Ursprung am naechsten liegt.
+        The map is start-anchored: the origin is the start pose, +x the
+        driving direction at the start. The bay wall is the outer wall
+        closest to the origin.
         """
         walls = msg.walls
         i = min(range(len(walls)), key=lambda k: abs(walls[k].d))
         w = walls[i]
         if abs(w.d) > self.bay_detect:
-            return None                     # normaler Start, keine Luecke
-        fx, fy = w.nx * w.d, w.ny * w.d     # Lotfusspunkt des Starts auf der Bande
-        tx, ty = -w.ny, w.nx                # an der Bande entlang ...
+            return None                     # normal start, no bay
+        fx, fy = w.nx * w.d, w.ny * w.d     # foot of the perpendicular from the start on the wall
+        tx, ty = -w.ny, w.nx                # along the wall ...
         if tx < 0.0:
-            tx, ty = -tx, -ty               # ... in Fahrtrichtung (+x)
-        ux, uy = -fx, -fy                   # von der Bande ins Feld
+            tx, ty = -tx, -ty               # ... in driving direction (+x)
+        ux, uy = -fx, -fy                   # from the wall into the field
         n = math.hypot(ux, uy) or 1.0
         ux, uy = ux / n, uy / n
         yaw = math.atan2(ty, tx)
@@ -854,7 +854,7 @@ class FoxgloveOverlay(Node):
 
     def inner_cb(self, msg):
         self.inner = msg
-        self.get_logger().info('inner_geometry empfangen -> Innenband im Overlay')
+        self.get_logger().info('inner_geometry received -> inner band in the overlay')
 
     def scan_cb(self, msg):
         if 'scan_used' in self.hidden:
@@ -868,9 +868,9 @@ class FoxgloveOverlay(Node):
         out.scan_time = msg.scan_time
         out.range_min = msg.range_min
         out.range_max = msg.range_max
-        # numpy statt Python-Schleife: ~3200 Punkte je Scan, 15 Hz. Die Schleife
-        # plus Zuweisung einer Liste (rclpy prueft dann jedes Element einzeln)
-        # kostete 7,9 ms je Scan; als array.array geht es ungeprueft durch.
+        # numpy instead of a Python loop: ~3200 points per scan, 15 Hz. The loop
+        # plus assigning a list (rclpy then checks every element one by one)
+        # cost 7.9 ms per scan; as array.array it goes through unchecked.
         r = np.asarray(msg.ranges, dtype=np.float32)
         a = msg.angle_min + np.arange(r.size) * msg.angle_increment
         ok = (np.isfinite(r) & (r >= msg.range_min)
@@ -987,13 +987,13 @@ class FoxgloveOverlay(Node):
         if 'robot' in self.hidden:
             return
         arr = MarkerArray()
-        # 17,5 x 11 cm wie in ausparken.py. base_link sitzt auf der
-        # Hinterachse, die Nase 3 cm vor dem Lidar (Vorderachse).
-        nase = LIDAR_OFFSET_X + ROBOT_NOSE_PAST_LIDAR
+        # 17.5 x 11 cm as in unpark.py. base_link sits on the rear
+        # axle, the nose 3 cm ahead of the lidar (front axle).
+        nose = LIDAR_OFFSET_X + ROBOT_NOSE_PAST_LIDAR
         body = self._marker('robot', 0, Marker.CUBE, 'base_link',
                             scale=(ROBOT_LENGTH, ROBOT_WIDTH, 0.08),
                             color=(0.25, 0.85, 1.0, 0.75),
-                            at=(nase - ROBOT_LENGTH / 2.0, 0.0, 0.05))
+                            at=(nose - ROBOT_LENGTH / 2.0, 0.0, 0.05))
         arr.markers.append(body)
         arr.markers.append(self._marker(
             'robot', 1, Marker.ARROW, 'base_link', scale=(0.018, 0.045, 0),

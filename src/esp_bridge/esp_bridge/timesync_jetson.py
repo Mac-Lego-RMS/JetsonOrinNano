@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Zeitsynchronisation der Jetson-Bridge gegen den ESP32-S3-Controller.
+"""Time synchronisation of the Jetson bridge against the ESP32-S3 controller.
 
-Beantwortet die Frage "wann wurde dieses Paket losgeschickt?" in der Uhr des
-Jetson. Zwei Bausteine, siehe Abschnitt 5 in JETSON_BRIDGE.md:
+Answers the question "when was this packet sent?" in the Jetson's clock.
+Two building blocks, see section 5 in JETSON_BRIDGE.md:
 
-  * ``EspClock``   - haelt den Uhrenversatz und die Gangabweichung zwischen
-                     ESP-Uhr (esp_timer, us seit Boot) und CLOCK_MONOTONIC des
-                     Jetson. Rechnet ESP-Zeitstempel in Jetson-Zeit um.
-  * ``FrameParser`` - zerlegt den RX-Strom in Pakete und versteht dabei beide
-                     Rahmenformen, 0xA5 (ohne) und 0xA6 (mit Sendezeitstempel).
+  * ``EspClock``   - holds the clock offset and the rate drift between the
+                     ESP clock (esp_timer, us since boot) and the Jetson's
+                     CLOCK_MONOTONIC. Converts ESP timestamps to Jetson time.
+  * ``FrameParser`` - splits the RX stream into packets and understands both
+                     frame types, 0xA5 (without) and 0xA6 (with send timestamp).
 
-Und darueber ``TimeSync``, das den Ping-Pong 0xB0/0xB1 fuehrt.
+And on top of that ``TimeSync``, which runs the ping-pong 0xB0/0xB1.
 
-Das Modul haengt nur fuer den echten Portbetrieb an pyserial; Parser, Rechnung
-und Selbsttest laufen ohne Hardware:
+The module only needs pyserial for real port operation; parser, maths
+and self-test run without hardware:
 
     python3 timesync_jetson.py --selftest
     python3 timesync_jetson.py --port /dev/ttyTHS1
@@ -26,18 +26,18 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
-# --- Rahmen ---------------------------------------------------------------
+# --- Frames ---------------------------------------------------------------
 
-START_BYTE = 0xA5        # Rahmen ohne Zeitstempel
-START_BYTE_TS = 0xA6     # Rahmen mit uint32-Sendezeitstempel hinter dem CMD
+START_BYTE = 0xA5        # frame without timestamp
+START_BYTE_TS = 0xA6     # frame with uint32 send timestamp after the CMD
 
-# --- Befehle, die der Jetson sendet ---
+# --- Commands the Jetson sends ---
 CMD_TIME_SYNC = 0xB0
 CMD_STAMP_MODE = 0xB2
 
-# --- Befehle, die der ESP sendet, mit ihrer Nutzlastlaenge ---
-# Ohne Laengenfeld im Protokoll muss diese Tabelle stimmen; ein falscher Wert
-# frisst das naechste Paket mit auf.
+# --- Commands the ESP sends, with their payload length ---
+# The protocol has no length field, so this table must be right; a wrong value
+# swallows the next packet as well.
 RX_PAYLOAD_LEN: Dict[int, int] = {
     0x42: 11,   # CAL_RSP
     0x70: 1,    # BUTTON
@@ -49,31 +49,31 @@ RX_PAYLOAD_LEN: Dict[int, int] = {
     0xA2: 6,    # BATTERY_WARN
     0xB1: 17,   # TIME_RSP  : seq + int64 t_rx + int64 t_tx
     0xB3: 1,    # STAMP_RSP
-    0xC1: 12,   # TELEMETRY : int32 pos + int32 tempo + int16 duty + int16 mA
+    0xC1: 12,   # TELEMETRY : int32 pos + int32 speed + int16 duty + int16 mA
 }
 
-BITS_PER_BYTE = 10       # 8N1: Start + 8 Daten + Stopp
+BITS_PER_BYTE = 10       # 8N1: start + 8 data + stop
 U32 = 1 << 32
 
 
 def monotonic() -> float:
-    """Zeitbasis des Jetson.
+    """Time base of the Jetson.
 
-    Bewusst monoton: time.time() wuerde bei einem NTP-Sprung mitten in der
-    Messung den Versatz verschieben. Unter Linux ist das CLOCK_MONOTONIC.
+    Monotonic on purpose: time.time() would shift the offset if NTP jumps
+    in the middle of a measurement. On Linux this is CLOCK_MONOTONIC.
 
-    Der Bezug zur Wanduhr wird erst ganz am Ende hergestellt, mit einem einmal
-    gemessenen Abstand:  wanduhr = mono_zeit + (time.time() - monotonic())
+    The link to the wall clock is only made at the very end, with a distance
+    measured once:  wall_clock = mono_time + (time.time() - monotonic())
     """
     return time.monotonic()
 
 
 def unwrap_u32(stamp32: int, last_full: int) -> int:
-    """Den 32-Bit-Rahmenstempel auf die volle ESP-Uhr hochziehen.
+    """Extend the 32-bit frame stamp to the full ESP clock.
 
-    ``last_full`` ist der letzte bekannte volle Wert (aus 0xB1). Der 32-Bit-
-    Zaehler laeuft alle 71,6 Minuten ueber; solange zwischen zwei bekannten
-    Punkten weniger als 35,8 Minuten liegen, ist die Zuordnung eindeutig.
+    ``last_full`` is the last known full value (from 0xB1). The 32-bit
+    counter wraps every 71.6 minutes; as long as two known points are less
+    than 35.8 minutes apart, the mapping is unambiguous.
     """
     coarse = (last_full & ~(U32 - 1)) | stamp32
     for cand in (coarse - U32, coarse, coarse + U32):
@@ -84,13 +84,13 @@ def unwrap_u32(stamp32: int, last_full: int) -> int:
 
 @dataclass
 class Frame:
-    """Ein empfangenes Paket."""
+    """A received packet."""
 
     cmd: int
     payload: bytes
-    #: Roher 32-Bit-Sendestempel des ESP, nur bei 0xA6-Rahmen.
+    #: Raw 32-bit send stamp of the ESP, only in 0xA6 frames.
     esp_tx_raw: Optional[int] = None
-    #: Jetson-Uhr (monoton, Sekunden), als das letzte Byte gelesen wurde.
+    #: Jetson clock (monotonic, seconds) when the last byte was read.
     rx_mono: float = 0.0
 
     @property
@@ -99,26 +99,26 @@ class Frame:
 
 
 class FrameParser:
-    """Zerlegt den RX-Strom in Pakete.
+    """Splits the RX stream into packets.
 
-    Toleriert dreierlei, was auf dieser Leitung normal ist: ASCII-Statuszeilen
-    des ESP, Bytes nach einem Sync-Verlust und unbekannte CMDs. Alles davon
-    landet in ``stray`` bzw. ``unknown`` und fuehrt nur zum Resync.
+    Tolerates three things that are normal on this line: ASCII status lines
+    from the ESP, bytes after a loss of sync, and unknown CMDs. All of them
+    end up in ``stray`` or ``unknown`` and only lead to a resync.
     """
 
     def __init__(self) -> None:
         self._buf = bytearray()
         self.stray = 0
         self.unknown = 0
-        self.text: List[bytes] = []      # aufgesammelte ASCII-Zeilen
+        self.text: List[bytes] = []      # collected ASCII lines
 
     def feed(self, data: bytes, now: Optional[float] = None) -> List[Frame]:
-        """Neue Bytes einwerfen, fertige Pakete herausbekommen.
+        """Put new bytes in, get finished packets out.
 
-        ``now`` ist die Jetson-Uhr beim Lesen dieses Blocks; alle darin
-        vollstaendig gewordenen Pakete bekommen diesen Zeitpunkt. Genauer geht
-        es ohne Byte-Zeitstempel des Treibers nicht - der Fehler ist die Dauer
-        eines Lesezyklus und faellt bei blockierendem ``read(1)`` weg.
+        ``now`` is the Jetson clock when this block was read; every packet
+        completed in it gets this time. Without per-byte timestamps from the
+        driver it cannot be more exact - the error is the length of one read
+        cycle and goes away with a blocking ``read(1)``.
         """
         if now is None:
             now = monotonic()
@@ -135,7 +135,7 @@ class FrameParser:
         buf = self._buf
 
         while True:
-            # 1. Auf ein Startbyte aufsynchronisieren, Vorlauf als Text merken.
+            # 1. Sync to a start byte, keep what came before as text.
             start = 0
             while start < len(buf) and buf[start] not in (START_BYTE, START_BYTE_TS):
                 start += 1
@@ -147,12 +147,12 @@ class FrameParser:
                 return None
 
             stamped = buf[0] == START_BYTE_TS
-            head = 2 + (4 if stamped else 0)      # Start + CMD (+ Stempel)
+            head = 2 + (4 if stamped else 0)      # start + CMD (+ stamp)
             cmd = buf[1]
             length = RX_PAYLOAD_LEN.get(cmd)
             if length is None:
-                # Unbekanntes CMD: nur das Startbyte verwerfen, nicht mehr - das
-                # naechste echte Paket koennte direkt dahinter anfangen.
+                # Unknown CMD: drop only the start byte, nothing more - the
+                # next real packet could start right behind it.
                 self.unknown += 1
                 del buf[:1]
                 continue
@@ -174,47 +174,47 @@ class FrameParser:
 
 @dataclass
 class SyncSample:
-    """Eine Messrunde."""
+    """One sync round."""
 
-    esp_s: float      # ESP-Uhr in der Mitte der Runde, Sekunden
-    offset: float     # ESP-Uhr minus Jetson-Uhr, Sekunden
-    rtt: float        # Umlaufzeit ohne die Bearbeitungszeit des ESP
+    esp_s: float      # ESP clock in the middle of the round, seconds
+    offset: float     # ESP clock minus Jetson clock, seconds
+    rtt: float        # round trip without the ESP's processing time
 
 
 class EspClock:
-    """Uhrenversatz und Gangabweichung zwischen ESP und Jetson.
+    """Clock offset and rate drift between ESP and Jetson.
 
-    Der Versatz aus einer einzelnen Runde ist nur so gut wie die Symmetrie von
-    Hin- und Rueckweg. Der ESP liest seinen UART aus ``loop()``, also schwankt
-    die Empfangszeit um Millisekunden. Jede solche Verzoegerung verlaengert aber
-    auch den Umlauf - deshalb zaehlt die Runde mit dem kleinsten ``rtt``, und
-    Runden mit deutlich groesserem Umlauf fliegen aus der Driftschaetzung.
+    The offset from a single round is only as good as the symmetry of the
+    outbound and return path. The ESP reads its UART from ``loop()``, so the
+    receive time varies by milliseconds. But every such delay also makes the
+    round trip longer - so the round with the smallest ``rtt`` counts, and
+    rounds with a clearly longer round trip are dropped from the drift fit.
     """
 
-    #: Wie viel laenger als die schnellste Runde eine Messung dauern darf,
-    #: um noch in die Geradenschaetzung einzugehen. **Additiv**, nicht als
-    #: Faktor: ein Faktor kippt, sobald der beste Umlauf negativ ist - dann
-    #: waere die Schranke kleiner als der Bestwert und nichts kaeme durch.
+    #: How much longer than the fastest round a measurement may take and
+    #: still go into the line fit. **Additive**, not a factor: a factor
+    #: breaks as soon as the best round trip is negative - then the bound
+    #: would be smaller than the best value and nothing would get through.
     RTT_MARGIN = 0.002
 
     def __init__(self, window: int = 32) -> None:
         self.window = window
         self.samples: List[SyncSample] = []
-        self.last_full_us: int = 0     # letzter bekannter voller ESP-Zaehler
-        self._a: Optional[float] = None   # Versatz bei _ref
-        self._b: float = 0.0              # Gangabweichung (s/s)
-        self._ref: float = 0.0            # Bezugspunkt in ESP-Sekunden
-        self.boot_count = 0               # erkannte ESP-Neustarts
-        self.rejected = 0                 # verworfene Runden im Fenster
+        self.last_full_us: int = 0     # last known full ESP counter
+        self._a: Optional[float] = None   # offset at _ref
+        self._b: float = 0.0              # rate drift (s/s)
+        self._ref: float = 0.0            # reference point in ESP seconds
+        self.boot_count = 0               # detected ESP reboots
+        self.rejected = 0                 # rejected rounds in the window
 
-    # --- Messung einspeisen ---------------------------------------------
+    # --- Feeding in measurements ------------------------------------------
 
     def add_round(self, t1: float, t2_us: int, t3_us: int, t4: float) -> SyncSample:
-        """Eine Runde verrechnen. Alle vier Zeitpunkte meinen das letzte Byte
-        des jeweiligen Rahmens: t1/t4 in Jetson-Sekunden, t2/t3 in ESP-us."""
+        """Process one round. All four times refer to the last byte of the
+        respective frame: t1/t4 in Jetson seconds, t2/t3 in ESP us."""
         if t2_us < self.last_full_us - 1_000_000:
-            # Die ESP-Uhr laeuft ab Boot. Springt sie zurueck, war ein Reset -
-            # alles Gelernte ist dann falsch.
+            # The ESP clock runs from boot. If it jumps back, there was a
+            # reset - everything learned so far is wrong then.
             self.reset(keep_boot_count=True)
             self.boot_count += 1
 
@@ -240,15 +240,15 @@ class EspClock:
         if not keep_boot_count:
             self.boot_count = 0
 
-    # --- Auswertung -------------------------------------------------------
+    # --- Evaluation -------------------------------------------------------
 
     def _fit(self) -> None:
         good = self._good_samples()
         self.rejected = len(self.samples) - len(good)
 
         if not good:
-            # Lieber gar kein Zeitstempel als ein falscher: valid wird False,
-            # die Bridge faellt auf die Lesezeit zurueck und meldet es.
+            # Better no timestamp at all than a wrong one: valid becomes False,
+            # the bridge falls back to the read time and reports it.
             self._a = None
             self._b = 0.0
             return
@@ -256,14 +256,14 @@ class EspClock:
         self._ref = good[-1].esp_s
 
         if len(good) < 4:
-            # Zu wenige Punkte fuer eine Gerade: bester Einzelwert, keine Drift.
+            # Too few points for a line: best single value, no drift.
             self._a = min(good, key=lambda s: s.rtt).offset
             self._b = 0.0
             return
 
-        # Kleinste Quadrate ueber offset(esp_s). Die ESP-Zeit als unabhaengige
-        # Groesse zu nehmen macht to_jetson() direkt auswertbar, ohne die
-        # Jetson-Zeit vorher schon zu kennen.
+        # Least squares over offset(esp_s). Taking the ESP time as the
+        # independent variable makes to_jetson() directly computable, without
+        # having to know the Jetson time first.
         n = len(good)
         xs = [s.esp_s - self._ref for s in good]
         ys = [s.offset for s in good]
@@ -279,13 +279,13 @@ class EspClock:
         self._a = my + self._b * (0.0 - mx)
 
     def _good_samples(self) -> List[SyncSample]:
-        """Die brauchbaren Messrunden.
+        """The usable sync rounds.
 
-        Ein **negativer Umlauf ist physikalisch unmoeglich** - er heisst, dass
-        einer der vier Zeitpunkte falsch gemessen wurde (typisch: t1 kam vom
-        Treiber zu spaet zurueck). Solche Runden fliegen raus statt in den Fit
-        einzugehen; frueher hat ``min()`` ausgerechnet sie als "beste"
-        ausgesucht, weil sie die kleinste Zahl trugen.
+        A **negative round trip is physically impossible** - it means that
+        one of the four times was measured wrong (typically: t1 came back
+        from the driver too late). Such rounds are dropped instead of going
+        into the fit; ``min()`` used to pick exactly them as the "best",
+        because they carried the smallest number.
         """
         usable = [s for s in self.samples if s.rtt >= 0.0]
         if not usable:
@@ -299,61 +299,61 @@ class EspClock:
 
     @property
     def offset(self) -> float:
-        """Aktueller Versatz in Sekunden (ESP-Uhr minus Jetson-Uhr)."""
+        """Current offset in seconds (ESP clock minus Jetson clock)."""
         if self._a is None:
-            raise RuntimeError("noch nicht synchronisiert")
+            raise RuntimeError("not synchronised yet")
         return self._a
 
     @property
     def drift_ppm(self) -> float:
-        """Gangabweichung des ESP gegenueber dem Jetson in ppm."""
+        """Rate drift of the ESP relative to the Jetson in ppm."""
         return self._b * 1e6
 
     @property
     def best_rtt(self) -> float:
-        """Schnellste brauchbare Runde. NaN, solange keine taugt."""
+        """Fastest usable round. NaN as long as none is usable."""
         return min((s.rtt for s in self.samples if s.rtt >= 0.0),
                    default=float("nan"))
 
     def offset_at(self, esp_us: int) -> float:
         if self._a is None:
-            raise RuntimeError("noch nicht synchronisiert")
+            raise RuntimeError("not synchronised yet")
         return self._a + self._b * (esp_us / 1e6 - self._ref)
 
-    # --- Umrechnen --------------------------------------------------------
+    # --- Conversion -------------------------------------------------------
 
     def to_jetson(self, esp_us: int) -> float:
-        """Volle ESP-Mikrosekunden -> Jetson-Monotonic in Sekunden."""
+        """Full ESP microseconds -> Jetson monotonic in seconds."""
         return esp_us / 1e6 - self.offset_at(esp_us)
 
     def stamp_to_jetson(self, stamp32: int) -> float:
-        """32-Bit-Rahmenstempel -> Jetson-Monotonic in Sekunden."""
+        """32-bit frame stamp -> Jetson monotonic in seconds."""
         return self.to_jetson(unwrap_u32(stamp32, self.last_full_us))
 
     def frame_time(self, frame: Frame) -> Optional[float]:
-        """Sendezeitpunkt eines Pakets in Jetson-Zeit, oder None bei einem
-        ungestempelten Rahmen."""
+        """Send time of a packet in Jetson time, or None for an
+        unstamped frame."""
         if frame.esp_tx_raw is None or not self.valid:
             return None
         return self.stamp_to_jetson(frame.esp_tx_raw)
 
     def latency(self, frame: Frame) -> Optional[float]:
-        """Wie lange das Paket von "abgeschickt" bis "gelesen" gebraucht hat."""
+        """How long the packet took from "sent" to "read"."""
         sent = self.frame_time(frame)
         return None if sent is None else frame.rx_mono - sent
 
 
 class TimeSync:
-    """Fuehrt den Ping-Pong 0xB0/0xB1 und pflegt eine ``EspClock``.
+    """Runs the ping-pong 0xB0/0xB1 and maintains an ``EspClock``.
 
-    Bewusst ohne eigenen Thread und ohne Port: ``send`` schreibt einen Rahmen
-    und wartet, bis er wirklich draussen ist; die Antworten wirft der
-    RX-Pfad der Bridge mit ``handle`` herein. So passt das sowohl in eine
-    Thread- als auch in eine asyncio-Bridge.
+    Deliberately without its own thread and without a port: ``send`` writes a
+    frame and waits until it is really out; the replies are passed in by the
+    bridge's RX path via ``handle``. That way it fits into a threaded bridge
+    as well as an asyncio one.
     """
 
     def __init__(self, send: Callable[[bytes], float], clock: Optional[EspClock] = None):
-        #: send(rahmen) -> Jetson-Zeit, zu der das letzte Byte draussen war.
+        #: send(frame) -> Jetson time at which the last byte was out.
         self._send = send
         self.clock = clock or EspClock()
         self._seq = 0
@@ -361,55 +361,54 @@ class TimeSync:
         self.lost = 0
 
     def request(self) -> int:
-        """Eine Runde anstossen. Gibt die verwendete seq zurueck."""
+        """Start one round. Returns the seq used."""
         self._seq = (self._seq + 1) & 0xFF
         seq = self._seq
         if len(self._pending) > 8:
-            # Antworten bleiben aus - alte Eintraege nicht ewig mitschleppen.
+            # Replies are not coming - do not drag old entries along forever.
             self.lost += len(self._pending)
             self._pending.clear()
         self._pending[seq] = self._send(bytes([START_BYTE, CMD_TIME_SYNC, seq]))
         return seq
 
     def handle(self, frame: Frame) -> Optional[SyncSample]:
-        """Ein empfangenes Paket anbieten. Liefert die Messrunde, wenn es eine
-        passende 0xB1-Antwort war, sonst None."""
+        """Offer a received packet. Returns the sync round if it was a
+        matching 0xB1 reply, otherwise None."""
         if frame.cmd != 0xB1:
             return None
         seq = frame.payload[0]
         t1 = self._pending.pop(seq, None)
         if t1 is None:
-            return None     # Nachzuegler nach einem Timeout
+            return None     # straggler after a timeout
         t2_us, t3_us = struct.unpack(">qq", frame.payload[1:17])
         return self.clock.add_round(t1, t2_us, t3_us, frame.rx_mono)
 
     @staticmethod
     def stamp_mode_frame(on: bool) -> bytes:
-        """Rahmen, der das Stempeln der ESP-Pakete ein- oder ausschaltet."""
+        """Frame that switches stamping of the ESP packets on or off."""
         return bytes([START_BYTE, CMD_STAMP_MODE, 1 if on else 0])
 
 
 # ==========================================================================
-# Betrieb am echten Port
+# Operation on the real port
 # ==========================================================================
 
 def _serial_sender(ser) -> Callable[[bytes], float]:
-    """Schreibt einen Rahmen in einem Rutsch und gibt den Zeitpunkt zurueck, zu
-    dem das letzte Byte die Leitung verlassen hat.
+    """Writes a frame in one go and returns the time at which the last byte
+    left the line.
 
-    Dieser Zeitpunkt wird **gerechnet, nicht gemessen**: Uhr nehmen, bevor der
-    Rahmen in den Treiber geht, und die Uebertragungsdauer (10 Bit je Byte)
-    dazuzaehlen - dieselbe Rechnung, die der ESP fuer seine Seite macht.
+    This time is **computed, not measured**: take the clock before the frame
+    goes into the driver and add the transmission time (10 bits per byte) -
+    the same calculation the ESP does for its side.
 
-    Der naheliegende Weg, nach ``write()`` ein ``flush()`` zu setzen und dann
-    die Uhr zu lesen, sieht sauberer aus, ist es aber nicht: ``flush()``
-    laeuft auf ``tcdrain()`` hinaus, und das kehrt je nach Treiber (auf dem
-    Tegra-UART des Jetson zuverlaessig) deutlich spaeter zurueck als das
-    letzte Byte die Leitung verlaesst. Dann wird t1 zu spaet und der Umlauf
-    rechnerisch negativ.
+    The obvious way, putting a ``flush()`` after ``write()`` and then reading
+    the clock, looks cleaner but is not: ``flush()`` ends up in
+    ``tcdrain()``, and depending on the driver (reliably on the Jetson's
+    Tegra UART) that returns clearly later than the last byte leaves the
+    line. Then t1 is too late and the round trip comes out negative.
 
-    Das ``flush()`` vorher bleibt: es sorgt dafuer, dass nichts Altes mehr im
-    Puffer steht und unser Rahmen wirklich sofort losgeht.
+    The ``flush()`` before stays: it makes sure nothing old is left in the
+    buffer and our frame really goes out immediately.
     """
 
     def send(frame: bytes) -> float:
@@ -422,16 +421,16 @@ def _serial_sender(ser) -> Callable[[bytes], float]:
 
 
 def read_available(ser) -> bytes:
-    """Alles lesen, was da ist - und zwar sofort, sobald das erste Byte kommt.
+    """Read everything that is there - and do it immediately, as soon as the
+    first byte arrives.
 
-    ``ser.read(n)`` mit n > 1 wartet, bis n Byte beisammen sind oder der
-    Timeout ablaeuft. Bei einem Paketstrom heisst das: mehrere Pakete landen
-    in einem Block und bekommen alle denselben Empfangszeitpunkt - den des
-    letzten. Fuer den Zeitabgleich ist das toedlich, der Fehler wird so gross
-    wie der Timeout.
+    ``ser.read(n)`` with n > 1 waits until n bytes are together or the
+    timeout runs out. With a packet stream that means: several packets land
+    in one block and all get the same receive time - that of the last one.
+    For time sync that is deadly, the error becomes as large as the timeout.
 
-    ``read(1)`` blockiert nur bis zum ersten Byte; der Rest kommt ohne Warten
-    hinterher.
+    ``read(1)`` only blocks until the first byte; the rest follows without
+    waiting.
     """
     data = ser.read(1)
     if data and ser.in_waiting:
@@ -441,9 +440,9 @@ def read_available(ser) -> bytes:
 
 def run_live(port: str, baud: int = 115200, rounds: int = 12,
              interval: float = 10.0, duration: float = 60.0) -> None:
-    """Synchronisieren, Stempel einschalten, eintreffende Pakete mit
-    Sendezeitpunkt und Laufzeit ausgeben."""
-    import serial   # nur hier importieren, damit der Selbsttest ohne auskommt
+    """Synchronise, switch stamps on, print incoming packets with send time
+    and latency."""
+    import serial   # only imported here so the self-test works without it
 
     with serial.Serial(port, baud, timeout=0.05) as ser:
         parser = FrameParser()
@@ -458,7 +457,7 @@ def run_live(port: str, baud: int = 115200, rounds: int = 12,
                     frames.extend(parser.feed(data))
             return frames
 
-        print(f"-> {rounds} Messrunden ...")
+        print(f"-> {rounds} sync rounds ...")
         for _ in range(rounds):
             sync.request()
             for frame in pump(0.02):
@@ -466,14 +465,14 @@ def run_live(port: str, baud: int = 115200, rounds: int = 12,
 
         clock = sync.clock
         if not clock.valid:
-            raise SystemExit("keine Antwort auf 0xB0 - Verkabelung/Baudrate pruefen")
-        print(f"   Versatz {clock.offset * 1e3:+.3f} ms | "
-              f"bester Umlauf {clock.best_rtt * 1e3:.3f} ms | "
-              f"Drift {clock.drift_ppm:+.1f} ppm")
+            raise SystemExit("no reply to 0xB0 - check wiring/baud rate")
+        print(f"   offset {clock.offset * 1e3:+.3f} ms | "
+              f"best round trip {clock.best_rtt * 1e3:.3f} ms | "
+              f"drift {clock.drift_ppm:+.1f} ppm")
 
         ser.write(TimeSync.stamp_mode_frame(True))
         ser.flush()
-        print("-> Sendezeitstempel eingeschaltet, lausche ...")
+        print("-> send timestamps switched on, listening ...")
 
         next_sync = monotonic() + interval
         end = monotonic() + duration
@@ -484,10 +483,10 @@ def run_live(port: str, baud: int = 115200, rounds: int = 12,
                 lat = clock.latency(frame)
                 when = clock.frame_time(frame)
                 if when is None:
-                    print(f"   cmd=0x{frame.cmd:02X} (ohne Stempel)")
+                    print(f"   cmd=0x{frame.cmd:02X} (no stamp)")
                 else:
-                    print(f"   cmd=0x{frame.cmd:02X} gesendet bei t={when:.6f} "
-                          f"| Laufzeit {lat * 1e3:.2f} ms")
+                    print(f"   cmd=0x{frame.cmd:02X} sent at t={when:.6f} "
+                          f"| latency {lat * 1e3:.2f} ms")
             for line in parser.text:
                 print(f"   [esp] {line.decode('ascii', 'replace')}")
             parser.text.clear()
@@ -497,18 +496,18 @@ def run_live(port: str, baud: int = 115200, rounds: int = 12,
 
 
 # ==========================================================================
-# Selbsttest - simulierter ESP, keine Hardware noetig
+# Self-test - simulated ESP, no hardware needed
 # ==========================================================================
 
 @dataclass
 class _FakeEsp:
-    """Simuliert die ESP-Seite inklusive Uhrenversatz, Drift und
-    schwankender Bearbeitungszeit."""
+    """Simulates the ESP side including clock offset, drift and
+    varying processing time."""
 
-    offset: float = 123.456789     # ESP-Uhr minus Jetson-Uhr, Sekunden
+    offset: float = 123.456789     # ESP clock minus Jetson clock, seconds
     drift_ppm: float = 40.0
     baud: int = 115200
-    jitter: List[float] = field(default_factory=list)   # Verzoegerung je Runde
+    jitter: List[float] = field(default_factory=list)   # delay per round
     _round: int = 0
 
     def esp_us(self, jetson_s: float) -> int:
@@ -518,17 +517,17 @@ class _FakeEsp:
         return nbytes * BITS_PER_BYTE / self.baud
 
     def answer(self, seq: int, t1: float) -> tuple:
-        """Antwort auf eine Anfrage, die zum Zeitpunkt t1 komplett drausssen war.
-        Liefert (rahmen, t4) - t4 ist die Jetson-Zeit beim letzten Byte."""
+        """Reply to a request that was completely out at time t1.
+        Returns (frame, t4) - t4 is the Jetson time at the last byte."""
         delay = self.jitter[self._round % len(self.jitter)] if self.jitter else 0.0
         self._round += 1
 
-        # t2: Ankunft beim ESP. Leitung ist quasi verzoegerungsfrei, aber der
-        # ESP liest aus loop() - das ist der Jitter.
+        # t2: arrival at the ESP. The line has practically no delay, but the
+        # ESP reads from loop() - that is the jitter.
         t2_jetson = t1 + delay
         t2_us = self.esp_us(t2_jetson)
 
-        # Der ESP antwortet sofort; t3 rechnet die Uebertragungsdauer ein.
+        # The ESP replies immediately; t3 includes the transmission time.
         frame = bytes([START_BYTE, 0xB1, seq]) + struct.pack(">qq", t2_us, 0)
         t3_jetson = t2_jetson + self._wire(len(frame))
         t3_us = self.esp_us(t3_jetson)
@@ -550,48 +549,48 @@ def _selftest() -> int:
             failures += 1
 
     print("Parser")
-    # --- ungestempelt, gestempelt, ASCII dazwischen, unbekanntes CMD ---
+    # --- unstamped, stamped, ASCII in between, unknown CMD ---
     p = FrameParser()
     stream = (b"System Ready. blah\r\n"
               + bytes([START_BYTE, 0x70, 0x01])
               + bytes([START_BYTE_TS, 0x93, 0x00, 0x01, 0x02, 0x03,
                        0x07, 0x00, 0x00, 0x00, 0x03, 0x84])
-              + bytes([START_BYTE, 0x55])          # unbekanntes CMD
+              + bytes([START_BYTE, 0x55])          # unknown CMD
               + bytes([START_BYTE, 0x84, 0x00]))
     frames = p.feed(stream, now=1.0)
-    check("Paketzahl", len(frames) == 3, f"{len(frames)}")
-    check("BUTTON ungestempelt", frames[0].cmd == 0x70 and not frames[0].stamped)
-    check("MOVE_DONE gestempelt",
+    check("packet count", len(frames) == 3, f"{len(frames)}")
+    check("BUTTON unstamped", frames[0].cmd == 0x70 and not frames[0].stamped)
+    check("MOVE_DONE stamped",
           frames[1].cmd == 0x93 and frames[1].esp_tx_raw == 0x00010203)
-    check("MOVE_DONE Nutzlast", frames[1].payload == bytes([0x07, 0, 0, 0, 3, 0x84]))
-    check("unbekanntes CMD verworfen", p.unknown == 1)
-    check("ASCII aufgesammelt", p.text and p.text[0].startswith(b"System Ready"))
+    check("MOVE_DONE payload", frames[1].payload == bytes([0x07, 0, 0, 0, 3, 0x84]))
+    check("unknown CMD dropped", p.unknown == 1)
+    check("ASCII collected", p.text and p.text[0].startswith(b"System Ready"))
 
-    # --- byteweise Zustellung muss dasselbe ergeben ---
+    # --- byte-by-byte delivery must give the same result ---
     p2 = FrameParser()
     got: List[Frame] = []
     for i in range(len(stream)):
         got += p2.feed(stream[i:i + 1], now=1.0)
-    check("byteweise identisch",
+    check("byte by byte identical",
           [(f.cmd, f.payload, f.esp_tx_raw) for f in got]
           == [(f.cmd, f.payload, f.esp_tx_raw) for f in frames])
 
     print("Unwrapping")
-    check("kein Ueberlauf", unwrap_u32(1000, 900) == 1000)
-    check("Ueberlauf vorwaerts",
+    check("no wrap", unwrap_u32(1000, 900) == 1000)
+    check("wrap forward",
           unwrap_u32(10, U32 - 10) == U32 + 10,
           f"{unwrap_u32(10, U32 - 10)}")
-    check("Ueberlauf rueckwaerts",
+    check("wrap backward",
           unwrap_u32(U32 - 10, U32 + 10) == U32 - 10)
 
-    print("Uhrenabgleich")
+    print("Clock sync")
     esp = _FakeEsp(offset=123.456789, drift_ppm=40.0,
                    jitter=[0.0004, 0.0031, 0.0009, 0.0002, 0.0055, 0.0012])
     clock = EspClock()
     t_now = [1000.0]
 
     def fake_send(frame: bytes) -> float:
-        # Zeit fuers Rausschieben der Anfrage
+        # time for shifting out the request
         t_now[0] += len(frame) * BITS_PER_BYTE / 115200
         return t_now[0]
 
@@ -603,56 +602,56 @@ def _selftest() -> int:
         frames = FrameParser().feed(answer, now=t4)
         check_sample = sync.handle(frames[0])
         assert check_sample is not None
-        t_now[0] += 0.02        # 20 ms Pause bis zur naechsten Runde
+        t_now[0] += 0.02        # 20 ms pause until the next round
 
-    ist = clock.offset
-    soll = esp.offset * (1 + esp.drift_ppm / 1e6)
-    check("Versatz getroffen", abs(ist - soll) < 1e-3,
-          f"Fehler {(ist - soll) * 1e6:+.1f} us")
-    check("bester Umlauf plausibel", 0 <= clock.best_rtt < 0.002,
+    actual = clock.offset
+    target = esp.offset * (1 + esp.drift_ppm / 1e6)
+    check("offset hit", abs(actual - target) < 1e-3,
+          f"error {(actual - target) * 1e6:+.1f} us")
+    check("best round trip plausible", 0 <= clock.best_rtt < 0.002,
           f"{clock.best_rtt * 1e6:.0f} us")
 
-    print("Sendezeitpunkt eines Pakets")
-    sent_at = t_now[0] + 0.5                     # Jetson-Zeit des Absendens
+    print("Send time of a packet")
+    sent_at = t_now[0] + 0.5                     # Jetson time of sending
     frame = esp.stamped(0x70, b"\x01", sent_at)
     parsed = FrameParser().feed(frame, now=sent_at + 0.0012)[0]
-    rueck = clock.frame_time(parsed)
-    check("Sendezeit rekonstruiert", abs(rueck - sent_at) < 1e-3,
-          f"Fehler {(rueck - sent_at) * 1e6:+.1f} us")
-    check("Laufzeit plausibel", abs(clock.latency(parsed) - 0.0012) < 1e-3,
+    recovered = clock.frame_time(parsed)
+    check("send time reconstructed", abs(recovered - sent_at) < 1e-3,
+          f"error {(recovered - sent_at) * 1e6:+.1f} us")
+    check("latency plausible", abs(clock.latency(parsed) - 0.0012) < 1e-3,
           f"{clock.latency(parsed) * 1e3:.2f} ms")
 
-    print("Unbrauchbare Runden")
-    # Ein negativer Umlauf heisst: eine der vier Zeitmessungen war falsch.
-    # Frueher hat min() genau diese Runde als "beste" ausgesucht und der
-    # Faktor-Filter (best * 2.0) hat mit negativem best alles verworfen und
-    # dann auf *alle* Proben zurueckgefallen - der Muell landete im Fit.
-    dreck = EspClock()
+    print("Unusable rounds")
+    # A negative round trip means: one of the four time measurements was wrong.
+    # min() used to pick exactly this round as the "best", and the factor
+    # filter (best * 2.0) with a negative best rejected everything and then
+    # fell back to *all* samples - the garbage ended up in the fit.
+    dirty = EspClock()
     for i in range(6):
         t1 = 100.0 + i
-        dreck.add_round(t1, int((t1 + 0.010) * 1e6), int((t1 + 0.012) * 1e6),
-                        t1 + 0.001)          # t4 vor der ESP-Bearbeitung
-    check("negative Runden erkannt", dreck.rejected == 6, f"{dreck.rejected}")
-    check("kein Stempel aus Muell", not dreck.valid)
-    check("best_rtt ist NaN", dreck.best_rtt != dreck.best_rtt)
+        dirty.add_round(t1, int((t1 + 0.010) * 1e6), int((t1 + 0.012) * 1e6),
+                        t1 + 0.001)          # t4 before the ESP processing
+    check("negative rounds detected", dirty.rejected == 6, f"{dirty.rejected}")
+    check("no stamp from garbage", not dirty.valid)
+    check("best_rtt is NaN", dirty.best_rtt != dirty.best_rtt)
 
-    # Eine gute Runde dazwischen muss sich gegen die kaputten durchsetzen.
-    gut_offset = 50.0
+    # A good round in between must win against the broken ones.
+    good_offset = 50.0
     for i in range(6):
         t1 = 200.0 + i
-        t2 = t1 + gut_offset + 0.0004
+        t2 = t1 + good_offset + 0.0004
         t3 = t2 + 0.0018
-        dreck.add_round(t1, int(t2 * 1e6), int(t3 * 1e6), t1 + 0.0025)
-    check("gute Runden setzen sich durch", dreck.valid)
-    check("Versatz trotz Muell getroffen",
-          dreck.valid and abs(dreck.offset - gut_offset) < 1e-3,
-          f"{(dreck.offset - gut_offset) * 1e6:+.0f} us" if dreck.valid else "-")
-    check("Umlauf positiv", dreck.best_rtt >= 0, f"{dreck.best_rtt * 1e3:.3f} ms")
+        dirty.add_round(t1, int(t2 * 1e6), int(t3 * 1e6), t1 + 0.0025)
+    check("good rounds win", dirty.valid)
+    check("offset hit despite garbage",
+          dirty.valid and abs(dirty.offset - good_offset) < 1e-3,
+          f"{(dirty.offset - good_offset) * 1e6:+.0f} us" if dirty.valid else "-")
+    check("round trip positive", dirty.best_rtt >= 0, f"{dirty.best_rtt * 1e3:.3f} ms")
 
-    print("Lesen ohne Blockwartezeit")
+    print("Reading without block wait")
 
     class _FakePort:
-        """Serieller Port, der Bytes haeppchenweise liefert."""
+        """Serial port that delivers bytes in small chunks."""
 
         def __init__(self, chunks):
             self.chunks = list(chunks)
@@ -661,8 +660,8 @@ def _selftest() -> int:
 
         @property
         def in_waiting(self):
-            # Was vom angefangenen Block noch aussteht. read(1) hat das erste
-            # Byte schon abgezogen.
+            # What is still pending from the started block. read(1) has
+            # already taken the first byte.
             return len(self.chunks[0]) if self.chunks else 0
 
         def read(self, n):
@@ -681,18 +680,18 @@ def _selftest() -> int:
     saved = bytes([0xA5, 0x84, 0x00])        # PID_SAVED
     port = _FakePort([button, saved])
     first = read_available(port)
-    check("erster Block sofort komplett", first == button, first.hex(" "))
+    check("first block complete at once", first == button, first.hex(" "))
     second = read_available(port)
-    check("zweiter Block getrennt", second == saved, second.hex(" "))
-    check("leerer Port blockiert nicht", read_available(port) == b"")
+    check("second block separate", second == saved, second.hex(" "))
+    check("empty port does not block", read_available(port) == b"")
 
-    print("ESP-Reset")
+    print("ESP reset")
     before = clock.boot_count
     clock.add_round(t_now[0], 5_000, 5_200, t_now[0] + 0.001)
-    check("Neustart erkannt", clock.boot_count == before + 1)
+    check("reboot detected", clock.boot_count == before + 1)
 
     print()
-    print("Selbsttest fehlgeschlagen" if failures else "Selbsttest bestanden")
+    print("Self-test FAILED" if failures else "Self-test passed")
     return 1 if failures else 0
 
 
@@ -702,17 +701,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true",
-                    help="Rechnung und Parser ohne Hardware pruefen")
-    ap.add_argument("--port", help="serieller Port zum ESP, z.B. /dev/ttyTHS1")
+                    help="check maths and parser without hardware")
+    ap.add_argument("--port", help="serial port to the ESP, e.g. /dev/ttyTHS1")
     ap.add_argument("--baud", type=int, default=115200)
-    ap.add_argument("--dauer", type=float, default=60.0,
-                    help="Sekunden lauschen (Default 60)")
+    ap.add_argument("--listen-time", type=float, default=60.0,
+                    help="seconds to listen (default 60)")
     args = ap.parse_args()
 
     if args.selftest:
         return _selftest()
     if args.port:
-        run_live(args.port, args.baud, duration=args.dauer)
+        run_live(args.port, args.baud, duration=args.listen_time)
         return 0
     ap.print_help()
     return 2
