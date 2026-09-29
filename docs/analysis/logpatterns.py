@@ -1,17 +1,16 @@
 """The ONE table of /rosout log-text patterns used by the toolkit.
 
 The controller (src/ekf/ekf/round1_controller_node.py) and a few other nodes
-report results only as log text, e.g. the parking result. The code base is
-about to be translated from German to English, so every event has one regular
-expression for the CURRENT German text (copied from the source) and one
-TOLERANT regular expression for a plausible English translation. When the
-translation lands, check the English strings in the source against the
-'en' rows below and adjust them here -- nowhere else.
+report results only as log text, e.g. the parking result. The log text was
+German until the end of September 2026 and is English since, so every event
+has one regular expression for the German text (still needed for the older
+bags) and one for the English text. If a log line changes, adjust its row
+here -- nowhere else.
 
 Columns
 -------
 key        event name used by the tools (several rows may share a key)
-lang       'de' = current source text, 'en' = expected translation
+lang       'de' = text before the translation (older bags), 'en' = current text
 min_level  minimum rcl log level for the row to count (10 DEBUG, 20 INFO,
            30 WARN, 40 ERROR); keeps e.g. a harmless "emergency stop service
            ready" info line from counting as an emergency stop
@@ -61,21 +60,21 @@ PATTERNS = [
                r'(?:wall|barrier|band|boundary|border)\w*.*?\(expected\s*(?P<expected>[^)]*)\).*?'
                r'(?:heading|course|yaw)\s*(?P<heading_deg>NUM)\s*(?:deg|degrees?|°).*?'
                r'(?P<axle_cm>NUM)\s*cm\s+(?:of\s+)?axle',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # Fallback report without numbers: "EINGEPARKT bei (%.2f, %.2f)."
     LogPattern('parked_at', 'de', 20,
                r'EINGEPARKT\s+bei\s*\((?P<x>NUM),\s*(?P<y>NUM)\)',
                'round1_controller_node.py _einparken_fertig()'),
     LogPattern('parked_at', 'en', 20,
                r'PARKED\s+at\s*\((?P<x>NUM),\s*(?P<y>NUM)\)',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # "Endlage laut Buchtmessung: Heck %.1f cm, Front %.1f cm Luft%s."
     LogPattern('bay_clearance', 'de', 20,
                r'Endlage\s+laut\s+Buchtmessung:\s*Heck\s*(?P<rear_cm>NUM)\s*cm,\s*Front\s*(?P<front_cm>NUM)\s*cm',
                'round1_controller_node.py _einparken_fertig()'),
     LogPattern('bay_clearance', 'en', 20,
                r'(?:final|end)\s+(?:pose|position).*?bay.*?rear\s*(?P<rear_cm>NUM)\s*cm,\s*front\s*(?P<front_cm>NUM)\s*cm',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # "Einparken rueckwaerts fertig: %.1f cm neben der Parklinie, Kurs %+.1f grad, ..."
     LogPattern('park_reverse_done', 'de', 20,
                r'Einparken\s+rueckwaerts\s+fertig:\s*(?P<line_offset_cm>NUM)\s*cm\s+neben\s+der\s+Parklinie,\s*'
@@ -85,7 +84,7 @@ PATTERNS = [
                r'(?:parking|park-in|parking in)\s+reverse\w*\s+(?:done|finished|complete)\w*[:\s]*'
                r'(?P<line_offset_cm>NUM)\s*cm\s+(?:beside|from|off|next to)\s+the\s+parking\s+line,\s*'
                r'(?:heading|course)\s*(?P<heading_deg>NUM)',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
 
     # --- emergency stops and aborts --------------------------------------------
     # "NOTSTOP: Lokalisierung seit %.1f s 'lost' -- ...", "NOTSTOP: Einlenkpunkt ..."
@@ -95,10 +94,12 @@ PATTERNS = [
     # "NOTHALT" = the bridge's ~/emergency topic was triggered (warn level)
     LogPattern('estop', 'de', 30, r'^\s*(?P<reason>NOTHALT)\b',
                'esp_serial_bridge.py _on_emergency()'),
-    LogPattern('estop', 'en', 30, r'\bEMERGENCY[ _-]?(?:STOP|HALT)\b[:\s-]*(?P<reason>.*)',
-               'expected translation', I),
+    LogPattern('estop', 'en', 30, r'^\s*(?P<reason>EMERGENCY HALT)\b',
+               'esp_serial_bridge.py _on_emergency()'),
+    LogPattern('estop', 'en', 30, r'\bEMERGENCY[ _-]?STOP\b[:\s-]*(?P<reason>.*)',
+               'round1_controller_node.py (English)', I),
     LogPattern('estop', 'en', 30, r'\bE-?STOP\b[:\s-]*(?P<reason>.*)',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # "NOTFALL-RANGIEREN %d/%d: %s -- setzt %.0f cm zurueck (...), dann neu planen."
     # (since commit e740c8a: backs up and re-plans instead of an emergency stop;
     #  after rangier_max attempts per corner the NOTSTOP follows as before)
@@ -110,39 +111,39 @@ PATTERNS = [
                r'EMERGENCY[ _-]?(?:MANOEUVRE|MANEUVER|MANOEUVRING|MANEUVERING|RECOVERY|REVERSING)\s*'
                r'(?P<attempt>\d+)\s*/\s*(?P<max>\d+):\s*(?P<reason>.*?)\s*--\s*'
                r'(?:backs?|backing|reverses|reversing)(?:\s+up)?\s*(?P<back_cm>NUM)\s*cm',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # "Rangieren: schon %d Versuche an dieser Ecke -- gibt auf (%s)."
     LogPattern('manoeuvre_giveup', 'de', 30, r'Rangieren:\s*schon\s*(?P<attempts>\d+)\s*Versuche.*gibt\s+auf',
                'round1_controller_node.py _rangieren()'),
     LogPattern('manoeuvre_giveup', 'en', 30,
                r'(?:manoeuvr|maneuver)\w*:?\s*already\s*(?P<attempts>\d+)\s*attempts.*(?:gives?|giving)\s+up',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # "%s abgebrochen: %s" with Einparken / Ausparken
     LogPattern('abort', 'de', 30, r'(?P<phase>Einparken|Ausparken)\s+abgebrochen:\s*(?P<reason>.*)',
                'round1_controller_node.py _ausparken_abbruch()'),
     LogPattern('abort', 'en', 30,
                r'(?P<phase>parking(?:\s+in|\s+out)?|unparking|park-in|park-out|pull-out|leaving\s+the\s+(?:bay|spot))'
                r'\s+(?:aborted|cancell?ed)[:\s-]*(?P<reason>.*)',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
 
     # --- race progress ---------------------------------------------------------
     # f"ZIEL ({corner_count} Ecken, {front_dist:.2f} m vor Frontwand, v=...). STOP."
     LogPattern('finish', 'de', 20, r'\bZIEL\s*\((?P<corners>\d+)\s*Ecken',
                'round1_controller_node.py _drive()'),
     LogPattern('finish', 'en', 20, r'\b(?:FINISH|GOAL|TARGET)\w*\s*\((?P<corners>\d+)\s*corners',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # "Drei Runden fertig (%d Ecken) -- ..."
     LogPattern('three_laps', 'de', 20, r'Drei\s+Runden\s+fertig\s*\((?P<corners>\d+)\s*Ecken',
                'round1_controller_node.py _park_uebergang()'),
     LogPattern('three_laps', 'en', 20,
                r'Three\s+laps\s+(?:done|complete|completed|finished)\s*\((?P<corners>\d+)\s*corners',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # f"TURN fertig Ecke {corner_count} (theta=..., ziel=...)."
     LogPattern('corner_done', 'de', 20, r'TURN\s+fertig\s+Ecke\s*(?P<corner>\d+)',
                'round1_controller_node.py _turn()'),
     LogPattern('corner_done', 'en', 20,
                r'TURN\s+(?:done|finished|complete|completed)[,:]?\s*(?:at\s+)?corner\s*(?P<corner>\d+)',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # "Start."
     LogPattern('start', 'de', 20, r'^\s*Start\.\s*$', 'round1_controller_node.py control_loop()'),
 
@@ -154,18 +155,18 @@ PATTERNS = [
     LogPattern('dead_time', 'en', 20,
                r'dead[- ]time(?:\s+(?:prediction|compensation|look-?ahead|pre-?diction))?\s*(?P<dead_time_s>NUM)\s*s'
                r'(?:\s*\((?:gain)\s*(?P<gain>NUM))?',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
 
     # --- sensor / localisation problems ----------------------------------------
     # f"GYRO AUSGEFALLEN: {grund}. ..."
     LogPattern('gyro_fail', 'de', 30, r'GYRO\s+AUSGEFALLEN[:\s]*(?P<reason>.*)', 'ekf_node.py _gyro_pruefen()'),
     LogPattern('gyro_fail', 'en', 30, r'GYRO\s+(?:FAILED|FAILURE|LOST|DOWN|DEAD|OUT)\b[:\s]*(?P<reason>.*)',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
     # "Lokalisierung: %s -> %s%s."  (controller, on every state change)
     LogPattern('loc_change', 'de', 20, r'Lokalisierung:\s*(?P<old>[\w-]+)\s*->\s*(?P<new>\w+)',
                'round1_controller_node.py lok_state_cb()'),
     LogPattern('loc_change', 'en', 20, r'Locali[sz]ation(?:\s+state)?:\s*(?P<old>[\w-]+)\s*->\s*(?P<new>\w+)',
-               'expected translation', I),
+               'round1_controller_node.py (English)', I),
 ]
 # fmt: on
 
