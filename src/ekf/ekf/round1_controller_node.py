@@ -3,16 +3,16 @@
 Round-1 controller -- multi-corner (full lap).
 
 State machine:
-  [AUSPARKEN -> AUSPARK_SCAN] -> WAIT_INPUTS -> [WAIT_BUTTON] -> APPROACH ->
+  [UNPARK -> UNPARK_SCAN] -> WAIT_INPUTS -> [WAIT_BUTTON] -> APPROACH ->
   TURN -> EXIT -> (loop) -> FINISHING -> DONE
 
-  AUSPARKEN  Optional (Parameter ausparken). Der Roboter steht laengs in der
-             Startluecke und muss SEITLICH heraus -- mit Ackermann geht das nur
-             ueber Rangieren. Die Zuege laufen als Positionsfahrten auf dem ESP
-             (Encoder), nicht ueber /cmd_vel: der Lidar sieht unter 0,15 m
-             nichts, und in der Luecke ist die naechste Wand genau dort.
-             Siehe ekf/ausparken.py. Mit ausparken_nur haelt der Regler danach
-             an, statt das Rennen zu fahren.
+  UNPARK     Optional (parameter unpark). The robot stands lengthwise in the
+             start bay and has to get out SIDEWAYS -- with Ackermann that only
+             works by manoeuvring. The moves run as position moves on the ESP
+             (encoder), not via /cmd_vel: the lidar sees nothing below 0.15 m,
+             and in the bay the nearest wall is exactly there.
+             See ekf/unpark.py. With unpark_only the controller stops
+             afterwards instead of driving the race.
 
   APPROACH   Drive the current straight, centred against the target line (outer
              wall of the current edge, offset inward by o_out). Watch for the
@@ -54,54 +54,54 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float64, String, Int32MultiArray, Float64MultiArray
 from std_msgs.msg import Float32, Float32MultiArray, Header, Int32
 
-from ekf.schaetzung_neustart import neu_starten
-from ekf.ausparken import (FZ_BREITE, FZ_HECK, FZ_NASE, LUECKE_LAENGE, LUECKE_TIEFE,
-                           LENK_KENNLINIE, RADSTAND,
-                           bahn, cm_zu_grad, grad_zu_cm, richtung_aus_scan,
-                           schritte_aus_flach, schritte_fuer, simuliere,
-                           spiegeln, einparkfolge, lenk_auf_leitung)
+from ekf.estimation_restart import restart_estimation
+from ekf.unpark import (CAR_WIDTH, CAR_REAR, CAR_NOSE, BAY_LENGTH, BAY_DEPTH,
+                        STEER_CURVE, WHEELBASE,
+                        trajectory, cm_to_deg, deg_to_cm, direction_from_scan,
+                        steps_from_flat, steps_for, simulate,
+                        mirror_steps, park_sequence, steer_to_wire)
 from ekf.wall_extraction import scan_to_points
-import ekf.ausparken as _ausparken_modul
-# Folgen einzeln und robust holen: ein fehlender Name in ausparken.py soll den
-# Regler nicht am Start hindern (so geschehen, als SCHRITTE_CW/CCW beim
-# Einfuehren der Varianten entfernt wurden). Die normalen Folgen sind die
-# Referenz fuers Einparken -- Ersatz: CW -> CW_AUSSEN, CCW -> STANDARD.
-SCHRITTE_STANDARD = list(getattr(_ausparken_modul, 'SCHRITTE_STANDARD', []))
-_cw_name = next((n for n in ('SCHRITTE_CW', 'SCHRITTE_CW_AUSSEN', 'SCHRITTE_STANDARD')
-                 if getattr(_ausparken_modul, n, None)), None)
-_ccw_name = next((n for n in ('SCHRITTE_CCW', 'SCHRITTE_STANDARD')
-                  if getattr(_ausparken_modul, n, None)), None)
-SCHRITTE_CW = list(getattr(_ausparken_modul, _cw_name)) if _cw_name else []
-SCHRITTE_CCW = list(getattr(_ausparken_modul, _ccw_name)) if _ccw_name else []
-# Innen-Folgen sind neu -- eine aeltere ausparken.py ohne sie laeuft trotzdem.
-# Ausparkfolgen je nach Pylone in der mittleren Reihe der Startgeraden:
-# innen / aussen / mitte (Reihe frei). Fehlt eine, faehrt er die normale.
-AUSPARK_VARIANTEN = {
-    (r, v): list(getattr(_ausparken_modul, 'SCHRITTE_%s_%s' % (r, v.upper()), []))
-    for r in ('CW', 'CCW') for v in ('innen', 'aussen', 'mitte')
+import ekf.unpark as _unpark_module
+# Fetch the sequences one by one and robustly: a missing name in unpark.py must
+# not keep the controller from starting (that happened when STEPS_CW/CCW were
+# removed while introducing the variants). The normal sequences are the
+# reference for parking -- fallback: CW -> CW_OUTER, CCW -> DEFAULT.
+STEPS_DEFAULT = list(getattr(_unpark_module, 'STEPS_DEFAULT', []))
+_cw_name = next((n for n in ('STEPS_CW', 'STEPS_CW_OUTER', 'STEPS_DEFAULT')
+                 if getattr(_unpark_module, n, None)), None)
+_ccw_name = next((n for n in ('STEPS_CCW', 'STEPS_DEFAULT')
+                  if getattr(_unpark_module, n, None)), None)
+STEPS_CW = list(getattr(_unpark_module, _cw_name)) if _cw_name else []
+STEPS_CCW = list(getattr(_unpark_module, _ccw_name)) if _ccw_name else []
+# The inner sequences are new -- an older unpark.py without them still runs.
+# Unpark sequences depending on the pylon in the middle row of the start
+# straight: inner / outer / middle (row empty). If one is missing, it drives the normal one.
+UNPARK_VARIANTS = {
+    (r, v): list(getattr(_unpark_module, 'STEPS_%s_%s' % (r, v.upper()), []))
+    for r in ('CW', 'CCW') for v in ('inner', 'outer', 'middle')
 }
 
 
-# Farbcodes aus robot_msgs/Obstacle.msg und die halbe Klotzbreite aus
-# obstacle_path.py -- hier gespiegelt, damit der Startgeraden-Zweig ohne
-# zusaetzlichen Import auskommt.
-OBST_UNBEKANNT, OBST_ROT, OBST_GRUEN = 0, 1, 2
-BLOCK_HALB = 0.022          # 44 mm / 2
+# Colour codes from robot_msgs/Obstacle.msg and the half block width from
+# obstacle_path.py -- mirrored here so the start-straight branch needs no
+# extra import.
+OBST_UNKNOWN, OBST_RED, OBST_GREEN = 0, 1, 2
+BLOCK_HALF = 0.022          # 44 mm / 2
 
-# Tempo-Profile: -p tempo:=langsam|mittel|schnell setzt diese fuenf Tempi auf
-# einmal ('eigen' = die Einzelparameter). tempo_runde1 gilt nur in der
-# Scan-Runde -- dort entscheidet die Kamera, und die erkennt Gruen bisher nur
-# im Stand oder langsam. Einzeln per -p gesetzte Tempi haben Vorrang.
-TEMPO_PROFILE = {
-    'langsam': dict(v_drive=0.35, v_turn=0.35, v_obstacle=0.35,
-                    v_obstacle_steep=0.35, v_steiler_pfad=0.22),
-    'mittel':  dict(v_drive=0.55, v_turn=0.45, v_obstacle=0.45,
-                    v_obstacle_steep=0.40, v_steiler_pfad=0.30),
-    'schnell': dict(v_drive=0.75, v_turn=0.55, v_obstacle=0.55,
-                    v_obstacle_steep=0.55, v_steiler_pfad=0.35),
+# Pace profiles: -p pace:=slow|medium|fast sets these five speeds at once
+# ('custom' = the individual parameters). pace_lap1 only applies in the
+# scan lap -- there the camera decides, and so far it only recognises green
+# when standing or slow. Speeds set individually via -p take precedence.
+PACE_PROFILES = {
+    'slow':   dict(v_drive=0.35, v_turn=0.35, v_obstacle=0.35,
+                   v_obstacle_steep=0.35, v_steep_path=0.22),
+    'medium': dict(v_drive=0.55, v_turn=0.45, v_obstacle=0.45,
+                   v_obstacle_steep=0.40, v_steep_path=0.30),
+    'fast':   dict(v_drive=0.75, v_turn=0.55, v_obstacle=0.55,
+                   v_obstacle_steep=0.55, v_steep_path=0.35),
 }
-TEMPO_KEYS = ('v_drive', 'v_turn', 'v_obstacle', 'v_obstacle_steep', 'v_steiler_pfad')
-LIDAR_X = 0.1101            # LiDAR vor der Hinterachse (wall_extraction.LIDAR_OFFSET_X)
+PACE_KEYS = ('v_drive', 'v_turn', 'v_obstacle', 'v_obstacle_steep', 'v_steep_path')
+LIDAR_X = 0.1101            # LiDAR ahead of the rear axle (wall_extraction.LIDAR_OFFSET_X)
 
 
 def yaw_from_quaternion(q):
@@ -167,152 +167,160 @@ class Round1Controller(Node):
         'max_settle_slope': ('max_settle_slope', 0.80, float),  # lateral m per longitudinal m we trust
         'turn_in_lat_warn': ('turn_in_lat_warn', 0.10, float),  # warn above this lateral error at turn-in
         # do not start the arc while still correcting laterally (0.2 s steering dead time)
-        # 3 -> 7 cm: mit 3 cm bremste er auf der Startgeraden und auf w0 bei
-        # fast jeder Runde 0,5 m vor der Ecke auf v_settle (5-7 cm neben der
-        # Linie nach Spurwechsel/Kurvenausgang, parken_test_24). Solche
-        # Einfahrten faengt inzwischen die Verankerung des Bogens ab.
+        # 3 -> 7 cm: with 3 cm it braked to v_settle on the start straight and on
+        # w0 in almost every lap 0.5 m before the corner (5-7 cm beside the
+        # line after a lane change/corner exit, parken_test_24). Such entries
+        # are now caught by anchoring the arc.
         'turn_in_lat_gate': ('turn_in_lat_gate', 0.07, float),  # settled below this lateral error
         'turn_in_om_gate':  ('turn_in_om_gate',  0.50, float),  # ... and below this commanded omega
         'turn_in_settle_window':('turn_in_settle_window',0.50, float),  # slow down within this distance to T_A
         'v_settle':         ('v_settle',         0.25, float),  # speed while settling before the corner
-        'turn_in_past_max': ('turn_in_past_max', 0.50, float),  # Plausibilitaet: weiter hinter T_A -> Nothalt
-        # Bogen an der Ist-Pose: so nah an der Aussenbande darf er hoechstens
-        # auf die naechste Gerade kommen, wenn der kleinste Radius noetig ist.
+        'turn_in_past_max': ('turn_in_past_max', 0.50, float),  # plausibility: further past T_A -> emergency halt
+        # Arc at the actual pose: at most this close to the outer wall may it
+        # come onto the next straight when the smallest radius is needed.
         'turn_anchor_min_out': ('turn_anchor_min_out', 0.20, float),
-        # Pylonen am Kurvenein-/ausgang: den Bogen gegen den Fahrzeugumriss
-        # pruefen und den Radius so waehlen, dass mindestens dieser Abstand
-        # bleibt (parken_test_20: R 0,50 liess 3 mm zur roten Pylone am
-        # Kurvenausgang, er hat sie mitgeschoben). Gesucht wird zwischen
-        # min_turn_radius und bogen_pylonen_r_max, am naechsten am geplanten R --
-        # ob kleiner oder groesser hilft, haengt von Farbe und Drehrichtung ab.
-        # 4 -> 8 cm: gefahren liegt der Bogen einige cm enger als geplant
-        # (parken_test_23: geplant 5 cm zu #19, gefahren 0,1-0,5 cm, gestreift)
-        'bogen_pylonen_abstand': ('bogen_pylonen_abstand', 0.08, float),
-        'bogen_pylonen_r_max':   ('bogen_pylonen_r_max',   0.70, float),
-        # Auch beim puenktlichen Einlenken verankern, wenn die Einfahrt gestoert
-        # ist (Kursfehler zur Kreistangente oder Querversatz ueber diesen Werten).
-        'turn_anchor_puenktlich': ('turn_anchor_puenktlich', 1.0, lambda v: bool(float(v))),
-        'turn_anchor_kurs_deg': ('turn_anchor_kurs', 3.0, lambda v: math.radians(float(v))),
-        'turn_anchor_quer':     ('turn_anchor_quer', 0.02, float),
-        # Totzeit der Lenkung: 241 ms vom /cmd_vel-Befehl bis zur Gierrate
-        # (Kreuzkorrelation, Lenkverstaerkung 0,84). Der kurze Radstand macht
-        # den Kursintegrator schnell (3,5 rad/s Gierrate je rad Lenkwinkel);
-        # mit 241 ms bleiben nur ~28 grad Phasenreserve -- jede Anregung
-        # klingelt ueber Sekunden aus (Schwingdauer ~4 x Totzeit = 1 s).
-        # Stanley rechnet deshalb mit der Pose bei Wirkbeginn. Simuliert: statt
-        # +-18 grad Lenkungspendeln +-2 grad, kein Klingeln. k_heading NICHT
-        # senken -- dann uebernimmt der Querterm und es wird schlechter.
-        # ACHTUNG: nicht zusaetzlich pose_extrapolate_s im Fusionsknoten
-        # setzen, sonst wird die Totzeit doppelt vorausgerechnet. 0 = aus.
-        'steer_dead_time':  ('steer_dead_time',  0.260, float),   # Lauf 2: 260 ms (Lauf 1: 241)
+        # Pylons at the corner entry/exit: check the arc against the car
+        # outline and choose the radius so that at least this clearance
+        # remains (parken_test_20: R 0.50 left 3 mm to the red pylon at the
+        # corner exit, it pushed it along). The search runs between
+        # min_turn_radius and arc_pylon_r_max, closest to the planned R --
+        # whether smaller or larger helps depends on colour and turn direction.
+        # 4 -> 8 cm: as driven, the arc lies a few cm tighter than planned
+        # (parken_test_23: planned 5 cm to #19, driven 0.1-0.5 cm, grazed)
+        'arc_pylon_clearance': ('arc_pylon_clearance', 0.08, float),
+        'arc_pylon_r_max':     ('arc_pylon_r_max',     0.70, float),
+        # Also anchor on an on-time turn-in if the entry is disturbed
+        # (heading error to the circle tangent or lateral offset above these values).
+        'turn_anchor_on_time':     ('turn_anchor_on_time', 1.0, lambda v: bool(float(v))),
+        'turn_anchor_heading_deg': ('turn_anchor_heading', 3.0, lambda v: math.radians(float(v))),
+        'turn_anchor_lat':         ('turn_anchor_lat', 0.02, float),
+        # Steering dead time: 241 ms from the /cmd_vel command to the yaw rate
+        # (cross-correlation, steering gain 0.84). The short wheelbase makes
+        # the heading integrator fast (3.5 rad/s yaw rate per rad steer angle);
+        # with 241 ms only ~28 deg phase margin remain -- every excitation
+        # rings out over seconds (period ~4 x dead time = 1 s).
+        # Stanley therefore works with the pose at the moment the command takes
+        # effect. Simulated: +-2 deg instead of +-18 deg steering oscillation,
+        # no ringing. Do NOT lower k_heading -- then the lateral term takes over
+        # and it gets worse.
+        # CAUTION: do not also set pose_extrapolate_s in the fusion node,
+        # otherwise the dead time is predicted twice. 0 = off.
+        'steer_dead_time':  ('steer_dead_time',  0.260, float),   # run 2: 260 ms (run 1: 241)
         'steer_gain_pred':  ('steer_gain_pred',  0.84, float),
-        # Lenk-Pose: die Korrekturen der Lokalisierung (Wandabgleich, 1-1,5 cm
-        # bzw. ~1 grad, mehrmals pro Sekunde) gingen als Sprung in den
-        # Lenkbefehl -- 1 cm quer = 2-3 grad Lenkschritt, das hektische Zucken
-        # auf ruhigen Geraden (parken_test_21, 51,0 s). Fuer das Lenkgesetz
-        # werden sie ueber lenk_pose_tau eingeblendet; die Bewegung selbst
-        # (v, Gierrate aus /ekf/odom) geht ohne Verzoegerung durch, also keine
-        # zusaetzliche Totzeit im Regelkreis. Groessere Spruenge (Kartenwechsel)
-        # werden sofort uebernommen. Ausloeser (T_A, Halte) nutzen weiter die
-        # ungeglaettete Pose. 0 = aus.
-        'lenk_pose_tau':    ('lenk_pose_tau',    0.30, float),
-        'lenk_pose_sprung': ('lenk_pose_sprung', 0.10, float),
-        'lenk_pose_sprung_grad': ('lenk_pose_sprung_grad', 8.0, lambda v: math.radians(float(v))),
-        # Hindernispfad: Kruemmung vorsteuern (delta_ff = atan(L*kappa)) und die
-        # Tangente zwischen den Pfadpunkten stufenlos interpolieren. Ohne
-        # Vorsteuerung folgte Stanley jedem Spurwechsel nur ueber den Fehler --
-        # mit 0,26 s Totzeit ueberschwingt das und muss zurueckgelenkt werden.
-        # Faktor auf die Vorsteuerung, 0 = aus.
-        'pfad_vorsteuerung': ('pfad_vorsteuerung', 1.0, float),
-        # Ecke 1 direkt nach dem Ausparken: liegt der Einlenkpunkt mehr als
-        # erste_ecke_zurueck_min HINTER ihm, erst gerade zuruecksetzen (ESP-
-        # Positionsfahrt) statt den Bogen mit dem kleinsten Radius an der
-        # Ist-Pose zu verankern -- der kam 25 cm zu weit aussen heraus, und vor
-        # einer gruenen Pylone gab das einen Haken bis 47 grad ueber die Gerade
-        # (parken_test_21). Nur wenn der Rueckweg frei ist.
-        # Einpark-Test: der Roboter steht am Anfang der letzten Geraden (=
-        # Startgerade), kein Ausparken, keine Runden -- nur Zielgerade und
-        # einparken. Die Luecke kennt er nicht aus einer Buchtmessung: ihre Lage
-        # kommt aus test_bucht_front (Abstand Hinterachse in der Luecke zur
-        # Frontwand, 0 = Mittel frueherer Laeufe: CCW 1,245 m, CW 1,96 m) und
-        # test_bucht_q (Abstand zur Aussenbande, Mittel 0,159 m). Die Einpark-
-        # Startpose daraus wie im Rennen (park_std_*), dazu einpark_versatz_*_cw/_ccw.
-        # Richtung: test_richtung. Startet den scan_processor passend neu.
-        'einparken_test':   ('einparken_test',   0.0, lambda v: bool(float(v))),
-        'test_bucht_front': ('test_bucht_front', 0.0, float),
-        'test_bucht_q':     ('test_bucht_q',     0.159, float),
-        'erste_ecke_zurueck':     ('erste_ecke_zurueck',     1.0, lambda v: bool(float(v))),
-        'erste_ecke_zurueck_min': ('erste_ecke_zurueck_min', 0.10, float),
-        'erste_ecke_zurueck_max': ('erste_ecke_zurueck_max', 0.80, float),
-        # ... und nur, wenn der Bogen an der Ist-Pose so weit aussen herauskaeme,
-        # dass der Rueckweg auf die Spur vor der ersten Pylone der naechsten
-        # Geraden steiler wuerde als das (quer/laengs). parken_test_23: 15 cm
-        # auf 65 cm = 0,23 haette gereicht, er setzte trotzdem zurueck.
-        'erste_ecke_zurueck_steigung': ('erste_ecke_zurueck_steigung', 0.50, float),
-        # Einlenken um die Totzeit frueher: der Befehl wirkt erst nach
-        # steer_dead_time, das Lenkgesetz rechnet schon mit der Pose von dann.
-        # Beim Umschalten genau an T_A lag diese Pose 9 cm auf der Geraden
-        # hinter dem Bogenanfang, ~10 grad hinter der Kreistangente -- er schlug
-        # erst ~20 grad ein und ging dann auf die 13 grad des Radius zurueck.
-        'einlenk_vorhalt': ('einlenk_vorhalt', 1.0, lambda v: bool(float(v))),
+        # Steer pose: the localisation corrections (wall matching, 1-1.5 cm
+        # or ~1 deg, several times per second) went into the steering command
+        # as a jump -- 1 cm lateral = 2-3 deg steering step, the hectic
+        # twitching on calm straights (parken_test_21, 51.0 s). For the
+        # steering law they are blended in over steer_pose_tau; the motion
+        # itself (v, yaw rate from /ekf/odom) passes without delay, so no
+        # extra dead time in the loop. Larger jumps (map change) are taken
+        # over at once. Triggers (T_A, holds) keep using the unsmoothed pose.
+        # 0 = off.
+        'steer_pose_tau':      ('steer_pose_tau',      0.30, float),
+        'steer_pose_jump':     ('steer_pose_jump',     0.10, float),
+        'steer_pose_jump_deg': ('steer_pose_jump_deg', 8.0, lambda v: math.radians(float(v))),
+        # Obstacle path: feed forward the curvature (delta_ff = atan(L*kappa))
+        # and interpolate the tangent between the path points continuously.
+        # Without feedforward Stanley followed every lane change only through
+        # the error -- with 0.26 s dead time that overshoots and has to be
+        # steered back. Factor on the feedforward, 0 = off.
+        'path_feedforward': ('path_feedforward', 1.0, float),
+        # Corner 1 right after unparking: if the turn-in point lies more than
+        # first_corner_backup_min BEHIND it, first back up straight (ESP
+        # position move) instead of anchoring the arc with the smallest radius
+        # at the actual pose -- that came out 25 cm too far outward, and in
+        # front of a green pylon it gave a hook of up to 47 deg across the
+        # straight (parken_test_21). Only if the way back is clear.
+        # Park test: the robot stands at the start of the last straight (=
+        # start straight), no unparking, no laps -- only the finish straight
+        # and parking. It does not know the bay from a bay measurement: its
+        # position comes from test_bay_front (distance of the rear axle in the
+        # bay to the front wall, 0 = mean of earlier runs: CCW 1.245 m, CW
+        # 1.96 m) and test_bay_lat (distance to the outer wall, mean 0.159 m).
+        # The park start pose from that as in the race (park_std_*), plus
+        # park_offset_*_cw/_ccw. Direction: test_direction. Restarts the
+        # scan_processor accordingly.
+        'park_test':                 ('park_test',                 0.0, lambda v: bool(float(v))),
+        'test_bay_front':            ('test_bay_front',            0.0, float),
+        'test_bay_lat':              ('test_bay_lat',              0.159, float),
+        'first_corner_backup':       ('first_corner_backup',       1.0, lambda v: bool(float(v))),
+        'first_corner_backup_min':   ('first_corner_backup_min',   0.10, float),
+        'first_corner_backup_max':   ('first_corner_backup_max',   0.80, float),
+        # ... and only if the arc at the actual pose would come out so far
+        # outward that the way back onto the lane before the first pylon of
+        # the next straight would be steeper than this (lat/long).
+        # parken_test_23: 15 cm over 65 cm = 0.23 would have been enough, it
+        # backed up anyway.
+        'first_corner_backup_slope': ('first_corner_backup_slope', 0.50, float),
+        # Turn in earlier by the dead time: the command only takes effect
+        # after steer_dead_time, the steering law already uses the pose of
+        # then. Switching exactly at T_A, that pose lay 9 cm on the straight
+        # behind the arc start, ~10 deg behind the circle tangent -- it first
+        # steered in ~20 deg and then went back to the 13 deg of the radius.
+        'turn_in_lead': ('turn_in_lead', 1.0, lambda v: bool(float(v))),
         # scan pause at the end of each straight (lap 1 only -- after that the
         # seat grid is filled and standing still would only cost time)
         'scan_pause':       ('scan_pause',       1.0, lambda v: bool(float(v))),
         'scan_pause_s':     ('scan_pause_s',     1.5, float),   # how long to stand still [s]
         'scan_front_dist':  ('scan_front_dist',  1.10, float),  # ALWAYS stop this far from the front wall (pose)
-        # So weit rollt er nach dem Haltbefehl noch (gemessen ~13 cm). Der Halt
-        # wird um diesen Weg frueher ausgeloest, sonst steht er genau am
-        # Einlenkpunkt und beschleunigt erst in der Kurve.
-        'scan_nachlauf':    ('scan_nachlauf',    0.13, float),
-        # Der Nachlauf haengt am Tempo (parken_test_38-42, Ausloesung immer bei
-        # 1,22 m): 0,25 m/s -> 8 cm, 0,37 -> 17 cm, 0,45 -> 21 cm; er stand
-        # zwischen 1,00 und 1,15 m. Modell: Totzeit + Bremsweg,
-        #   Nachlauf = v * scan_nachlauf_t + v^2 / (2 * scan_brems_a)
-        # (bei 0,35 m/s = 14 cm). scan_brems_a <= 0 -> fest scan_nachlauf.
-        'scan_nachlauf_t':  ('scan_nachlauf_t',  0.10, float),
-        'scan_brems_a':     ('scan_brems_a',     0.57, float),
-        # Vorausschauend auf den Haltepunkt abbremsen (wie am Ziel): kommt er
-        # so immer mit ~0,15 m/s an, ist der Nachlauf klein und gleich. 0 = aus.
-        'scan_verzoegerung': ('scan_verzoegerung', 0.50, float),   # m/s^2
+        # It still rolls this far after the halt command (measured ~13 cm).
+        # The halt is triggered this much earlier, otherwise it stands right
+        # at the turn-in point and only accelerates in the corner.
+        'scan_coast':       ('scan_coast',       0.13, float),
+        # The coast depends on the speed (parken_test_38-42, always triggered
+        # at 1.22 m): 0.25 m/s -> 8 cm, 0.37 -> 17 cm, 0.45 -> 21 cm; it
+        # stopped between 1.00 and 1.15 m. Model: dead time + braking distance,
+        #   coast = v * scan_coast_t + v^2 / (2 * scan_brake_decel)
+        # (at 0.35 m/s = 14 cm). scan_brake_decel <= 0 -> fixed scan_coast.
+        'scan_coast_t':     ('scan_coast_t',     0.10, float),
+        'scan_brake_decel': ('scan_brake_decel', 0.57, float),
+        # Brake ahead of time towards the halt point (as at the finish): if it
+        # then always arrives at ~0.15 m/s, the coast is small and constant.
+        # 0 = off.
+        'scan_decel':       ('scan_decel',       0.50, float),   # m/s^2
         'scan_pause_laps':  ('scan_pause_laps',  1,    int),    # pause only during the first N laps
         'v_start':       ('v_start',       0.35,  float),   # speed on the start straight (before direction latch)
         'start_stop_gap': ('start_stop_gap', 0.50, float),  # stop this far from the front wall if direction never comes
         'start_lane_min': ('start_lane_min', 0.45, float),  # plausibility band for d_left+d_right
-        # Steht der Roboter beim Losfahren dichter als das an einer Wand, ist
-        # das keine Spur mehr. In der Parkluecke misst er 0.15 zur Aussenwand
-        # gegen 0.83 ins Feld -- die Summe liegt im Plausibilitaetsband, die
-        # Aufteilung nicht. Nur eine Warnung: er koennte auch schief stehen.
-        'start_wand_warn': ('start_wand_warn', 0.30, float),
+        # If the robot stands closer than this to a wall when it starts, that
+        # is no longer a lane. In the parking bay it measures 0.15 to the outer
+        # wall against 0.83 into the field -- the sum lies inside the
+        # plausibility band, the split does not. Only a warning: it could
+        # also just stand at an angle.
+        'start_wall_warn': ('start_wall_warn', 0.30, float),
         'start_lane_max': ('start_lane_max', 1.30, float),
-        # --- Ausweichen auf der Startgeraden ---------------------------------
-        # Das Sitzraster und die Eckengeometrie gibt es erst beim Richtungs-
-        # Latch, und der kann nicht frueher kommen: bis zum Ende des Innen-
-        # blocks bei x=0.95 messen beide Wandabstaende 0.50 -- die Fahrtrichtung
-        # ist bis dahin geometrisch nicht bestimmbar (Lauf 22: rechts oeffnet
-        # bei x=0.84, Latch bei x=1.02, Pylone steht bei x=0.95). Gepuffert
-        # wurde alles korrekt, es kommt nur zu spaet. /obstacles_live liefert
-        # die Pylone dagegen schon 0.5 s VOR dem Losfahren, durchgehend und in
-        # der richtigen Farbe -- und die Regel "rot rechts vorbei, gruen links
-        # vorbei" gilt im ROBOTERframe ohne jede Fahrtrichtung.
+        # --- Dodging on the start straight ----------------------------------
+        # The seat grid and the corner geometry only exist from the direction
+        # latch on, and that cannot come earlier: up to the end of the inner
+        # block at x=0.95 both wall distances measure 0.50 -- the direction of
+        # travel cannot be determined geometrically before that (run 22: right
+        # opens at x=0.84, latch at x=1.02, pylon stands at x=0.95).
+        # Everything was buffered correctly, it just comes too late.
+        # /obstacles_live on the other hand delivers the pylon 0.5 s BEFORE
+        # starting, continuously and in the right colour -- and the rule "pass
+        # red on the right, green on the left" holds in the ROBOT frame
+        # without any direction of travel.
         'start_dodge':      ('start_dodge',      1.0, lambda v: bool(float(v))),
-        'start_dodge_look': ('start_dodge_look', 1.20, float),  # nur Hindernisse so weit voraus [m]
-        'start_dodge_back': ('start_dodge_back', 0.25, float),  # Versatz noch so weit dahinter halten [m]
-        'start_dodge_lane': ('start_dodge_lane', 0.35, float),  # seitliches Fenster um die Spurmitte [m]
-        'start_dodge_margin': ('start_dodge_margin', 0.12, float),  # nie naeher an eine Wand planen [m]
-        'start_dodge_votes': ('start_dodge_votes', 3, int),     # Sichtungen, bevor gelenkt wird
-        'start_dodge_window_s': ('start_dodge_window_s', 1.0, float),  # ueber diesen Zeitraum gezaehlt
+        'start_dodge_look': ('start_dodge_look', 1.20, float),  # only obstacles this far ahead [m]
+        'start_dodge_back': ('start_dodge_back', 0.25, float),  # keep the offset this far past it [m]
+        'start_dodge_lane': ('start_dodge_lane', 0.35, float),  # lateral window around the lane centre [m]
+        'start_dodge_margin': ('start_dodge_margin', 0.12, float),  # never plan closer to a wall [m]
+        'start_dodge_votes': ('start_dodge_votes', 3, int),     # sightings before it steers
+        'start_dodge_window_s': ('start_dodge_window_s', 1.0, float),  # counted over this time span
         'turn_radius':   ('R',             0.50,  float),
         'sweep_tol_deg': ('sweep_tol',     3.0,   lambda v: math.radians(float(v))),
-        # Vorsteuerung ueber die letzten so viel Grad ausblenden. 7 grad waren
-        # bei 1,5 rad/s nur 80 ms -- weniger als die 260 ms Totzeit, er drehte
-        # nach dem Kurvenende 13-34 grad weiter. Simuliert: 20 grad -> 1 statt 6,5.
+        # Blend out the feedforward over the last this many degrees. 7 deg
+        # at 1.5 rad/s were only 80 ms -- less than the 260 ms dead time, it
+        # kept turning 13-34 deg after the end of the corner. Simulated:
+        # 20 deg -> 1 instead of 6.5.
         'ff_blend_deg':  ('ff_blend',      20.0, lambda v: math.radians(float(v))),
-        # Kurvenregler mit der Pose bei Wirkbeginn rechnen (wie auf der Geraden)
-        # und das Kurvenende am vorausberechneten Kurs festmachen.
-        'turn_praediktion': ('turn_praediktion', 1.0, lambda v: bool(float(v))),
-        # Kurvenbefehl kruemmungsbasiert und passend zur Umrechnung der Bruecke
-        # (siehe _turn). 0 = alte Formel.
-        'turn_kruemmung':   ('turn_kruemmung',   1.0, lambda v: bool(float(v))),
+        # Compute the corner controller with the pose at the moment the
+        # command takes effect (as on the straight) and fix the end of the
+        # corner on the predicted heading.
+        'turn_prediction': ('turn_prediction', 1.0, lambda v: bool(float(v))),
+        # Corner command curvature-based and matching the bridge's conversion
+        # (see _turn). 0 = old formula.
+        'turn_curvature':  ('turn_curvature',  1.0, lambda v: bool(float(v))),
         'k_ct':          ('k_ct',          8.0,   float),
         'k_th':          ('k_th',          2.5,   float),
         'k_stanley':     ('k_stanley',     1.2,   float),
@@ -335,236 +343,246 @@ class Round1Controller(Node):
         'finish_decel':  ('finish_decel',  0.8,   float),   # look-ahead brake decel [m/s^2]
         'finish_lead_time': ('finish_lead_time', 0.15, float),  # reaction lead [s] -> stops on point
         'v_finish_min':  ('v_finish_min',  0.15,  float),   # DRIVABLE crawl, just above deadband
-        # Letzte Kurve und Zielgerade langsamer: dort wird der Haltepunkt
-        # getroffen und danach eingeparkt, und ein Fehler ist nicht mehr
-        # aufzuholen. 0 schaltet die Kappe ab.
-        'v_ziel':        ('v_ziel',        0.30,  float),
+        # Last corner and finish straight slower: there the halt point is hit
+        # and parking follows, and an error cannot be made up any more. 0
+        # switches the cap off.
+        'v_finish':      ('v_finish',      0.30,  float),
         'finish_tol':    ('finish_tol',    0.04,  float),   # stop tolerance on front_dist
-        # --- Ausparken aus der Startluecke -----------------------------------
-        # Die beiden Magenta-Waende stehen senkrecht auf dem Aussenwall und
-        # ragen 20 cm ins Feld; die Luecke ist der 26,25 cm breite Spalt
-        # dazwischen. Der Roboter steht laengs darin und muss quer heraus.
-        # Die ganze Rechnerei steckt in ekf/ausparken.py, hier nur die Schalter.
-        # ausparken, ausparken_nur und ausparken_richtung_invertieren sind
-        # ECHTE Bool-Parameter und stehen weiter unten bei require_button --
-        # damit "-p ausparken_nur:=true" tut, was man erwartet. Alles in
-        # dieser Tabelle ist DOUBLE und wollte "1.0" statt "true".
-        'ausparken_sektor_grad':  ('ausparken_sektor_grad',  20.0, float),
-        'ausparken_scans':        ('ausparken_scans',        5,    int),
-        'ausparken_richtung_timeout': ('ausparken_richtung_timeout', 8.0, float),
-        # Der Servo braucht Zeit bis zum Anschlag -- erst danach losfahren,
-        # sonst faehrt der erste Zentimeter mit halbem Einschlag.
-        'ausparken_lenk_wartezeit': ('ausparken_lenk_wartezeit', 0.6, float),
-        'ausparken_zug_timeout':  ('ausparken_zug_timeout',  15.0, float),
-        # Wieviel der ESP am Sollweg fehlen darf, bevor eine
-        # Zeitueberschreitung als Fehler gilt. Der ESP meldet Status 1, wenn
-        # er nicht einschwingt -- die letzten Millimeter schafft er oft nicht,
-        # weil der Stellwert dort unter die Losbrechschwelle faellt. Fuer uns
-        # zaehlt der gefahrene Weg, nicht das Einschwingen: 2 mm bei 8 mm
-        # Reserve sind kein Grund, die Sequenz abzubrechen.
-        'ausparken_weg_toleranz_cm': ('ausparken_weg_toleranz_cm', 1.0, float),
-        # Standzeit nach dem Ausparken, bevor das Rennen beginnt. Die
-        # Wahrnehmung braucht sie: die Farbausbeute der Fusion liegt im
-        # Stillstand bei 38 Prozent und faellt ab 1 rad/s auf 2 Prozent. Der
-        # Roboter steht hier zum ersten Mal in der Spur und schaut die ganze
-        # Startgerade entlang -- das ist der beste Blick auf die Pylonen, den
-        # er im ganzen Lauf bekommt. 0 schaltet die Pause ab.
-        # Nicht "ausparken_scan_s" nennen: das unterscheidet sich nur um ein
-        # Zeichen von ausparken_scans (Stimmen fuer die Richtung) und meint
-        # etwas voellig anderes.
-        'ausparken_halt_s': ('ausparken_halt_s', 2.0, float),
-        # --- Einparken am Ende --------------------------------------------
-        # Das Regelwerk verlangt nach drei Runden 3 s Stillstand, erst danach
-        # darf eingeparkt werden. Reserve drauf, damit ein langsamer Takt die
-        # 3 s nicht knapp unterschreitet.
-        # 0 = KEIN Halt: die Zeit laeuft bis er in der Luecke steht, eine
-        # Pflichtpause gibt es laut Regelwerk nicht. > 0 = altes Verhalten
-        # (anhalten, so lange warten, dann einparken).
-        'einparken_halt_s':      ('einparken_halt_s',      0.0,  float),
-        # Ab hier sind die Seiten an den Pylonen frei (drei Runden vorbei):
-        # base_link so weit vor der Frontwand -- das Heck ist dann an der
-        # Pylonenreihe am Anfang der Startgeraden (2 m) vorbei.
-        'seiten_frei_ab':        ('seiten_frei_ab',        1.915, float),
-        # Wie genau die Einpark-Startpose getroffen sein muss, bevor die
-        # umgekehrte Ausparkfolge startet. Ein Kursfehler dreht die GANZE
-        # Folge mit -- 2 Grad sind ueber ~50 cm Rangierweg schon 1,7 cm.
-        'einparken_quer_tol':    ('einparken_quer_tol',    0.025, float),
-        'einparken_kurs_tol_grad': ('einparken_kurs_tol_grad', 2.5, float),
-        # Plausibilitaet: laenger darf die gerade Anfahrt nicht sein.
-        'einparken_max_anfahrt': ('einparken_max_anfahrt', 1.20, float),
-        # Steilster Rueckschwenk auf die Parklinie nach dem letzten Hindernis
-        # (Meter quer pro Meter laengs). Gemessen sauber: ~1,0.
-        'einparken_rueck_steigung_max': ('einparken_rueck_steigung_max', 0.90, float),
-        # Anfahrt zur Startpose: so genau muss sie laengs stimmen, so viele
-        # gerade Korrekturzuege sind erlaubt, so lange wird vor dem
-        # Nachmessen gewartet (EKF soll ruhen).
-        'einparken_laengs_tol':  ('einparken_laengs_tol',  0.010, float),
-        'einparken_anfahrt_max_zuege': ('einparken_anfahrt_max_zuege', 3, int),
-        'einparken_nachmess_s':  ('einparken_nachmess_s',  0.3,  float),
-        # So lange wird im Stand gemittelt (nach der Beruhigungszeit).
-        'einparken_mittel_s':    ('einparken_mittel_s',    0.5,  float),
-        # Rueckfall fuer die Parklinie, falls /wall_distances im Scan-Halt
-        # nichts Brauchbares liefert. Handmessung base_link -> Aussenbande am
-        # Ende des Ausparkens (Radnabe + halbe Spurweite).
-        'einparken_linie_cw':    ('einparken_linie_cw',    0.370, float),
-        'einparken_linie_ccw':   ('einparken_linie_ccw',   0.345, float),
-        # Nur wenn Ecke 1 nach dem Ausparken NAEHER als das liegt, wird am
-        # Ausparkende gescannt (voller Halt ausparken_halt_s, ersetzt den
-        # Scan-Stopp vor Ecke 1). Sonst faehrt er gleich los und scannt
-        # regulaer am Ende der Geraden -- ein Scan-Stopp pro Gerade.
-        'ausparken_scan_ersetzt_bis': ('ausparken_scan_ersetzt_bis', 1.10, float),
-        # Mindestens so lange steht er nach dem Ausparken trotzdem: die
-        # Parklinie wird hier im Stand per Lidar gemessen.
-        'ausparken_mess_s':      ('ausparken_mess_s',      0.5,  float),
-        # So lange wird hoechstens auf die Eckengeometrie gewartet. Ohne sie
-        # faehrt er blind zur Spurmitte -- mit Parkluecke stehen die Zeichen
-        # der Startgeraden innen bei 0,60 m, das waeren ~2 cm Luft.
-        'ausparken_geo_timeout_s': ('ausparken_geo_timeout_s', 4.0, float),
-        # --- Start aus der Bucht (Perzeption mit start_from_bay) ------------
-        # Erst ausparken, wenn /race_direction da ist: die Perzeption mittelt
-        # die Pose ueber 5 Scans im Stand und committet dann. Faehrt er vorher
-        # los, passen Messung und Kartenverankerung nicht zusammen. Kommt nach
-        # dieser Zeit nichts, gilt die eigene Messung (Perzeption ohne
-        # start_from_bay).
-        'ausparken_warte_auf_richtung_s': ('ausparken_warte_auf_richtung_s', 3.0, float),
-        # Auf /start_scan_state 'complete' warten, bevor er losfaehrt -- jede
-        # Bewegung bricht die Abtastung der Startgeraden ab. Kommt das Topic
-        # nicht (Perzeption ohne start_from_bay), nach dieser Zeit weiter.
-        'ausparken_warte_scan_s': ('ausparken_warte_scan_s', 3.0, float),
-        # Die Ausparkfolge richtet sich nach der NAECHSTEN Pylone VOR dem
-        # geparkten Roboter, so weit voraus (ab base_link). NICHT nach einer
-        # festen Reihe: die Luecke liegt je nach Aufbau woanders (Starts bei
-        # 1,965 / 1,728 / 1,247 m vor der Frontwand gesehen) -- mit fester Reihe
-        # wurde eine gruene Pylone 28 cm vor ihm uebersehen und er parkte auf der
-        # falschen Seite aus. Bis 0,75 m prueft die Perzeption aus der Luecke.
-        # Was neben oder hinter ihm steht, zaehlt nicht.
-        'ausparken_entscheid_ab':  ('ausparken_entscheid_ab',  0.10, float),
-        'ausparken_entscheid_bis': ('ausparken_entscheid_bis', 0.75, float),
-        # Endlage der NORMALEN Ausparkfolge relativ zur Startlage in der Luecke
-        # (gemessen). Daraus die Einpark-Startpose, wenn die Innen-Folge gefahren
-        # wurde -- eingeparkt wird immer mit der umgekehrten normalen Folge.
-        'park_std_laengs_cw':    ('park_std_laengs_cw',    0.315, float),
-        'park_std_quer_cw':      ('park_std_quer_cw',      0.227, float),
-        'park_std_laengs_ccw':   ('park_std_laengs_ccw',   0.276, float),
-        'park_std_quer_ccw':     ('park_std_quer_ccw',     0.202, float),
-        # Handversatz der Einpark-Startpose [m], nach allem anderen
-        # draufgerechnet -- egal ob normal oder mit einer Variante ausgeparkt
-        # wurde. laengs: + = weiter in Fahrtrichtung (zur naechsten Ecke hin).
-        # quer: + = weiter weg von der Aussenbande (ins Feld). Quer wandert die
-        # Parklinie mit, an der die Anfahrt ausgerichtet wird.
-        # je Richtung: CCW (bisheriger Wert) und CW
-        'einpark_versatz_laengs_ccw': ('einpark_versatz_laengs_ccw', 0.06, float),
-        'einpark_versatz_quer_ccw':   ('einpark_versatz_quer_ccw',   -0.05, float),
-        'einpark_versatz_laengs_cw':  ('einpark_versatz_laengs_cw',  0.0, float),
-        'einpark_versatz_quer_cw':    ('einpark_versatz_quer_cw',    -0.03, float),
+        # --- Unparking from the start bay -----------------------------------
+        # The two magenta walls stand perpendicular on the outer wall and
+        # reach 20 cm into the field; the bay is the 26.25 cm wide gap between
+        # them. The robot stands lengthwise in it and has to get out sideways.
+        # All the maths is in ekf/unpark.py, here only the switches.
+        # unpark, unpark_only and unpark_invert_direction are REAL bool
+        # parameters and sit further down next to require_button -- so that
+        # "-p unpark_only:=true" does what you expect. Everything in this
+        # table is DOUBLE and wanted "1.0" instead of "true".
+        'unpark_sector_deg':        ('unpark_sector_deg',        20.0, float),
+        'unpark_scans':             ('unpark_scans',             5,    int),
+        'unpark_direction_timeout': ('unpark_direction_timeout', 8.0, float),
+        # The servo needs time to reach the end stop -- only drive off after
+        # that, otherwise the first centimetre runs with half the lock.
+        'unpark_steer_wait_s':      ('unpark_steer_wait_s',      0.6, float),
+        'unpark_move_timeout':      ('unpark_move_timeout',      15.0, float),
+        # How much of the target travel the ESP may be short before a timeout
+        # counts as an error. The ESP reports status 1 when it does not
+        # settle -- it often misses the last millimetres because the output
+        # there falls below the breakaway threshold. What counts for us is
+        # the distance travelled, not the settling: 2 mm with 8 mm reserve
+        # are no reason to abort the sequence.
+        'unpark_travel_tol_cm':     ('unpark_travel_tol_cm',     1.0, float),
+        # Standstill after unparking before the race begins. The perception
+        # needs it: the colour yield of the fusion is 38 percent at standstill
+        # and drops to 2 percent from 1 rad/s. The robot stands in the lane
+        # here for the first time and looks down the whole start straight --
+        # that is the best view of the pylons it gets in the whole run. 0
+        # switches the pause off.
+        # Do not call it "unpark_scan_s": that differs by only one character
+        # from unpark_scans (votes for the direction) and means something
+        # completely different.
+        'unpark_hold_s':            ('unpark_hold_s',            2.0, float),
+        # --- Parking at the end ---------------------------------------------
+        # The rules require 3 s of standstill after three laps, only then may
+        # it park. Reserve on top, so that a slow tick does not fall just
+        # short of the 3 s.
+        # 0 = NO hold: the time runs until it stands in the bay, there is no
+        # mandatory pause in the rules. > 0 = old behaviour (stop, wait this
+        # long, then park).
+        'park_hold_s':              ('park_hold_s',              0.0,  float),
+        # From here on the sides at the pylons are clear (three laps over):
+        # base_link this far from the front wall -- the rear is then past the
+        # pylon row at the start of the start straight (2 m).
+        'sides_clear_from':         ('sides_clear_from',         1.915, float),
+        # How exactly the park start pose must be hit before the reversed
+        # unpark sequence starts. A heading error rotates the WHOLE sequence
+        # with it -- 2 degrees over ~50 cm of manoeuvring are already 1.7 cm.
+        'park_lat_tol':             ('park_lat_tol',             0.025, float),
+        'park_heading_tol_deg':     ('park_heading_tol_deg',     2.5, float),
+        # Plausibility: the straight approach must not be longer than this.
+        'park_max_approach':        ('park_max_approach',        1.20, float),
+        # Steepest swing back onto the parking line after the last obstacle
+        # (metres lateral per metre along). Measured clean: ~1.0.
+        'park_return_slope_max':    ('park_return_slope_max',    0.90, float),
+        # Approach to the start pose: this exactly it must match along the
+        # line, this many straight correction moves are allowed, this long it
+        # waits before remeasuring (the EKF should settle).
+        'park_long_tol':            ('park_long_tol',            0.010, float),
+        'park_approach_max_moves':  ('park_approach_max_moves',  3, int),
+        'park_remeasure_s':         ('park_remeasure_s',         0.3,  float),
+        # This long it averages at standstill (after the settling time).
+        'park_average_s':           ('park_average_s',           0.5,  float),
+        # Fallback for the parking line if /wall_distances delivers nothing
+        # usable during the scan hold. Hand measurement base_link -> outer
+        # wall at the end of unparking (wheel hub + half the track width).
+        'park_line_cw':             ('park_line_cw',             0.370, float),
+        'park_line_ccw':            ('park_line_ccw',            0.345, float),
+        # Only if corner 1 lies CLOSER than this after unparking does it scan
+        # at the end of unparking (full hold unpark_hold_s, replaces the scan
+        # stop before corner 1). Otherwise it drives off at once and scans as
+        # usual at the end of the straight -- one scan stop per straight.
+        'unpark_scan_replaces_until': ('unpark_scan_replaces_until', 1.10, float),
+        # It stands at least this long after unparking anyway: the parking
+        # line is measured here at standstill with the lidar.
+        'unpark_measure_s':         ('unpark_measure_s',         0.5,  float),
+        # At most this long it waits for the corner geometry. Without it it
+        # drives blind to the lane centre -- with a parking bay the markers
+        # of the start straight stand on the inside at 0.60 m, that would be
+        # ~2 cm of clearance.
+        'unpark_geo_timeout_s':     ('unpark_geo_timeout_s',     4.0, float),
+        # --- Start from the bay (perception with start_from_bay) ------------
+        # Only unpark once /race_direction is there: the perception averages
+        # the pose over 5 scans at standstill and then commits. If it drives
+        # off before that, measurement and map anchoring do not fit together.
+        # If nothing comes within this time, its own measurement applies
+        # (perception without start_from_bay).
+        'unpark_wait_direction_s':  ('unpark_wait_direction_s',  3.0, float),
+        # Wait for /start_scan_state 'complete' before driving off -- every
+        # movement aborts the sampling of the start straight. If the topic
+        # does not come (perception without start_from_bay), carry on after
+        # this time.
+        'unpark_wait_scan_s':       ('unpark_wait_scan_s',       3.0, float),
+        # The unpark sequence follows the NEAREST pylon AHEAD of the parked
+        # robot, this far ahead (from base_link). NOT a fixed row: the bay
+        # lies elsewhere depending on the layout (starts at 1.965 / 1.728 /
+        # 1.247 m seen from the front wall) -- with a fixed row a green pylon
+        # 28 cm ahead of it was missed and it unparked to the wrong side. Up
+        # to 0.75 m the perception checks from the bay. Whatever stands beside
+        # or behind it does not count.
+        'unpark_decide_from':       ('unpark_decide_from',       0.10, float),
+        'unpark_decide_to':         ('unpark_decide_to',         0.75, float),
+        # Final pose of the NORMAL unpark sequence relative to the start pose
+        # in the bay (measured). From it the park start pose if the inner
+        # sequence was driven -- parking always uses the reversed normal
+        # sequence.
+        'park_std_long_cw':         ('park_std_long_cw',         0.315, float),
+        'park_std_lat_cw':          ('park_std_lat_cw',          0.227, float),
+        'park_std_long_ccw':        ('park_std_long_ccw',        0.276, float),
+        'park_std_lat_ccw':         ('park_std_lat_ccw',         0.202, float),
+        # Manual offset of the park start pose [m], added on top of
+        # everything else -- no matter whether it unparked normally or with a
+        # variant. long: + = further in the direction of travel (towards the
+        # next corner). lat: + = further away from the outer wall (into the
+        # field). The parking line the approach is aligned to moves along
+        # laterally. Per direction: CCW (previous value) and CW
+        'park_offset_long_ccw':     ('park_offset_long_ccw',     0.06, float),
+        'park_offset_lat_ccw':      ('park_offset_lat_ccw',      -0.05, float),
+        'park_offset_long_cw':      ('park_offset_long_cw',      0.0, float),
+        'park_offset_lat_cw':       ('park_offset_lat_cw',       -0.03, float),
         # --- /localization_state -------------------------------------------
-        # Bei 'recovering'/'lost' hoechstens so schnell (Kruemmung bleibt gleich).
-        'v_lok_unsicher':        ('v_lok_unsicher',        0.20, float),
-        # So lange darf 'lost' beim Fahren anhalten, dann Stopp. Die
-        # Perzeption faengt Fehler bis ~0,35 m wieder ein; bei 0,20 m/s sind
-        # 2 s schon 0,40 m Blindflug. 0 = nie stoppen.
-        'lok_lost_stopp_s':      ('lok_lost_stopp_s',      2.0,  float),
-        # So lange wartet das Einparken im Stand auf 'ok', dann kein Einparken.
-        'einparken_lok_warte_s': ('einparken_lok_warte_s', 3.0,  float),
-        # Kurskorrektur beim Einparken ueber die Laenge der Vollanschlag-Boegen.
-        # Kleine Lenkwinkel verschluckt das Lenkspiel (2-5 grad), der Anschlag
-        # nicht. Nur solange die Sensoren reichen: Lokalisierung 'ok' und der
-        # Lidar noch aus der Bucht heraus (mehr als so weit von der Aussenbande).
-        'einparken_korr_min_abstand': ('einparken_korr_min_abstand', 0.23, float),
-        # Bogen hoechstens um diesen Anteil laenger/kuerzer.
-        'einparken_korr_max':    ('einparken_korr_max',    0.40, float),
-        # Kursabweichung zur Ausparkbahn ab der gewarnt wird (grad).
-        'einparken_kurs_warn_grad': ('einparken_kurs_warn_grad', 3.0, float),
-        # Haltepunkt am Ziel moeglichst an die Einpark-Startpose legen, damit
-        # die Anfahrt danach kurz ist. Nur innerhalb der erlaubten Zone.
-        'ziel_an_parkstart':     ('ziel_an_parkstart',     1.0, lambda v: bool(float(v))),
-        # Pflichthalt so FRUEH wie erlaubt: am hinteren Zonenrand, gleich nach
-        # der letzten Kurve. Danach ist die Seite an den Pylonen frei, und die
-        # Fahrt zur Startpose laeuft geregelt. Hat Vorrang vor ziel_an_parkstart.
-        'ziel_frueh':            ('ziel_frueh',            1.0, lambda v: bool(float(v))),
-        'ziel_zone_min':         ('ziel_zone_min',         1.00, float),  # m zur Frontwand
-        'ziel_zone_max':         ('ziel_zone_max',         2.00, float),
-        'ziel_zone_rand':        ('ziel_zone_rand',        0.05, float),  # Sicherheitsrand
-        # Zone gilt fuers GANZE Fahrzeug (Nase bis Heck), nicht nur base_link.
-        'ziel_zone_ganzes_fz':   ('ziel_zone_ganzes_fz',   1.0, lambda v: bool(float(v))),
-        # Anfahrt zur Startpose ab dieser Strecke vorwaerts GEREGELT (Stanley)
-        # statt als blinder gerader ESP-Zug.
-        'einparken_fahrt_ab':    ('einparken_fahrt_ab',    0.08, float),
-        'v_park_fahrt':          ('v_park_fahrt',          0.30, float),   # Zeit zaehlt bis eingeparkt
-        # Ab dem Ausgang der letzten Kurve bis zur Einpark-Startpose (ohne
-        # Pflichthalt). Mit 0.30 m/s blieben nach der Kurve nur ~0.5 m zum
-        # Einschwingen: Kurs pendelte auf +10..+15 grad und kam schief an.
-        'v_park_anfahrt':        ('v_park_anfahrt',        0.15, float),
-        'steiler_pfad_ab':       ('steiler_pfad_ab',       0.60, float),   # quer je laengs
-        'v_steiler_pfad':        ('v_steiler_pfad',        0.35, float),
-        # Tempo-Profil (TEMPO_PROFILE), 'eigen' = Einzelwerte. tempo_runde1:
-        # eigenes Profil fuer die Scan-Runde, 'gleich' = wie tempo.
-        'tempo':                 ('tempo',                 'eigen', str),
-        'tempo_runde1':          ('tempo_runde1',          'gleich', str),
-        # VORHALT in der Scan-Runde, zusaetzlich zum Scan-Halt: so weit vor der
-        # Frontwand kurz stehen, dass er die LETZTE Pylone der Geraden (Reihe 0,
-        # ~1 m vor der Frontwand) im Stand sieht und noch ausweichen kann. Der
-        # Scan-Halt bei 1,10 m stand genau neben ihr -- Gruen erkennt die
-        # Kamera erst im Stand, und dann fehlte der Platz (Lauf 48: falsche
-        # Seite, Lauf 49: in die Innenbande und wieder falsche Seite). 0 = aus.
-        'scan_vorhalt_front':    ('scan_vorhalt_front',    1.85, float),
-        'scan_vorhalt_s':        ('scan_vorhalt_s',        1.2, float),
-        # NOTFALL-RANGIEREN statt Nothalt: ist der Bogen hinter T_A nicht mehr
-        # fahrbar oder steht etwas direkt vor der Nase, setzt er zurueck und
-        # plant neu. rangier_anstoss: so nah (m vor der Nase, in Wagenbreite)
-        # darf der LiDAR etwas sehen, dann Stopp. rangier_max je Ecke.
-        'rangieren':             ('rangieren',             1.0, lambda v: bool(float(v))),
-        'rangier_max':           ('rangier_max',           2, int),
-        'rangier_anstoss':       ('rangier_anstoss',       0.04, float),
-        'rangier_weg':           ('rangier_weg',           0.15, float),
-        # Startpose um so viel UEBERFAHREN, anhalten und geregelt rueckwaerts
-        # (PARK_RUECK) zurueck. Vorwaerts bleiben nach der letzten Kurve nur
-        # ~0,3 m bis zur Startpose -- zu wenig, um Kurs und Querlage
-        # einzuschwingen (Lauf 35: +20 grad an der Startpose). Rueckwaerts
-        # regelt er Kurs UND Querlage stetig nach. 0 = aus (wie bisher).
-        # _cw/_ccw je Richtung: in CCW (Lauf 48) blieb nach dem Zuruecksetzen
-        # -7 grad Kurs, und der zweite Einparkzug fuhr in die Magenta-Wand.
-        'einparken_ueberfahren_cw':  ('einparken_ueberfahren_cw',  0.30, float),
-        'einparken_ueberfahren_ccw': ('einparken_ueberfahren_ccw', 0.0, float),
-        # Die geregelte Anfahrt haelt so weit VOR der Startpose an. Nach dem
-        # Stopp rollt er noch nach (Totzeit + Bremsweg) und lag in den Laeufen
-        # 9/15/16 dadurch 1,7-4 cm HINTER der Startpose -- der Restzug in
-        # PARK_NACHMESSEN war immer ein Stueck rueckwaerts. Mit Vorhalt bleibt
-        # ein kurzer VORWAERTS-Rest, den der ESP als Positionsfahrt auf den
-        # Millimeter faehrt (nachgemessen: jeder Zug +-0,1 cm).
-        'einparken_vorhalt':     ('einparken_vorhalt',     0.15, float),
-        # Gerader ESP-Zug bei der Anfahrt: die ACHSE trifft auf 0,1 mm, der
-        # Wagen faehrt ueber Grund aber weiter -- rund 6 Prozent (R_EFF) und
-        # vorwaerts noch ~1 cm Ueberschuss. parken_test_18 per Frontwand im
-        # Lidar: +5,74 cm befohlen -> 7,1 cm gefahren, -1,47 -> 1,8 cm. Der
-        # Befehl wird darum verkuerzt: vorwaerts (d - ueberschuss) / skala,
-        # rueckwaerts d / skala. Sonst folgt auf jeden Anfahrtszug ein
-        # Rueckwaertszug.
-        'einparken_zug_skala':      ('einparken_zug_skala',      1.06,  float),
-        'einparken_zug_ueberschuss': ('einparken_zug_ueberschuss', 0.010, float),
-        # --- Rueckwaerts zur Startpose, stetig geregelt ----------------------
-        # Der ESP faehrt die Strecke als EINEN Zug, der Controller lenkt dabei
-        # laufend ueber die Rohlenkung nach (Hinterachse auf der Parklinie).
-        # Gesetz rueckwaerts: delta = k_kurs*psi - k_quer*e (stabil, auf die
-        # Strecke bezogen tempounabhaengig, Einschwinglaenge gut 10 cm).
-        # Simuliert mit Totzeit und 4 grad Lenkspiel: nach 45 cm <= 0,4 cm /
-        # 1 grad; blinder gerader Zug: 3,4 cm / 8,6 grad.
-        'einparken_rueck_ab':    ('einparken_rueck_ab',    0.08, float),
-        'rueck_k_kurs':          ('rueck_k_kurs',          1.5,  float),
-        'rueck_k_quer':          ('rueck_k_quer',          6.7,  float),
-        'rueck_max_lenk_grad':   ('rueck_max_lenk_grad',   18.0, float),
-        # Totzeit-Vorausberechnung rueckwaerts: bei Rangiertempo nur ~4 cm
-        # Weg, simuliert eher schaedlich -> aus.
-        'rueck_praed_s':         ('rueck_praed_s',         0.0,  float),
-        # Einparkfolge = umgekehrte Ausparkfolge. Die ESP-Zuege fahren aber
-        # vorwaerts ~1,1 cm, rueckwaerts nur ~0,4 cm weiter als befohlen -- die
-        # Umkehr hebt das NICHT auf, er steht beim Einparken ~2 cm weiter vorn
-        # als beim Ausparken und schlaegt beim einzigen Vorwaertszug an (im
-        # Lauf: 3,3 von 4,5 cm, dann Wand). Nur fuers Einparken, die
-        # abgestimmten Ausparkfolgen bleiben unberuehrt.
-        'einparken_vor_korr_cm': ('einparken_vor_korr_cm', -1.5, float),
-        'einparken_rueck_korr_cm': ('einparken_rueck_korr_cm', 0.0, float),
-        'einparken_leerzuege_weg': ('einparken_leerzuege_weg', 1.0, lambda v: bool(float(v))),
+        # With 'recovering'/'lost' at most this fast (curvature stays the same).
+        'v_loc_uncertain':          ('v_loc_uncertain',          0.20, float),
+        # 'lost' may last this long while driving, then stop. The perception
+        # recovers errors up to ~0.35 m; at 0.20 m/s 2 s are already 0.40 m
+        # of blind flight. 0 = never stop.
+        'loc_lost_stop_s':          ('loc_lost_stop_s',          2.0,  float),
+        # This long parking waits at standstill for 'ok', then no parking.
+        'park_loc_wait_s':          ('park_loc_wait_s',          3.0,  float),
+        # Heading correction when parking via the length of the full-lock
+        # arcs. The steering play (2-5 deg) swallows small steer angles, the
+        # end stop does not. Only while the sensors suffice: localisation 'ok'
+        # and the lidar still sees out of the bay (more than this far from
+        # the outer wall).
+        'park_corr_min_dist':       ('park_corr_min_dist',       0.23, float),
+        # Arc at most this fraction longer/shorter.
+        'park_corr_max':            ('park_corr_max',            0.40, float),
+        # Heading deviation from the unpark trajectory above which it warns (deg).
+        'park_heading_warn_deg':    ('park_heading_warn_deg',    3.0, float),
+        # Put the halt point at the finish as close as possible to the park
+        # start pose, so the approach afterwards is short. Only within the
+        # allowed zone.
+        'finish_at_park_start':     ('finish_at_park_start',     1.0, lambda v: bool(float(v))),
+        # Mandatory hold as EARLY as allowed: at the rear edge of the zone,
+        # right after the last corner. After that the side at the pylons is
+        # clear, and the drive to the start pose runs closed-loop. Takes
+        # precedence over finish_at_park_start.
+        'finish_early':             ('finish_early',             1.0, lambda v: bool(float(v))),
+        'finish_zone_min':          ('finish_zone_min',          1.00, float),  # m to the front wall
+        'finish_zone_max':          ('finish_zone_max',          2.00, float),
+        'finish_zone_margin':       ('finish_zone_margin',       0.05, float),  # safety margin
+        # The zone applies to the WHOLE car (nose to rear), not only base_link.
+        'finish_zone_whole_car':    ('finish_zone_whole_car',    1.0, lambda v: bool(float(v))),
+        # Approach to the start pose from this distance on forward CLOSED-LOOP
+        # (Stanley) instead of as a blind straight ESP move.
+        'park_drive_from':          ('park_drive_from',          0.08, float),
+        'v_park_drive':             ('v_park_drive',             0.30, float),   # time counts until parked
+        # From the exit of the last corner to the park start pose (without
+        # mandatory hold). With 0.30 m/s only ~0.5 m remained after the corner
+        # to settle: the heading swung to +10..+15 deg and it arrived askew.
+        'v_park_approach':          ('v_park_approach',          0.15, float),
+        'steep_path_from':          ('steep_path_from',          0.60, float),   # lat per long
+        'v_steep_path':             ('v_steep_path',             0.35, float),
+        # Pace profile (PACE_PROFILES), 'custom' = individual values. pace_lap1:
+        # own profile for the scan lap, 'same' = like pace.
+        'pace':                     ('pace',                     'custom', str),
+        'pace_lap1':                ('pace_lap1',                'same', str),
+        # LOOK-AHEAD HALT in the scan lap, in addition to the scan hold: stand
+        # briefly this far from the front wall so that it sees the LAST pylon
+        # of the straight (row 0, ~1 m from the front wall) at standstill and
+        # can still dodge it. The scan hold at 1.10 m stood right next to it
+        # -- the camera only recognises green at standstill, and then the room
+        # was missing (run 48: wrong side, run 49: into the inner wall and
+        # the wrong side again). 0 = off.
+        'scan_lookahead_halt_front': ('scan_lookahead_halt_front', 1.85, float),
+        'scan_lookahead_halt_s':    ('scan_lookahead_halt_s',    1.2, float),
+        # EMERGENCY MANOEUVRING instead of an emergency halt: if the arc past
+        # T_A can no longer be driven or something stands right in front of
+        # the nose, it backs up and replans. manoeuvre_trigger_dist: this
+        # close (m in front of the nose, within the car width) the LiDAR may
+        # see something, then stop. manoeuvre_max per corner.
+        'manoeuvre':                ('manoeuvre',                1.0, lambda v: bool(float(v))),
+        'manoeuvre_max':            ('manoeuvre_max',            2, int),
+        'manoeuvre_trigger_dist':   ('manoeuvre_trigger_dist',   0.04, float),
+        'manoeuvre_travel':         ('manoeuvre_travel',         0.15, float),
+        # OVERSHOOT the start pose by this much, stop and come back in
+        # reverse closed-loop (PARK_REVERSE). Going forward only ~0.3 m remain
+        # after the last corner up to the start pose -- too little to settle
+        # heading and lateral position (run 35: +20 deg at the start pose).
+        # In reverse it corrects heading AND lateral position continuously.
+        # 0 = off (as before). _cw/_ccw per direction: in CCW (run 48) -7 deg
+        # heading remained after the backing up, and the second park move ran
+        # into the magenta wall.
+        'park_overshoot_cw':        ('park_overshoot_cw',        0.30, float),
+        'park_overshoot_ccw':       ('park_overshoot_ccw',       0.0, float),
+        # The closed-loop approach stops this far SHORT of the start pose.
+        # After the stop it still rolls on (dead time + braking distance) and
+        # in runs 9/15/16 it therefore lay 1.7-4 cm BEHIND the start pose --
+        # the remaining move in PARK_REMEASURE was always a bit in reverse.
+        # With the stop-short a short FORWARD remainder is left, which the
+        # ESP drives to the millimetre as a position move (re-measured: every
+        # move +-0.1 cm).
+        'park_stop_short':          ('park_stop_short',          0.15, float),
+        # Straight ESP move during the approach: the AXLE hits to 0.1 mm, but
+        # the car travels further over the ground -- about 6 percent (R_EFF)
+        # and forward another ~1 cm excess. parken_test_18 via the front wall
+        # in the lidar: +5.74 cm commanded -> 7.1 cm driven, -1.47 -> 1.8 cm.
+        # The command is therefore shortened: forward (d - excess) / scale,
+        # reverse d / scale. Otherwise every approach move is followed by a
+        # reverse move.
+        'park_move_scale':          ('park_move_scale',          1.06,  float),
+        'park_move_excess':         ('park_move_excess',         0.010, float),
+        # --- Reverse to the start pose, continuously closed-loop -------------
+        # The ESP drives the distance as ONE move, the controller keeps
+        # steering meanwhile via the raw steering (rear axle on the parking
+        # line). Law in reverse: delta = k_heading*psi - k_lat*e (stable,
+        # speed-independent with respect to distance, settling length a good
+        # 10 cm). Simulated with dead time and 4 deg steering play: after
+        # 45 cm <= 0.4 cm / 1 deg; blind straight move: 3.4 cm / 8.6 deg.
+        'park_reverse_from':        ('park_reverse_from',        0.08, float),
+        'rev_k_heading':            ('rev_k_heading',            1.5,  float),
+        'rev_k_lat':                ('rev_k_lat',                6.7,  float),
+        'rev_max_steer_deg':        ('rev_max_steer_deg',        18.0, float),
+        # Dead-time prediction in reverse: at manoeuvring speed only ~4 cm of
+        # travel, simulated rather harmful -> off.
+        'rev_pred_s':               ('rev_pred_s',               0.0,  float),
+        # Park sequence = reversed unpark sequence. But the ESP moves go
+        # ~1.1 cm further than commanded forward, only ~0.4 cm in reverse --
+        # the reversal does NOT cancel that, when parking it stands ~2 cm
+        # further forward than when unparking and hits during the only
+        # forward move (in the run: 3.3 of 4.5 cm, then wall). Only for
+        # parking, the tuned unpark sequences stay untouched.
+        'park_fwd_corr_cm':         ('park_fwd_corr_cm',         -1.5, float),
+        'park_rev_corr_cm':         ('park_rev_corr_cm',         0.0, float),
+        'park_skip_empty_moves':    ('park_skip_empty_moves',    1.0, lambda v: bool(float(v))),
         'debug':         ('debug',         1.0,   lambda v: bool(float(v))),
     }
 
@@ -575,31 +593,31 @@ class Round1Controller(Node):
             self.declare_parameter(name, default)
         # structural (read once)
         self.declare_parameter('require_button', False)
-        # ausparken ist DER Schalter. ausparken_nur ist eine Unteroption
-        # davon: nach der Sequenz anhalten, statt das Rennen zu fahren -- zum
-        # Einstellen der Schrittfolge.
+        # unpark is THE switch. unpark_only is a sub-option of it: stop after
+        # the sequence instead of driving the race -- for tuning the step
+        # sequence.
         #
-        # Frueher hiess sie nur_ausparken, und das war eine Falle:
-        # "-p nur_ausparken:=false" liest sich wie "ausparken und dann
-        # fahren", schaltet aber gar nichts ein. Der Name sagt jetzt, wozu
-        # sie gehoert.
-        self.declare_parameter('ausparken', False)
-        self.declare_parameter('ausparken_nur', False)
-        # Einparken am Ende. Greift nur, wenn vorher ausgeparkt wurde -- ohne
-        # Ausparken gibt es keine aufgezeichnete Startpose, und der Regler
-        # haelt wie bisher am Ziel an (Eroeffnungsrennen).
-        self.declare_parameter('einparken', True)
-        # Falls meine Herleitung der offenen Seite doch falsch herum ist:
-        # ein Schalter statt einer Codeaenderung.
-        self.declare_parameter('ausparken_richtung_invertieren', False)
-        # Wer bestimmt die Fahrtrichtung, wenn ausgeparkt wird? In der Luecke
-        # ist sie sicher messbar: die nahe Seite IST die Aussenwand, die ferne
-        # das Spielfeld. Der scan_processor kann das aus der Luecke heraus
-        # nicht besser wissen -- er sieht dort keine brauchbare Ecke, latcht
-        # aber trotzdem und lag in einem Lauf nachweislich falsch herum.
-        # Aus: dann gilt weiter /race_direction aus der Eckengeometrie.
-        self.declare_parameter('ausparken_setzt_richtung', True)
-        self.declare_parameter('test_richtung', 'CCW')     # Einpark-Test
+        # It used to be called nur_ausparken ("only unpark"), and that was a
+        # trap: "-p nur_ausparken:=false" reads like "unpark and then drive",
+        # but switches nothing on at all. The name now says what it belongs
+        # to.
+        self.declare_parameter('unpark', False)
+        self.declare_parameter('unpark_only', False)
+        # Parking at the end. Only applies if it unparked before -- without
+        # unparking there is no recorded start pose, and the controller stops
+        # at the finish as before (opening race).
+        self.declare_parameter('park', True)
+        # In case my derivation of the open side is the wrong way round after
+        # all: a switch instead of a code change.
+        self.declare_parameter('unpark_invert_direction', False)
+        # Who decides the direction of travel when unparking? In the bay it
+        # can be measured reliably: the near side IS the outer wall, the far
+        # one the playing field. The scan_processor cannot know that better
+        # from inside the bay -- it sees no usable corner there, but latches
+        # anyway and was demonstrably the wrong way round in one run.
+        # Off: then /race_direction from the corner geometry still applies.
+        self.declare_parameter('unpark_sets_direction', True)
+        self.declare_parameter('test_direction', 'CCW')     # park test
         self.declare_parameter('control_rate', 30.0)
         self.declare_parameter('odom_timeout', 0.5)   # bridge past short EKF gaps
 
@@ -613,160 +631,160 @@ class Round1Controller(Node):
         self.declare_parameter('o_out_list', [0.35, 0.35, 0.35, 0.35], arr)
         self.declare_parameter('turn_radius_list', [0.5, 0.5, 0.5, 0.5], arr)
 
-        # Ausparksequenz als flache Liste [lenkung_%, cm, lenkung_%, cm, ...].
-        # Positive Lenkung heisst ZUR OFFENEN SEITE, negative cm rueckwaerts --
-        # die Tabelle ist dadurch richtungsfrei und wird erst beim Ausfuehren
-        # gespiegelt. Pruefen ohne Roboter:
-        #     python3 src/ekf/ekf/ausparken.py 100 5.9 -100 -4.4 ...
-        self.declare_parameter('ausparken_schritte', list(SCHRITTE_STANDARD), arr)
-        # Je Fahrtrichtung eine eigene Folge, falls der Roboter in der Luecke
-        # unterschiedlich steht. Spiegeln allein reicht dann nicht: es sind
-        # andere WEGE, nicht nur andere Vorzeichen. Leer = die gemeinsame
-        # Folge oben gilt, so dass man nur die Richtung fuellen muss, die
-        # wirklich abweicht.
-        self.declare_parameter('ausparken_schritte_cw', list(SCHRITTE_CW), arr)
-        self.declare_parameter('ausparken_schritte_ccw', list(SCHRITTE_CCW), arr)
-        # Regelparameter des ESP fuer die Dauer der Sequenz. Flach als
-        # [index, wert, ...], Reihenfolge der Indizes siehe PID_PARAMS in
+        # Unpark sequence as a flat list [steering_%, cm, steering_%, cm, ...].
+        # Positive steering means TOWARDS THE OPEN SIDE, negative cm reverse --
+        # that makes the table direction-free, it is only mirrored when it is
+        # executed. Check without the robot:
+        #     python3 src/ekf/ekf/unpark.py 100 5.9 -100 -4.4 ...
+        self.declare_parameter('unpark_steps', list(STEPS_DEFAULT), arr)
+        # A separate sequence per direction of travel, in case the robot
+        # stands differently in the bay. Mirroring alone is not enough then:
+        # these are different PATHS, not only different signs. Empty = the
+        # shared sequence above applies, so you only have to fill in the
+        # direction that really differs.
+        self.declare_parameter('unpark_steps_cw', list(STEPS_CW), arr)
+        self.declare_parameter('unpark_steps_ccw', list(STEPS_CCW), arr)
+        # Control parameters of the ESP for the duration of the sequence. Flat
+        # as [index, value, ...], order of the indices see PID_PARAMS in
         # esp_serial_bridge.py: 0 kp, 1 ki, 2 kd, 3 ilimit, 4 maxduty,
         # 5 tol_deg, 6 settle_ms, 7 timeout_ms, 8 minduty.
-        # Ohne Begrenzung steht der Stellwert bei mehreren hundert Grad
-        # Sollweg bis kurz vors Ziel am Anschlag -- in einer 26 cm langen
-        # Luecke ist das zu schnell.
-        # 4 = maxduty, 8 = minduty. Das Paar ist bewusst ENG gewaehlt.
+        # Without a limit the output sits at the end stop with several
+        # hundred degrees of target travel until shortly before the target --
+        # in a 26 cm long bay that is too fast.
+        # 4 = maxduty, 8 = minduty. The pair is chosen NARROW on purpose.
         #
-        # Der ESP kennt keine Anlauframpe -- in PID_PARAMS gibt es keinen
-        # solchen Wert. Am Anfang jedes Zuges ist der Regelfehler riesig (Zug 1
-        # sind 225 Grad Welle), kp mal Fehler also weit ueber jeder Grenze, und
-        # der Stellwert springt in einem einzigen Takt auf maxduty. Bei 300
-        # drehen die Raeder durch, erst recht bei vollem Lenkeinschlag, wo sie
-        # zusaetzlich radieren.
+        # The ESP has no start-up ramp -- there is no such value in
+        # PID_PARAMS. At the start of every move the control error is huge
+        # (move 1 is 225 degrees of shaft), so kp times error is far above
+        # any limit, and the output jumps to maxduty in a single tick. At 300
+        # the wheels spin, all the more at full steering lock, where they
+        # also scrub.
         #
-        # Fuers Ausparken wollen wir aber gar kein Geschwindigkeitsprofil,
-        # sondern gleichmaessiges Kriechen ueber wenige Zentimeter. Liegt
-        # maxduty nur knapp ueber minduty, laeuft der Motor die ganze Strecke
-        # auf fast konstantem niedrigem Stellwert: kein Sprung am Anfang, und
-        # unten haelt minduty ihn ueber der Losbrechschwelle (pwm_deadband
-        # 0.076, also rund 78 duty), damit die letzten Millimeter nicht
-        # liegenbleiben und der ESP nicht in seine Zeitgrenze laeuft.
+        # For unparking we do not want a speed profile at all, but an even
+        # creep over a few centimetres. If maxduty lies only just above
+        # minduty, the motor runs the whole distance at an almost constant
+        # low output: no jump at the start, and at the bottom minduty keeps
+        # it above the breakaway threshold (pwm_deadband 0.076, i.e. about 78
+        # duty), so that the last millimetres do not get stuck and the ESP
+        # does not run into its time limit.
         #
-        # Zu langsam? minduty und maxduty gemeinsam anheben, den Abstand
-        # zwischen beiden aber klein lassen.
-        self.declare_parameter('ausparken_pid', [4.0, 140.0, 8.0, 90.0, 7.0, 4000.0], arr)
-        self.declare_parameter('ausparken_pid_nachher', [4.0, 1023.0], arr)
-        # Feinabstimmung einzelner Einparkzuege in cm (+ = laenger), ein Wert je
-        # Zug der Einparkfolge; leer = nur die Richtungskorrekturen oben.
-        self.declare_parameter('einparken_zug_korr_cm', [0.0], arr)
+        # Too slow? Raise minduty and maxduty together, but keep the gap
+        # between them small.
+        self.declare_parameter('unpark_pid', [4.0, 140.0, 8.0, 90.0, 7.0, 4000.0], arr)
+        self.declare_parameter('unpark_pid_after', [4.0, 1023.0], arr)
+        # Fine tuning of individual park moves in cm (+ = longer), one value
+        # per move of the park sequence; empty = only the direction corrections above.
+        self.declare_parameter('park_move_corr_cm', [0.0], arr)
 
         self._load_params()
         self.require_button = bool(self.get_parameter('require_button').value)
-        self.ausparken = bool(self.get_parameter('ausparken').value)
-        self.ausparken_nur = bool(self.get_parameter('ausparken_nur').value)
-        self.einparken = bool(self.get_parameter('einparken').value)
-        self.ausparken_richtung_invertieren = bool(
-            self.get_parameter('ausparken_richtung_invertieren').value)
-        self.ausparken_setzt_richtung = bool(
-            self.get_parameter('ausparken_setzt_richtung').value)
+        self.unpark = bool(self.get_parameter('unpark').value)
+        self.unpark_only = bool(self.get_parameter('unpark_only').value)
+        self.park = bool(self.get_parameter('park').value)
+        self.unpark_invert_direction = bool(
+            self.get_parameter('unpark_invert_direction').value)
+        self.unpark_sets_direction = bool(
+            self.get_parameter('unpark_sets_direction').value)
         self.control_rate = float(self.get_parameter('control_rate').value)
         self.odom_timeout = float(self.get_parameter('odom_timeout').value)
         self.add_on_set_parameters_callback(self._on_params)
 
-        self.ausparken_schritte = list(
-            self.get_parameter('ausparken_schritte').value)
-        self.ausparken_schritte_cw = list(
-            self.get_parameter('ausparken_schritte_cw').value)
-        self.ausparken_schritte_ccw = list(
-            self.get_parameter('ausparken_schritte_ccw').value)
-        self.ausparken_pid = list(self.get_parameter('ausparken_pid').value)
-        self.ausparken_pid_nachher = list(
-            self.get_parameter('ausparken_pid_nachher').value)
-        self.einparken_zug_korr = [float(v) for v in
-                                   self.get_parameter('einparken_zug_korr_cm').value]
-        # Ein Schalter soll reichen: wer nur ausparken will, meint auch ausparken.
-        if self.ausparken_nur and not self.ausparken:
-            self.ausparken = True
-        self.test_richtung = str(self.get_parameter('test_richtung').value).strip().upper()
-        if self.einparken_test:
-            # nur Zielgerade und einparken
-            self.ausparken = False
-            self.einparken = True
+        self.unpark_steps = list(
+            self.get_parameter('unpark_steps').value)
+        self.unpark_steps_cw = list(
+            self.get_parameter('unpark_steps_cw').value)
+        self.unpark_steps_ccw = list(
+            self.get_parameter('unpark_steps_ccw').value)
+        self.unpark_pid = list(self.get_parameter('unpark_pid').value)
+        self.unpark_pid_after = list(
+            self.get_parameter('unpark_pid_after').value)
+        self.park_move_corr = [float(v) for v in
+                               self.get_parameter('park_move_corr_cm').value]
+        # One switch should be enough: whoever only wants to unpark also means unpark.
+        if self.unpark_only and not self.unpark:
+            self.unpark = True
+        self.test_direction = str(self.get_parameter('test_direction').value).strip().upper()
+        if self.park_test:
+            # only the finish straight and parking
+            self.unpark = False
+            self.park = True
             self.n_corners = 0
             self.get_logger().warn(
-                "EINPARK-TEST (%s): kein Ausparken, keine Runden -- faehrt die "
-                "Startgerade als Zielgerade und parkt ein." % self.test_richtung)
+                "PARK TEST (%s): no unparking, no laps -- drives the start "
+                "straight as the finish straight and parks." % self.test_direction)
 
         # --- state ---
-        self.state = 'AUSPARK_BUTTON' if self.ausparken else 'WAIT_INPUTS'
-        # Ausparken: Stimmen fuer die Richtung, Stelle in der Schrittfolge,
-        # letzte Quittung der Bruecke.
-        self.ausp_stimmen = []
-        self.ausp_letzter_grund = None
-        self.ausp_schritte = None
-        self.ausp_richtung = None
-        self.ausp_index = 0
-        self.ausp_phase = 'lenken'
-        self.ausp_lenk_gesendet = False
-        self.ausp_t0 = 0.0
-        self.ausp_gesendet_t = None
-        self.ausp_move_done = None
-        self.ausp_theta0 = 0.0
-        self.ausp_pose0 = None
-        # 'aus' = Ausparkfolge am Start, 'ein' = Einparkfolge am Ende. Beide
-        # laufen durch DENSELBEN Ausfuehrer (AUSPARK_FAHREN), damit er genau so
-        # einparkt, wie er ausgeparkt hat.
-        self.ausp_modus = 'aus'
-        self.park_ursprung = None     # Pose vor dem Ausparken (Lueckenlage)
-        self.park_start = None        # Pose NACH dem Ausparken = Einpark-Start
-        self.ausp_ende_pose = None    # Pose direkt nach dem letzten Ausparkzug
-        # Wellenstellung aus der letzten Quittung (0,1-grad-Zaehler des ESP,
-        # absolut seit Boot). Innerhalb einer Zugfolge dreht sich die Welle
-        # zwischen zwei Zuegen nicht -- die Differenz ist dann EXAKT die
-        # Drehung dieses Zuges, unabhaengig vom EKF.
-        self.ausp_pos_prev = None
-        self.anfahrt_iter = 0
-        self.park_einpark = []
-        self.park_mittel = []         # Posen zum Mitteln im Stand
-        # Parklinie WANDBEZOGEN: Abstand base_link -> Aussenbande am Ende des
-        # Ausparkens, per Lidar gemessen (/wall_distances). Nicht aus der
-        # gemerkten Pose: die Karte wird beim Start aus der Lueckenlage heraus
-        # ~14 cm / 3,4 grad versetzt platziert (CCW-Einparktest), und das
-        # gleicht der EKF erst waehrend der Runde aus.
+        self.state = 'UNPARK_BUTTON' if self.unpark else 'WAIT_INPUTS'
+        # Unparking: votes for the direction, position in the step sequence,
+        # last ack from the bridge.
+        self.unpark_votes = []
+        self.unpark_last_reason = None
+        self.unpark_steps_run = None
+        self.unpark_direction = None
+        self.unpark_index = 0
+        self.unpark_phase = 'steer'
+        self.unpark_steer_sent = False
+        self.unpark_t0 = 0.0
+        self.unpark_sent_t = None
+        self.unpark_move_done = None
+        self.unpark_theta0 = 0.0
+        self.unpark_pose0 = None
+        # 'out' = unpark sequence at the start (out of the bay), 'in' = park
+        # sequence at the end (into the bay). Both run through the SAME
+        # executor (UNPARK_DRIVE), so that it parks exactly the way it unparked.
+        self.unpark_mode = 'out'
+        self.park_origin = None       # pose before unparking (bay position)
+        self.park_start = None        # pose AFTER unparking = park start
+        self.unpark_end_pose = None   # pose right after the last unpark move
+        # Shaft position from the last ack (0.1-deg counter of the ESP,
+        # absolute since boot). Within a move sequence the shaft does not turn
+        # between two moves -- the difference is then EXACTLY the rotation of
+        # this move, independent of the EKF.
+        self.unpark_pos_prev = None
+        self.approach_iter = 0
+        self.park_in_steps = []
+        self.park_avg_poses = []      # poses for averaging at standstill
+        # Parking line WALL-RELATIVE: distance base_link -> outer wall at the
+        # end of unparking, measured with the lidar (/wall_distances). Not
+        # from the remembered pose: at the start the map is placed from the
+        # bay position ~14 cm / 3.4 deg off (CCW park test), and the EKF only
+        # evens that out during the lap.
         self.park_q = None
-        self.park_q_luecke = None     # erwarteter Abstand eingeparkt
-        self.park_q_proben = []
-        # Erste Ecke nach dem Ausparken: steht er schon nah davor, ersetzt der
-        # Halt am Ausparkende den Scan-Stopp, und Ecke 1 wird aus der Lage
-        # geplant, in der er steht (kein Querversatz auf kurzem Anlauf).
-        self.erste_ecke_pruefen = False
-        self.erste_ecke_idx = None
-        self.ausp_scan_hier = None    # None = offen, True = am Ausparkende scannen
-        self.ausp_richtung_wart_t0 = None   # seit wann auf /race_direction gewartet wird
+        self.park_q_bay = None        # expected distance when parked
+        self.park_q_samples = []
+        # First corner after unparking: if it already stands close to it, the
+        # hold at the end of unparking replaces the scan stop, and corner 1 is
+        # planned from the pose it stands in (no lateral offset on a short run-up).
+        self.first_corner_check = False
+        self.first_corner_idx = None
+        self.unpark_scan_here = None    # None = open, True = scan at the end of unparking
+        self.unpark_direction_wait_t0 = None   # since when it has been waiting for /race_direction
         self.start_scan_state = None  # /start_scan_state: scanning | complete | incomplete
-        self.ausp_scan_wart_t0 = None
-        self.ausp_variante = 'normal' # 'normal' oder 'innen'
-        self.ausp_schritte_std = []   # normale Folge (Leitungswerte) -- daraus wird eingeparkt
-        self.lok_state = None         # /localization_state: None = nie empfangen (wie 'ok')
-        self.lok_lost_t0 = None
-        self.lok_warte_t0 = None      # Einparken wartet auf 'ok'
-        self.bucht = None             # /parking_bay: gemessene Buchtwaende
-        self.ausp_bahn = []           # Posen an allen Zuggrenzen des Ausparkens
-        self.park_lok_unsicher = False  # parkt ohne Korrekturen weiter
-        self._ziel_gemeldet = False
-        self.seiten_frei = False      # nach dem Pflichthalt: Pylonen auf beliebiger Seite
-        self.park_fahrt_ziel_f = None # Ueberfahren: vorwaerts bis hierhin (Abstand Frontwand)
-        self.park_ueber = 0.0         # einparken_ueberfahren, begrenzt durch Pylonen
-        self.rueck_phase = 'lenken'
-        self.rueck_t0 = 0.0
-        self.rueck_delta = 0.0
-        self.rueck_versuche = 0
-        self.erste_ecke_q = None
+        self.unpark_scan_wait_t0 = None
+        self.unpark_variant = 'normal'  # 'normal' or 'inner'
+        self.unpark_steps_std = []    # normal sequence (wire values) -- parking uses this one
+        self.loc_state = None         # /localization_state: None = never received (like 'ok')
+        self.loc_lost_t0 = None
+        self.loc_wait_t0 = None       # parking waits for 'ok'
+        self.bay = None               # /parking_bay: measured bay walls
+        self.unpark_trajectory = []   # poses at all move boundaries of the unparking
+        self.park_loc_uncertain = False  # keeps parking without corrections
+        self._finish_reported = False
+        self.sides_clear = False      # after the mandatory hold: pylons on either side
+        self.park_drive_target_f = None  # overshoot: forward up to here (distance to front wall)
+        self.park_overshoot = 0.0     # park_overshoot_cw/_ccw, limited by pylons
+        self.rev_phase = 'steer'
+        self.rev_t0 = 0.0
+        self.rev_delta = 0.0
+        self.rev_attempts = 0
+        self.first_corner_q = None
         self.park_t0 = 0.0
         self.pose = None
-        self.v_ist = 0.0
-        self.pose_lenk = None             # geglaettete Pose fuers Lenkgesetz
-        self.pose_lenk_t = None
-        self.odo_weg_vorher = 0.0         # Encoderweg seit EKF-Start, bis das Ausparken beginnt
-        self.odo_weg_t = None
+        self.v_act = 0.0
+        self.pose_steer = None        # smoothed pose for the steering law
+        self.pose_steer_t = None
+        self.odo_travel_before = 0.0  # encoder travel since EKF start, until unparking begins
+        self.odo_travel_t = None
         self.front_wall_x = None
         self.race_direction = None        # 'CW' | 'CCW'
         self.corners = None               # [(x,y)] * 4
@@ -775,23 +793,23 @@ class Round1Controller(Node):
         self.lane_width = None            # [m] * 4, per straight, from outer<->inner distance
         self.wall_dist = None             # (d_left, d_right) live, for the start straight
         self.start_center_y = None        # map-frame y of the lane centre, held once computed
-        # Rohdetektionen der Startgeraden: (t, map_x, map_y, farbe). Im MAP-Frame
-        # abgelegt, damit die Eigenbewegung zwischen zwei Meldungen die Abstimmung
-        # nicht verfaelscht.
+        # Raw detections of the start straight: (t, map_x, map_y, colour).
+        # Stored in the MAP frame so that the own motion between two messages
+        # does not falsify the vote.
         self.live_obs = collections.deque(maxlen=60)
-        self.start_dodge_aktiv = None     # zuletzt gewaehlter Versatz, nur fuer das Log
-        self._start_halt = None           # (obst_x, ziel_y, info) bis zum Passieren
+        self.start_dodge_active = None    # last chosen offset, only for the log
+        self._start_hold = None           # (obst_x, target_y, info) until passed
         self.obstacles = None             # full current stand from /obstacles
-        self.obstacles_roh = None         # ungefiltert, fuer Einfrieren und Neufiltern
-        self._phantom_ids = set()         # schon gemeldete Phantome (nur einmal loggen)
+        self.obstacles_raw = None         # unfiltered, for freezing and refiltering
+        self._phantom_ids = set()         # phantoms already reported (log only once)
         self.obs_path = None              # planned polyline [(x,y)] for this straight
         self.obs_max_slope = 0.0          # steepest lane change in the current plan
         self.obs_path_end_q = None        # lateral offset the path ends on (= corner entry)
         self._path_idx = 0                # nearest-segment cursor for path following
         self.scan_done_this_straight = False   # scan pause fires once per straight
-        self.vorhalt_done_this_straight = False  # Vorhalt ebenso (nur Scan-Runde)
-        self.scan_halt_dauer = 1.5             # Dauer des laufenden Halts
-        self.rangier_versuche = 0              # Notfall-Rangieren je Ecke
+        self.lookahead_halt_done_this_straight = False  # look-ahead halt likewise (scan lap only)
+        self.scan_hold_duration = 1.5     # duration of the running hold
+        self.manoeuvre_attempts = 0       # emergency manoeuvring per corner
         self.scan_pause_t0 = 0.0
         self.last_odom_time = None
         self.button_pressed = False
@@ -802,7 +820,7 @@ class Round1Controller(Node):
         self.corner_idx = None            # index of the corner currently targeted
         self.corner_count = 0             # corners completed
         self.last_cmd = (0.0, 0.0)        # (v, omega) held during short odom gaps
-        self.cmd_hist = collections.deque(maxlen=200)   # (t, omega) der letzten Befehle
+        self.cmd_hist = collections.deque(maxlen=200)   # (t, omega) of the last commands
 
         latched = QoSProfile(depth=1)
         latched.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -816,30 +834,31 @@ class Round1Controller(Node):
         self.create_subscription(Float64MultiArray, '/wall_distances',
                                  self.wall_dist_cb, 10)
         self.create_subscription(String, '/localization_state',
-                                 self.lok_state_cb, latched)
+                                 self.loc_state_cb, latched)
         self.create_subscription(String, '/start_scan_state',
                                  self.start_scan_cb, latched)
         try:
             from robot_msgs.msg import ParkingBay
             self.create_subscription(ParkingBay, '/parking_bay',
-                                     self.bucht_cb, latched)
+                                     self.bay_cb, latched)
         except ImportError:
             self.get_logger().warn(
-                "robot_msgs/ParkingBay nicht gebaut -- /parking_bay wird nicht "
-                "gelesen (Einparken laeuft trotzdem, nur ohne Buchtpruefung).")
+                "robot_msgs/ParkingBay not built -- /parking_bay is not "
+                "read (parking still runs, only without the bay check).")
         try:
             from robot_msgs.msg import ObstacleArray
             self.create_subscription(ObstacleArray, '/obstacles',
                                      self.obstacles_cb, latched)
-            # Rohdetektionen, ungerastert und ohne Fahrtrichtung. Genau das
-            # braucht die Startgerade: das Sitzraster und die Eckengeometrie
-            # entstehen erst beim Richtungs-Latch, und der kann geometrisch
-            # nicht frueher kommen (siehe _start_ausweich_y).
+            # Raw detections, not snapped to the grid and without direction of
+            # travel. That is exactly what the start straight needs: the seat
+            # grid and the corner geometry only come into being at the
+            # direction latch, and that cannot come earlier geometrically
+            # (see _start_dodge_y).
             self.create_subscription(ObstacleArray, '/obstacles_live',
                                      self.obstacles_live_cb, 10)
         except ImportError:
-            self.get_logger().warn("robot_msgs/ObstacleArray nicht verfuegbar -- "
-                                   "Hindernisplanung inaktiv.")
+            self.get_logger().warn("robot_msgs/ObstacleArray not available -- "
+                                   "obstacle planning inactive.")
         if self.require_button:
             self.create_subscription(Header, '/esp_serial_bridge/button', self.button_cb, 10)
         self.pub_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -856,74 +875,73 @@ class Round1Controller(Node):
         # latched: a later-starting perception node still gets the current state.
         self.pub_lap = self.create_publisher(Int32MultiArray, '~/lap_state', latched)
 
-        # Anstoss-Schutz: sieht der LiDAR etwas direkt vor der Nase, anhalten
-        # und rangieren, statt weiter gegen die Bande zu druecken (Lauf 49:
-        # 3 s mit drehenden Raedern an der Innenbande).
-        self.create_subscription(LaserScan, '/scan', self.anstoss_scan_cb, 5)
+        # Bump guard: if the LiDAR sees something right in front of the nose,
+        # stop and manoeuvre instead of pushing further against the wall
+        # (run 49: 3 s with spinning wheels at the inner wall).
+        self.create_subscription(LaserScan, '/scan', self.trigger_scan_cb, 5)
 
-        # Nur fuers Ausparken (und den Einpark-Test, der dieselben ESP-Zuege
-        # faehrt). Bewusst nicht immer angelegt -- sonst haengt der Regler ohne
-        # Not am /scan und an vier weiteren Bruecken-Topics.
-        if self.ausparken or self.einparken_test:
+        # Only for unparking (and the park test, which drives the same ESP
+        # moves). Deliberately not always created -- otherwise the controller
+        # hangs on /scan and four more bridge topics for no reason.
+        if self.unpark or self.park_test:
             self.pub_steer = self.create_publisher(
                 Float32, '/esp_serial_bridge/steer', 10)
             self.pub_move = self.create_publisher(
                 Float32, '/esp_serial_bridge/move', 10)
             self.pub_pid = self.create_publisher(
                 Float32MultiArray, '/esp_serial_bridge/pid_set', 10)
-            # Ein Motorbefehl bricht eine laufende Positionsfahrt ab -- das ist
-            # unser Notausstieg. Ueber /cmd_vel geht das NICHT: der
-            # Geschwindigkeitsregler der Bruecke schweigt waehrend einer Fahrt.
+            # A motor command aborts a running position move -- that is our
+            # emergency exit. Via /cmd_vel that does NOT work: the bridge's
+            # speed controller is silent during a move.
             self.pub_motor = self.create_publisher(
                 Int32, '/esp_serial_bridge/motor', 10)
             self.create_subscription(Int32MultiArray,
                                      '/esp_serial_bridge/move_done',
-                                     self.ausparken_move_done_cb, 10)
+                                     self.unpark_move_done_cb, 10)
             self.create_subscription(LaserScan, '/scan',
-                                     self.ausparken_scan_cb, 10)
-            # BEWUSST NICHT latched. Eine latched Nachricht ueberlebt den
-            # Lauf, der sie erzeugt hat: ein frisch gestarteter
-            # scan_processor bekam sie noch aus dem VORIGEN Lauf zugestellt
-            # und hat seine Startpositionserkennung entsperrt, bevor
-            # ueberhaupt ausgeparkt war. Stattdessen wird sie waehrend des
-            # ganzen Scan-Halts wiederholt -- wer dann zuhoert, bekommt sie.
+                                     self.unpark_scan_cb, 10)
+            # DELIBERATELY NOT latched. A latched message outlives the run
+            # that produced it: a freshly started scan_processor still got it
+            # delivered from the PREVIOUS run and unlocked its start position
+            # detection before it had even unparked. Instead it is repeated
+            # during the whole scan hold -- whoever listens then gets it.
             self.pub_park_dir = self.create_publisher(
                 String, '/parking_direction', 10)
 
         self.dt = 1.0 / self.control_rate
         self.create_timer(self.dt, self.control_loop)
-        # Aktive Regelwerte ins Log -- sonst muss jede Analyse raten, ob z.B.
-        # die Totzeit-Vorausberechnung lief.
+        # Active control values into the log -- otherwise every analysis has
+        # to guess whether e.g. the dead-time prediction was running.
         self.get_logger().info(
-            'Regler: Totzeit-Vorausberechnung %.3f s (Verstaerkung %.2f), '
+            'Controller: dead-time prediction %.3f s (gain %.2f), '
             'k_heading %.2f, k_stanley %.2f, k_ct %.1f, k_th %.1f, '
-            'Bogen verankern bei gestoerter Einfahrt: %s.'
+            'anchor arc on disturbed entry: %s.'
             % (self.steer_dead_time, self.steer_gain_pred, self.k_heading,
                self.k_stanley, self.k_ct, self.k_th,
-               'an' if self.turn_anchor_puenktlich else 'aus'))
+               'on' if self.turn_anchor_on_time else 'off'))
         self.get_logger().info(
-            'Normale Ausparkfolgen (Referenz fuers Einparken): CW aus %s (%d Zuege), '
-            'CCW aus %s (%d Zuege).'
-            % (_cw_name, len(SCHRITTE_CW) // 2, _ccw_name, len(SCHRITTE_CCW) // 2))
-        # Laut und deutlich: ohne require_button startet er SELBST. Beim
-        # Ausparken ist der erste echte Zug +6,9 cm vorwaerts -- das sah aus
-        # wie 'kriecht vor dem Tastendruck los'.
+            'Normal unpark sequences (reference for parking): CW from %s (%d moves), '
+            'CCW from %s (%d moves).'
+            % (_cw_name, len(STEPS_CW) // 2, _ccw_name, len(STEPS_CCW) // 2))
+        # Loud and clear: without require_button it starts BY ITSELF. When
+        # unparking the first real move is +6.9 cm forward -- that looked
+        # like 'creeps off before the button press'.
         self._log(not self.require_button,
-            'Taster: %s' % ('erforderlich -- wartet auf Druck.' if self.require_button
-                            else 'NICHT erforderlich (require_button:=false) -- '
-                                 'startet OHNE Tastendruck!'))
-        if self.ausparken and self.ausparken_nur:
+            'Button: %s' % ('required -- waiting for a press.' if self.require_button
+                            else 'NOT required (require_button:=false) -- '
+                                 'starts WITHOUT a button press!'))
+        if self.unpark and self.unpark_only:
             self.get_logger().info(
-                ">>> Round1Controller bereit: AUSPARKEN, danach ANHALTEN "
-                "(ausparken_nur). <<<")
-        elif self.ausparken:
+                ">>> Round1Controller ready: UNPARK, then STOP "
+                "(unpark_only). <<<")
+        elif self.unpark:
             self.get_logger().info(
-                ">>> Round1Controller bereit: AUSPARKEN, danach das RENNEN. <<<")
+                ">>> Round1Controller ready: UNPARK, then the RACE. <<<")
         else:
             self.get_logger().info(
-                ">>> Round1Controller bereit: KEIN Ausparken -- er faehrt los, "
-                "sobald die Eingaben da sind. Zum Ausparken: "
-                "-p ausparken:=true <<<")
+                ">>> Round1Controller ready: NO unparking -- it drives off "
+                "as soon as the inputs are there. To unpark: "
+                "-p unpark:=true <<<")
 
     def _corner_msg_type(self):
         from robot_msgs.msg import CornerGeometry
@@ -934,12 +952,12 @@ class Round1Controller(Node):
         for name, (attr, _default, conv) in self._PARAMS.items():
             setattr(self, attr, conv(self.get_parameter(name).value))
         self._load_lists()
-        # Tempo: Einzelwerte merken; per -p gesetzte schlagen das Profil.
-        self._tempo_einzeln = {k: getattr(self, k) for k in TEMPO_KEYS}
-        ueber = getattr(self, '_parameter_overrides', None) or {}
-        self._tempo_explizit = {k for k in TEMPO_KEYS if k in ueber}
-        self._tempo_stand = None
-        self._tempo_anwenden()
+        # Pace: remember the individual values; ones set via -p beat the profile.
+        self._pace_individual = {k: getattr(self, k) for k in PACE_KEYS}
+        overrides = getattr(self, '_parameter_overrides', None) or {}
+        self._pace_explicit = {k for k in PACE_KEYS if k in overrides}
+        self._pace_state = None
+        self._apply_pace()
 
     def _load_lists(self):
         self.o_in_list = [float(v) for v in self.get_parameter('o_in_list').value]
@@ -957,43 +975,43 @@ class Round1Controller(Node):
                 self.o_out_list = [float(v) for v in p.value]
             elif p.name == 'turn_radius_list':
                 self.R_list = [float(v) for v in p.value]
-        tempo_neu = False
+        pace_changed = False
         for p in params:
-            if p.name in TEMPO_KEYS:
-                self._tempo_einzeln[p.name] = float(p.value)
-                self._tempo_explizit.add(p.name)
-                tempo_neu = True
-            elif p.name in ('tempo', 'tempo_runde1'):
-                tempo_neu = True
-        if tempo_neu:
-            self._tempo_anwenden()
+            if p.name in PACE_KEYS:
+                self._pace_individual[p.name] = float(p.value)
+                self._pace_explicit.add(p.name)
+                pace_changed = True
+            elif p.name in ('pace', 'pace_lap1'):
+                pace_changed = True
+        if pace_changed:
+            self._apply_pace()
         return SetParametersResult(successful=True)
 
-    def _tempo_anwenden(self):
-        """Tempo-Profil der aktuellen Runde auf v_drive & Co. legen."""
-        runde = getattr(self, 'corner_count', 0) // 4
-        name = self.tempo
-        if runde == 0 and self.tempo_runde1 not in ('', 'gleich'):
-            name = self.tempo_runde1
-        profil = TEMPO_PROFILE.get(name)
-        if profil is None and name != 'eigen':
+    def _apply_pace(self):
+        """Put the pace profile of the current lap onto v_drive & co."""
+        lap = getattr(self, 'corner_count', 0) // 4
+        name = self.pace
+        if lap == 0 and self.pace_lap1 not in ('', 'same'):
+            name = self.pace_lap1
+        profile = PACE_PROFILES.get(name)
+        if profile is None and name != 'custom':
             self.get_logger().warn(
-                "Tempo-Profil '%s' unbekannt (%s oder eigen) -- nimmt die Einzelwerte."
-                % (name, '/'.join(TEMPO_PROFILE)))
-        werte = {}
-        for k in TEMPO_KEYS:
-            werte[k] = (self._tempo_einzeln[k] if profil is None or k in self._tempo_explizit
-                        else profil[k])
-            setattr(self, k, werte[k])
-        stand = (name, tuple(werte[k] for k in TEMPO_KEYS))
-        if stand != self._tempo_stand:
-            self._tempo_stand = stand
-            einzeln = sorted(self._tempo_explizit) if profil is not None else []
+                "Pace profile '%s' unknown (%s or custom) -- using the individual values."
+                % (name, '/'.join(PACE_PROFILES)))
+        vals = {}
+        for k in PACE_KEYS:
+            vals[k] = (self._pace_individual[k] if profile is None or k in self._pace_explicit
+                       else profile[k])
+            setattr(self, k, vals[k])
+        snapshot = (name, tuple(vals[k] for k in PACE_KEYS))
+        if snapshot != self._pace_state:
+            self._pace_state = snapshot
+            individual = sorted(self._pace_explicit) if profile is not None else []
             self.get_logger().info(
-                "Tempo Runde %d: Profil '%s' -- %s%s."
-                % (runde + 1, name if profil is not None else 'eigen',
-                   ', '.join('%s %.2f' % (k, werte[k]) for k in TEMPO_KEYS),
-                   (' (einzeln gesetzt: %s)' % ', '.join(einzeln)) if einzeln else ''))
+                "Pace lap %d: profile '%s' -- %s%s."
+                % (lap + 1, name if profile is not None else 'custom',
+                   ', '.join('%s %.2f' % (k, vals[k]) for k in PACE_KEYS),
+                   (' (set individually: %s)' % ', '.join(individual)) if individual else ''))
 
     def _entry_wall_idx(self, idx):
         """Wall index of the straight the robot is currently ON (entering corner idx).
@@ -1026,33 +1044,33 @@ class Round1Controller(Node):
             return max(w - self.inner_clearance, 0.05)
         return 0.5 * w
 
-    def _obstacle_offset_near_corner(self, wall_idx, corner_pt, min_frontabstand=None):
+    def _obstacle_offset_near_corner(self, wall_idx, corner_pt, min_front_dist=None):
         """Pass-by offset for the obstacle on `wall_idx` CLOSEST to `corner_pt`.
 
         Used twice: for o_out it is the FIRST obstacle after the corner, for o_in
         the LAST one before it -- in both cases the one nearest that corner.
 
-        min_frontabstand: nur Pylonen, die mindestens so weit vor dem ANDEREN
-        Ende der Geraden (ihrer Frontwand) stehen. Fuer die letzte Kurve vor dem
-        Einparken: was hinter dem Umschaltpunkt steht, darf auf beliebiger Seite
-        passiert werden und soll die Kurve nicht nach innen ziehen.
+        min_front_dist: only pylons that stand at least this far from the OTHER
+        end of the straight (its front wall). For the last corner before
+        parking: whatever stands behind the switch point may be passed on
+        either side and should not pull the corner inward.
         """
         if not self.obstacles or self.lane_width is None or self.walls is None:
             return None
         mine = [o for o in self.obstacles if o['wall'] == wall_idx]
-        if mine and min_frontabstand is not None and self.corners is not None:
-            # Wand i verbindet corners[i] -> corners[i+1]; das andere Ende ist die Frontwand
+        if mine and min_front_dist is not None and self.corners is not None:
+            # wall i connects corners[i] -> corners[i+1]; the other end is the front wall
             a = self.corners[wall_idx]
             b = self.corners[(wall_idx + 1) % len(self.corners)]
             da = (a[0] - corner_pt[0]) ** 2 + (a[1] - corner_pt[1]) ** 2
             db = (b[0] - corner_pt[0]) ** 2 + (b[1] - corner_pt[1]) ** 2
-            ende = b if da < db else a
-            laenge = math.hypot(ende[0] - corner_pt[0], ende[1] - corner_pt[1]) or 1e-6
-            ux = (ende[0] - corner_pt[0]) / laenge
-            uy = (ende[1] - corner_pt[1]) / laenge
+            end = b if da < db else a
+            length = math.hypot(end[0] - corner_pt[0], end[1] - corner_pt[1]) or 1e-6
+            ux = (end[0] - corner_pt[0]) / length
+            uy = (end[1] - corner_pt[1]) / length
             mine = [o for o in mine
-                    if laenge - ((o['x'] - corner_pt[0]) * ux + (o['y'] - corner_pt[1]) * uy)
-                    > min_frontabstand]
+                    if length - ((o['x'] - corner_pt[0]) * ux + (o['y'] - corner_pt[1]) * uy)
+                    > min_front_dist]
         if not mine:
             return None
         nx, ny, d = self.walls[wall_idx]
@@ -1062,150 +1080,152 @@ class Round1Controller(Node):
         return self._obs_planner_for_wall(wall_idx).pass_offset(
             q_block, near['color'], self.dir_step() > 0)
 
-    def _parklinie_festlegen(self):
-        """Abstand zur Aussenbande am Ende des Ausparkens -- gemessen, sonst
-        Rueckfallwert. Dazu der erwartete Abstand eingeparkt (Parklinie minus
-        seitlicher Weg des Ausparkens, der ist relativ und damit verlaesslich)."""
-        if not self.ausp_richtung or self.park_start is None:
+    def _choose_park_line(self):
+        """Distance to the outer wall at the end of unparking -- measured,
+        otherwise the fallback value. Plus the expected distance when parked
+        (parking line minus the sideways travel of unparking, which is
+        relative and therefore reliable)."""
+        if not self.unpark_direction or self.park_start is None:
             return
-        ccw = self.ausp_richtung == 'CCW'
-        std_laengs = self.park_std_laengs_ccw if ccw else self.park_std_laengs_cw
-        std_quer = self.park_std_quer_ccw if ccw else self.park_std_quer_cw
+        ccw = self.unpark_direction == 'CCW'
+        std_long = self.park_std_long_ccw if ccw else self.park_std_long_cw
+        std_lat = self.park_std_lat_ccw if ccw else self.park_std_lat_cw
 
-        if self.ausp_variante != 'normal':
-            # Andere Folge gefahren: er steht NICHT dort, wo die umgekehrte
-            # normale Folge beginnt. Startpose und Parklinie aus der Startlage in
-            # der Luecke und der gemessenen Endlage der normalen Folge. Keine
-            # Referenzbahn fuer die Bogenkorrektur -- die gefahrene war eine andere.
-            if self.park_ursprung is None or self.walls is None:
+        if self.unpark_variant != 'normal':
+            # Different sequence driven: it does NOT stand where the reversed
+            # normal sequence begins. Start pose and parking line from the
+            # start pose in the bay and the measured final pose of the normal
+            # sequence. No reference trajectory for the arc correction -- the
+            # one driven was a different one.
+            if self.park_origin is None or self.walls is None:
                 self.get_logger().error(
-                    "%s-Folge gefahren, aber Startlage oder Waende fehlen -- "
-                    "Einparken ohne verlaessliche Startpose." % self.ausp_variante)
+                    "%s sequence driven, but start pose or walls are missing -- "
+                    "parking without a reliable start pose." % self.unpark_variant)
                 return
-            ux, uy, uth = self.park_ursprung
-            nx, ny, dw = self.walls[self._start_wand()]
-            self.park_start = (ux + std_laengs * math.cos(uth) + std_quer * nx,
-                               uy + std_laengs * math.sin(uth) + std_quer * ny, uth)
-            self.park_q_luecke = (nx * ux + ny * uy) - dw
-            self.park_q = self.park_q_luecke + std_quer
-            self.ausp_bahn = []
+            ux, uy, uth = self.park_origin
+            nx, ny, dw = self.walls[self._start_wall()]
+            self.park_start = (ux + std_long * math.cos(uth) + std_lat * nx,
+                               uy + std_long * math.sin(uth) + std_lat * ny, uth)
+            self.park_q_bay = (nx * ux + ny * uy) - dw
+            self.park_q = self.park_q_bay + std_lat
+            self.unpark_trajectory = []
             self.get_logger().info(
-                "%s-Folge gefahren: Einpark-Startpose aus der normalen Folge "
-                "(%.1f cm laengs, %.1f cm quer ab Startlage), Parklinie %.3f m, "
-                "eingeparkt erwartet %.3f m. Ohne Bogenkorrektur."
-                % (self.ausp_variante, std_laengs * 100, std_quer * 100,
-                   self.park_q, self.park_q_luecke))
+                "%s sequence driven: park start pose from the normal sequence "
+                "(%.1f cm long, %.1f cm lat from the start pose), parking line %.3f m, "
+                "expected when parked %.3f m. Without arc correction."
+                % (self.unpark_variant, std_long * 100, std_lat * 100,
+                   self.park_q, self.park_q_bay))
             return
 
-        # Normale Folge gefahren: gemessene Endlage ausgeben -- damit lassen
-        # sich die park_std_*-Werte fuer den Innen-Fall nachschaerfen.
-        if self.park_ursprung is not None and self.walls is not None:
-            ux, uy, uth = self.park_ursprung
-            nx, ny, dw = self.walls[self._start_wand()]
-            laengs = ((self.park_start[0] - ux) * math.cos(uth)
-                      + (self.park_start[1] - uy) * math.sin(uth))
-            quer = (nx * self.park_start[0] + ny * self.park_start[1]) - (nx * ux + ny * uy)
+        # Normal sequence driven: print the measured final pose -- with it
+        # the park_std_* values for the inner case can be sharpened.
+        if self.park_origin is not None and self.walls is not None:
+            ux, uy, uth = self.park_origin
+            nx, ny, dw = self.walls[self._start_wall()]
+            along = ((self.park_start[0] - ux) * math.cos(uth)
+                     + (self.park_start[1] - uy) * math.sin(uth))
+            lat_off = (nx * self.park_start[0] + ny * self.park_start[1]) - (nx * ux + ny * uy)
             self.get_logger().info(
-                "Normale Ausparkfolge endete %.1f cm laengs, %.1f cm quer ab Startlage "
-                "(Parameter park_std_laengs_%s=%.3f, park_std_quer_%s=%.3f)."
-                % (laengs * 100, quer * 100, 'ccw' if ccw else 'cw', std_laengs,
-                   'ccw' if ccw else 'cw', std_quer))
+                "Normal unpark sequence ended %.1f cm long, %.1f cm lat from the start pose "
+                "(parameters park_std_long_%s=%.3f, park_std_lat_%s=%.3f)."
+                % (along * 100, lat_off * 100, 'ccw' if ccw else 'cw', std_long,
+                   'ccw' if ccw else 'cw', std_lat))
 
-        rueck = (self.einparken_linie_ccw if self.ausp_richtung == 'CCW'
-                 else self.einparken_linie_cw)
-        proben = sorted(v for v in self.park_q_proben if 0.15 <= v <= 0.90)
-        if len(proben) >= 3:
-            self.park_q = proben[len(proben) // 2]
-            quelle = "gemessen (%d Proben)" % len(proben)
-            if abs(self.park_q - rueck) > 0.05:
+        fallback = (self.park_line_ccw if self.unpark_direction == 'CCW'
+                    else self.park_line_cw)
+        samples = sorted(v for v in self.park_q_samples if 0.15 <= v <= 0.90)
+        if len(samples) >= 3:
+            self.park_q = samples[len(samples) // 2]
+            source = "measured (%d samples)" % len(samples)
+            if abs(self.park_q - fallback) > 0.05:
                 self.get_logger().warn(
-                    "Parklinie gemessen %.3f m, Handmessung %.3f m -- %.1f cm "
-                    "Unterschied. Lidar-Bezugspunkt pruefen."
-                    % (self.park_q, rueck, (self.park_q - rueck) * 100))
+                    "Parking line measured %.3f m, hand measurement %.3f m -- %.1f cm "
+                    "difference. Check the lidar reference point."
+                    % (self.park_q, fallback, (self.park_q - fallback) * 100))
         else:
-            self.park_q = rueck
-            quelle = "Rueckfallwert (nur %d brauchbare Proben)" % len(proben)
-        # Seitlicher Weg des Ausparkens im Startrahmen -- RELATIV, also auch
-        # dann richtig, wenn die Karte versetzt liegt.
-        if self.park_ursprung is not None:
-            ux, uy, uth = self.park_ursprung
+            self.park_q = fallback
+            source = "fallback value (only %d usable samples)" % len(samples)
+        # Sideways travel of the unparking in the start frame -- RELATIVE, so
+        # also right when the map lies offset.
+        if self.park_origin is not None:
+            ux, uy, uth = self.park_origin
             dx, dy = self.park_start[0] - ux, self.park_start[1] - uy
-            seitlich = abs(-dx * math.sin(uth) + dy * math.cos(uth))
-            self.park_q_luecke = self.park_q - seitlich
+            sideways = abs(-dx * math.sin(uth) + dy * math.cos(uth))
+            self.park_q_bay = self.park_q - sideways
         self.get_logger().info(
-            "Parklinie %.3f m zur Aussenbande (%s)%s."
-            % (self.park_q, quelle,
-               ", eingeparkt erwartet %.3f m" % self.park_q_luecke
-               if self.park_q_luecke is not None else ""))
+            "Parking line %.3f m to the outer wall (%s)%s."
+            % (self.park_q, source,
+               ", expected when parked %.3f m" % self.park_q_bay
+               if self.park_q_bay is not None else ""))
 
-    def _park_versatz_anwenden(self):
-        """Einpark-Startpose um den Handversatz verschieben
-        (einpark_versatz_laengs/quer_ccw bzw. _cw, je nach Fahrtrichtung)."""
-        if self.ausp_richtung == 'CW':
-            dl, dq = self.einpark_versatz_laengs_cw, self.einpark_versatz_quer_cw
+    def _park_apply_offset(self):
+        """Shift the park start pose by the manual offset
+        (park_offset_long/lat_ccw or _cw, depending on the direction of travel)."""
+        if self.unpark_direction == 'CW':
+            dl, dq = self.park_offset_long_cw, self.park_offset_lat_cw
         else:
-            dl, dq = self.einpark_versatz_laengs_ccw, self.einpark_versatz_quer_ccw
+            dl, dq = self.park_offset_long_ccw, self.park_offset_lat_ccw
         if self.park_start is None or (dl == 0.0 and dq == 0.0):
             return
         x, y, th = self.park_start
         if self.walls is not None:
-            nx, ny, _dw = self.walls[self._start_wand()]   # zeigt ins Feld
-        elif self.ausp_richtung == 'CCW':                  # Feld links
+            nx, ny, _dw = self.walls[self._start_wall()]   # points into the field
+        elif self.unpark_direction == 'CCW':                  # field on the left
             nx, ny = -math.sin(th), math.cos(th)
-        else:                                              # Feld rechts
+        else:                                              # field on the right
             nx, ny = math.sin(th), -math.cos(th)
         self.park_start = (x + dl * math.cos(th) + dq * nx,
                            y + dl * math.sin(th) + dq * ny, th)
         if self.park_q is not None:
             self.park_q += dq
-        if self.park_q_luecke is not None:
-            self.park_q_luecke += dq
+        if self.park_q_bay is not None:
+            self.park_q_bay += dq
         self.get_logger().info(
-            "Einpark-Startpose von Hand verschoben (%s): %+.1f cm laengs, %+.1f cm quer "
+            "Park start pose shifted by hand (%s): %+.1f cm long, %+.1f cm lat "
             "-> (%.3f, %.3f)%s."
-            % (self.ausp_richtung, dl * 100, dq * 100, self.park_start[0], self.park_start[1],
-               ', Parklinie %.3f m' % self.park_q if self.park_q is not None else ''))
+            % (self.unpark_direction, dl * 100, dq * 100, self.park_start[0], self.park_start[1],
+               ', parking line %.3f m' % self.park_q if self.park_q is not None else ''))
 
-    def _park_aktiv(self):
-        return self.einparken and self.park_start is not None
+    def _park_active(self):
+        return self.park and self.park_start is not None
 
     def _park_offset_for_wall(self, wall_idx):
-        """Parklinie: Abstand der aufgezeichneten Einpark-Startpose zur
-        Aussenbande dieser Geraden. Gemessen vom Roboter selbst am Ende des
-        Ausparkens -- keine Konstanten, die fuer CW und CCW verschieden waeren
-        (CW 37,0 cm, CCW 34,5 cm, je nach Schlussbogen).
+        """Parking line: distance of the recorded park start pose to the outer
+        wall of this straight. Measured by the robot itself at the end of
+        unparking -- no constants that would differ for CW and CCW (CW
+        37.0 cm, CCW 34.5 cm, depending on the final arc).
 
-        None, wenn nicht eingeparkt wird oder der Wert unplausibel ist (dann
-        faehrt die Zielgerade wie bisher die Mitte).
+        None if it does not park or the value is implausible (then the
+        finish straight drives the centre as before).
         """
-        if not self._park_aktiv() or self.park_q is None:
+        if not self._park_active() or self.park_q is None:
             return None
         q = self.park_q
-        breite = (self.lane_width[wall_idx]
+        lane_w = (self.lane_width[wall_idx]
                   if self.lane_width is not None and wall_idx < len(self.lane_width)
                   else 1.0)
-        if not (0.15 <= q <= breite - 0.10):
+        if not (0.15 <= q <= lane_w - 0.10):
             self.get_logger().warn(
-                "Parklinie %.2f m auf Gerade w%d unplausibel -- ist das die "
-                "Startgerade? Zielgerade faehrt ohne Parklinie." % (q, wall_idx),
+                "Parking line %.2f m on straight w%d implausible -- is this the "
+                "start straight? Finish straight drives without parking line." % (q, wall_idx),
                 throttle_duration_sec=5.0)
             return None
         return q
 
-    def _zielgerade_folgt(self):
-        """Wird gerade die LETZTE Ecke geplant (ihr Ausgang ist die Zielgerade)?"""
+    def _finish_straight_next(self):
+        """Is the LAST corner being planned right now (its exit is the finish straight)?"""
         return self.corner_count + 1 == self.n_corners
 
-    def _auf_zielgerade(self):
+    def _on_finish_straight(self):
         return self.corner_count >= self.n_corners
 
     def corner_o_in(self, idx):
         w = self._entry_wall_idx(idx)
-        # Auf der Zielgeraden ist die Ecke dahinter nur noch Rechengroesse --
-        # sie wird nie gefahren. Ihre Eintrittslinie IST die Zielgerade, und die
-        # soll auf der Parklinie liegen. Hindernisse davor erledigt der
-        # Hindernispfad, der danach auf die Parklinie zurueckschwenkt.
-        if self._auf_zielgerade():
+        # On the finish straight the corner behind it is only a number for the
+        # maths -- it is never driven. Its entry line IS the finish straight,
+        # and that should lie on the parking line. Obstacles before it are
+        # handled by the obstacle path, which then swings back onto the parking line.
+        if self._on_finish_straight():
             q = self._park_offset_for_wall(w)
             if q is not None:
                 return q
@@ -1213,11 +1233,11 @@ class Round1Controller(Node):
             q = self._obstacle_offset_near_corner(w, self.corners[idx])
             if q is not None:
                 return q                      # last obstacle before the corner
-        # Erste Ecke direkt nach dem Ausparken: auf der Linie bleiben, auf der
-        # er steht. Ein Hindernis davor hat oben schon Vorrang bekommen.
-        if (self.erste_ecke_q is not None and self.corner_count == 0
-                and idx == self.erste_ecke_idx):
-            return self.erste_ecke_q
+        # First corner right after unparking: stay on the line it stands on.
+        # An obstacle before it already got precedence above.
+        if (self.first_corner_q is not None and self.corner_count == 0
+                and idx == self.first_corner_idx):
+            return self.first_corner_q
         auto = self._lane_default_offset(w) if self.use_auto_offset else None
         if auto is not None:
             return auto
@@ -1226,20 +1246,21 @@ class Round1Controller(Node):
     def corner_o_out(self, idx):
         w = self._exit_wall_idx(idx)
         if self.corners is not None:
-            # Letzte Kurve vor dem Einparken ohne Pflichthalt: nur Pylonen vor dem
-            # Umschaltpunkt zaehlen. Eine Pylone am Ende der Startgeraden (hinter
-            # dem Punkt, ab dem die Seite frei ist) zog die Kurve sonst auf die
-            # Innenlinie 0,81 -- und danach musste er quer zurueck zur Parklinie.
-            grenze = (self.seiten_frei_ab
-                      if (self._zielgerade_folgt() and self._park_aktiv()
-                          and self.einparken_halt_s <= 0.0) else None)
-            q = self._obstacle_offset_near_corner(w, self.corners[idx], grenze)
+            # Last corner before parking without mandatory hold: only pylons
+            # before the switch point count. A pylon at the end of the start
+            # straight (behind the point from which the side is clear) otherwise
+            # pulled the corner onto the inner line 0.81 -- and afterwards it had
+            # to go back across to the parking line.
+            bound = (self.sides_clear_from
+                     if (self._finish_straight_next() and self._park_active()
+                         and self.park_hold_s <= 0.0) else None)
+            q = self._obstacle_offset_near_corner(w, self.corners[idx], bound)
             if q is not None:
                 return q                      # first obstacle after the corner
-        # Letzte Ecke ohne Hindernis dahinter: direkt auf die Parklinie
-        # aus der Kurve kommen, dann muss auf der Zielgeraden nichts mehr
-        # rangiert werden.
-        if self._zielgerade_folgt():
+        # Last corner without an obstacle behind it: come out of the corner
+        # straight onto the parking line, then nothing has to be manoeuvred on
+        # the finish straight any more.
+        if self._finish_straight_next():
             q = self._park_offset_for_wall(w)
             if q is not None:
                 return q
@@ -1252,21 +1273,21 @@ class Round1Controller(Node):
         from ekf.obstacle_path import ObstaclePathPlanner
         w = self.lane_width[wall_idx]
         return ObstaclePathPlanner(lane_width=w, wall_margin=self.obs_wall_margin,
-                                   outer_margin=self._aussen_rand(wall_idx))
+                                   outer_margin=self._outer_margin(wall_idx))
 
-    def _aussen_rand(self, wall_idx):
-        """Hindernis an der Aussenbande dieser Geraden (Magenta-Waende der
-        Parkluecke auf der Startgeraden), fuer die Vorbeifahrt aussen.
-        Nicht auf der Zielgeraden beim Einparken -- dort faehrt er bewusst
-        auf der Parklinie, die eigene Logik haelt Abstand."""
-        if not (self.parking_lot_present or self.park_ursprung is not None):
+    def _outer_margin(self, wall_idx):
+        """Obstacle at the outer wall of this straight (magenta walls of the
+        parking bay on the start straight), for passing on the outside.
+        Not on the finish straight when parking -- there it deliberately
+        drives on the parking line, its own logic keeps the distance."""
+        if not (self.parking_lot_present or self.park_origin is not None):
             return 0.0
-        if self._park_aktiv() and (self._auf_zielgerade() or self._zielgerade_folgt()):
+        if self._park_active() and (self._on_finish_straight() or self._finish_straight_next()):
             return 0.0
-        sw = self._start_wand()
+        sw = self._start_wall()
         if sw is None and self.corner_count == 0 and self.corner_idx is not None:
             sw = self._entry_wall_idx(self.corner_idx)
-        return LUECKE_TIEFE if wall_idx == sw else 0.0
+        return BAY_DEPTH if wall_idx == sw else 0.0
 
     def corner_R(self, idx):
         return self.R_list[idx] if idx < len(self.R_list) else self.R
@@ -1275,142 +1296,142 @@ class Round1Controller(Node):
     def odom_cb(self, msg):
         p = msg.pose.pose
         self.pose = (p.position.x, p.position.y, yaw_from_quaternion(p.orientation))
-        self.v_ist = float(msg.twist.twist.linear.x)
+        self.v_act = float(msg.twist.twist.linear.x)
         self.last_odom_time = self.get_clock().now()
         t_odo = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self.park_ursprung is None:
-            if self.odo_weg_t is not None and 0.0 < t_odo - self.odo_weg_t < 0.5:
-                self.odo_weg_vorher += abs(self.v_ist) * (t_odo - self.odo_weg_t)
-            self.odo_weg_t = t_odo
-        self._lenk_pose_nachfuehren(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
-                                    float(msg.twist.twist.angular.z))
+        if self.park_origin is None:
+            if self.odo_travel_t is not None and 0.0 < t_odo - self.odo_travel_t < 0.5:
+                self.odo_travel_before += abs(self.v_act) * (t_odo - self.odo_travel_t)
+            self.odo_travel_t = t_odo
+        self._steer_pose_update(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+                                float(msg.twist.twist.angular.z))
 
-    def _lenk_pose_nachfuehren(self, t, w):
-        """Lenk-Pose: Eigenbewegung sofort, Korrekturen ueber lenk_pose_tau
-        (siehe Parameter)."""
-        roh = self.pose
-        alt_t, self.pose_lenk_t = self.pose_lenk_t, t
-        if (self.lenk_pose_tau <= 0.0 or self.pose_lenk is None or alt_t is None
-                or not (0.0 < t - alt_t < 0.2)):
-            self.pose_lenk = roh
+    def _steer_pose_update(self, t, w):
+        """Steer pose: own motion at once, corrections over steer_pose_tau
+        (see the parameter)."""
+        raw = self.pose
+        old_t, self.pose_steer_t = self.pose_steer_t, t
+        if (self.steer_pose_tau <= 0.0 or self.pose_steer is None or old_t is None
+                or not (0.0 < t - old_t < 0.2)):
+            self.pose_steer = raw
             return
-        dt = t - alt_t
-        xl, yl, tl = self.pose_lenk
+        dt = t - old_t
+        xl, yl, tl = self.pose_steer
         thm = tl + 0.5 * w * dt
-        xp = xl + self.v_ist * dt * math.cos(thm)
-        yp = yl + self.v_ist * dt * math.sin(thm)
+        xp = xl + self.v_act * dt * math.cos(thm)
+        yp = yl + self.v_act * dt * math.sin(thm)
         tp = tl + w * dt
-        ex, ey, et = roh[0] - xp, roh[1] - yp, wrap(roh[2] - tp)
-        if math.hypot(ex, ey) > self.lenk_pose_sprung or abs(et) > self.lenk_pose_sprung_grad:
-            self.pose_lenk = roh            # Kartenwechsel o. ae.: sofort
+        ex, ey, et = raw[0] - xp, raw[1] - yp, wrap(raw[2] - tp)
+        if math.hypot(ex, ey) > self.steer_pose_jump or abs(et) > self.steer_pose_jump_deg:
+            self.pose_steer = raw            # map change or similar: at once
             return
-        k = min(1.0, dt / self.lenk_pose_tau)
-        self.pose_lenk = (xp + k * ex, yp + k * ey, wrap(tp + k * et))
+        k = min(1.0, dt / self.steer_pose_tau)
+        self.pose_steer = (xp + k * ex, yp + k * ey, wrap(tp + k * et))
 
     def front_wall_cb(self, msg):
         if self.front_wall_x is None:
-            self.get_logger().info(f"/front_wall_x empfangen: {msg.data:.3f} m.")
+            self.get_logger().info(f"/front_wall_x received: {msg.data:.3f} m.")
         self.front_wall_x = float(msg.data)
 
     def start_scan_cb(self, msg):
-        neu = msg.data.strip().lower()
-        if neu == self.start_scan_state:
+        new = msg.data.strip().lower()
+        if new == self.start_scan_state:
             return
-        self.start_scan_state = neu
-        if neu == 'incomplete':
+        self.start_scan_state = new
+        if new == 'incomplete':
             self.get_logger().warn(
-                "Startgerade nicht vollstaendig abgetastet (incomplete) -- "
-                "ein Sitz ist offen, eine Pylone dort kennt er nicht.")
+                "Start straight not completely sampled (incomplete) -- "
+                "one seat is open, a pylon there is unknown to it.")
         else:
-            self.get_logger().info("Startgerade: %s." % neu)
+            self.get_logger().info("Start straight: %s." % new)
 
-    def _log(self, warnung, text):
-        """Je nach Bedingung warn oder info.
+    def _log(self, warning, text):
+        """warn or info, depending on the condition.
 
-        NICHT als (warn if c else info)(...) schreiben: rclpy merkt sich den
-        Level pro Aufrufstelle und wirft 'Logger severity cannot be changed
-        between calls', sobald dieselbe Zeile einmal info und einmal warn
-        loggt. Hier stehen beide in eigenen Zeilen."""
-        if warnung:
+        Do NOT write it as (warn if c else info)(...): rclpy remembers the
+        level per call site and throws 'Logger severity cannot be changed
+        between calls' as soon as the same line logs info once and warn
+        once. Here both stand in their own lines."""
+        if warning:
             self.get_logger().warn(text)
         else:
             self.get_logger().info(text)
 
-    def lok_state_cb(self, msg):
-        """/localization_state: ok | recovering | lost (latched, bei Wechsel)."""
-        neu = msg.data.strip().lower()
-        if neu == self.lok_state:
+    def loc_state_cb(self, msg):
+        """/localization_state: ok | recovering | lost (latched, on change)."""
+        new = msg.data.strip().lower()
+        if new == self.loc_state:
             return
-        alt = self.lok_state
-        self.lok_state = neu
-        if neu == 'lost':
-            self.lok_lost_t0 = self.now_s()
+        old = self.loc_state
+        self.loc_state = new
+        if new == 'lost':
+            self.loc_lost_t0 = self.now_s()
         else:
-            self.lok_lost_t0 = None
-        self._log(neu != 'ok',
-            "Lokalisierung: %s -> %s%s." % (
-                alt or '-', neu,
-                '' if neu == 'ok' else
-                ' (hoechstens %.2f m/s, kein Einparken)' % self.v_lok_unsicher))
+            self.loc_lost_t0 = None
+        self._log(new != 'ok',
+            "Localisation: %s -> %s%s." % (
+                old or '-', new,
+                '' if new == 'ok' else
+                ' (at most %.2f m/s, no parking)' % self.v_loc_uncertain))
 
-    def _lok_ok(self):
-        """Nie empfangen zaehlt als ok -- sonst liefe ohne das Topic nichts."""
-        return self.lok_state in (None, 'ok')
+    def _loc_ok(self):
+        """Never received counts as ok -- otherwise nothing would run without the topic."""
+        return self.loc_state in (None, 'ok')
 
-    def bucht_cb(self, msg):
-        """/parking_bay: gemessene Buchtwaende (einmal, latched).
+    def bay_cb(self, msg):
+        """/parking_bay: measured bay walls (once, latched).
 
-        Nur zur PRUEFUNG. Eingeparkt wird mit der umgekehrten Ausparkfolge,
-        und die landet dort, wo er gestartet ist -- das war nachweislich in der
-        Bucht. Die Messung zeigt, ob diese Lage zwischen den Waenden liegt.
-        Bei schraegem Blick koennen Wandenden fehlen (Luecke eher zu gross),
-        deshalb bricht hier nichts ab."""
+        Only for CHECKING. Parking uses the reversed unpark sequence, and that
+        ends up where it started -- which was demonstrably in the bay. The
+        measurement shows whether this pose lies between the walls. With an
+        oblique view wall ends can be missing (bay rather too large),
+        therefore nothing aborts here."""
         if not msg.detected:
-            self.get_logger().warn("/parking_bay: keine Bucht gefunden.")
-            self.bucht = None
+            self.get_logger().warn("/parking_bay: no bay found.")
+            self.bay = None
             return
         a = ((msg.wall_a_start.x, msg.wall_a_start.y), (msg.wall_a_end.x, msg.wall_a_end.y))
         b = ((msg.wall_b_start.x, msg.wall_b_start.y), (msg.wall_b_end.x, msg.wall_b_end.y))
-        self.bucht = dict(a=a, b=b)
+        self.bay = dict(a=a, b=b)
         la = math.hypot(a[1][0] - a[0][0], a[1][1] - a[0][1])
         lb = math.hypot(b[1][0] - b[0][0], b[1][1] - b[0][1])
-        text = "Buchtwaende %.3f / %.3f m (Soll %.2f)" % (la, lb, LUECKE_TIEFE)
-        if self.park_ursprung is not None:
-            r = self._bucht_abstaende(*self.park_ursprung)
+        text = "Bay walls %.3f / %.3f m (target %.2f)" % (la, lb, BAY_DEPTH)
+        if self.park_origin is not None:
+            r = self._bay_dists(*self.park_origin)
             if r is not None:
-                heck, front, luecke = r
-                text += (", Luecke %.3f m (Soll %.4f), Startlage: Heck %.1f cm, "
-                         "Front %.1f cm Luft" % (luecke, LUECKE_LAENGE,
-                                                  heck * 100, front * 100))
+                rear, front, bay_len = r
+                text += (", bay %.3f m (target %.4f), start pose: rear %.1f cm, "
+                         "front %.1f cm clearance" % (bay_len, BAY_LENGTH,
+                                                      rear * 100, front * 100))
         self.get_logger().info("/parking_bay: " + text + ".")
 
-    def _bucht_abstaende(self, x, y, theta):
-        """Luft von Heck und Front zu den Buchtwaenden fuer eine Pose in der
-        Bucht, gemessen entlang des Kurses. Rueckgabe (heck, front, luecke) in m,
-        oder None, wenn keine Bucht bekannt ist oder sie nicht um die Pose liegt."""
-        if self.bucht is None:
+    def _bay_dists(self, x, y, theta):
+        """Clearance of rear and front to the bay walls for a pose in the bay,
+        measured along the heading. Returns (rear, front, bay_len) in m, or
+        None if no bay is known or it does not lie around the pose."""
+        if self.bay is None:
             return None
         ax, ay = math.cos(theta), math.sin(theta)
-        def laengs(seg):
+        def along(seg):
             mx = 0.5 * (seg[0][0] + seg[1][0])
             my = 0.5 * (seg[0][1] + seg[1][1])
             return (mx - x) * ax + (my - y) * ay
-        sa, sb = laengs(self.bucht['a']), laengs(self.bucht['b'])
-        hinten, vorn = min(sa, sb), max(sa, sb)
-        if not (hinten < 0.0 < vorn):
+        sa, sb = along(self.bay['a']), along(self.bay['b'])
+        rear_d, front_d = min(sa, sb), max(sa, sb)
+        if not (rear_d < 0.0 < front_d):
             return None
-        return (FZ_HECK - hinten, vorn - FZ_NASE, vorn - hinten)
+        return (CAR_REAR - rear_d, front_d - CAR_NOSE, front_d - rear_d)
 
     def direction_cb(self, msg):
         if self.race_direction is None:
-            self.get_logger().info(f"/race_direction empfangen: {msg.data}.")
+            self.get_logger().info(f"/race_direction received: {msg.data}.")
         self.race_direction = msg.data
 
     def corner_cb(self, msg):
         corners = [(p.x, p.y) for p in msg.corners]
         walls = [(w.nx, w.ny, w.d) for w in msg.walls]
         if self.corners is None:
-            self.get_logger().info(f"/corner_geometry empfangen: {len(corners)} Ecken.")
+            self.get_logger().info(f"/corner_geometry received: {len(corners)} corners.")
             self._assert_edge_convention(corners, walls)
         self.corners = corners
         self.walls = walls
@@ -1429,19 +1450,19 @@ class Round1Controller(Node):
         so the robot keeps a CONSTANT distance to the inner band on every straight,
         adapted to the real measured width (which is NOT rounded to 60/100 cm).
         """
-        inner = [(w.nx, w.ny, w.d) for w in msg.walls]
-        self.inner_walls = inner
+        inner_w = [(w.nx, w.ny, w.d) for w in msg.walls]
+        self.inner_walls = inner_w
         if self.debug:
             self.get_logger().info(
                 "  [INNER] " + " | ".join(f"({nx:+.2f},{ny:+.2f},{d:+.2f})"
-                                          for nx, ny, d in inner))
+                                          for nx, ny, d in inner_w))
         # /corner_geometry and /inner_geometry are BOTH latched and arrive within
         # milliseconds -- the order at the subscriber is NOT guaranteed. So never
         # drop the inner band; just remember it and compute the widths as soon as
         # the outer walls are there (see corner_cb).
         if self.walls is None:
-            self.get_logger().info("/inner_geometry empfangen (vor corner_geometry) "
-                                   "-- Breiten werden nachgerechnet.")
+            self.get_logger().info("/inner_geometry received (before corner_geometry) "
+                                   "-- widths will be computed later.")
             return
         self._compute_lane_widths()
 
@@ -1466,24 +1487,24 @@ class Round1Controller(Node):
                     cands.append((self._wall_gap(self.walls[i], w), w))
             if not cands:
                 self.get_logger().error(
-                    f"Keine parallele Innenwand zu Aussenwand {i}. Breiten verworfen.")
+                    f"No parallel inner wall for outer wall {i}. Widths discarded.")
                 return
             widths.append(min(cands)[0])
 
         # plausibility: a lane is never wider than the box or narrower than the car
         if not all(self.start_lane_min <= w <= self.start_lane_max for w in widths):
             self.get_logger().error(
-                "Unplausible Gassenbreiten " +
+                "Implausible lane widths " +
                 ", ".join(f"{w:.3f}" for w in widths) +
-                f" (erwartet {self.start_lane_min:.2f}..{self.start_lane_max:.2f} m). "
-                "Verworfen -- fahre mit o_in/o_out-Parametern weiter.")
+                f" (expected {self.start_lane_min:.2f}..{self.start_lane_max:.2f} m). "
+                "Discarded -- carrying on with the o_in/o_out parameters.")
             return
 
         self.lane_width = widths
         self.get_logger().info(
-            "/inner_geometry empfangen. Gassenbreiten [m]: " +
+            "/inner_geometry received. Lane widths [m]: " +
             ", ".join(f"{w:.3f}" for w in widths) +
-            f" -> Offsets (Breite - {self.inner_clearance:.2f}): " +
+            f" -> offsets (width - {self.inner_clearance:.2f}): " +
             ", ".join(f"{max(w - self.inner_clearance, 0.05):.3f}" for w in widths))
 
         # Re-plan the UPCOMING corner, but KEEP the entry line of the straight we
@@ -1495,19 +1516,19 @@ class Round1Controller(Node):
             self.arc = None
             self.plan_arc(self.pose[2], o_in_override=keep_o_in)
             self.get_logger().info(
-                f"Bogen neu geplant: Eintritt bleibt {keep_o_in:.2f}, "
-                f"Austritt auf neuen Offset.")
+                f"Arc replanned: entry stays {keep_o_in:.2f}, "
+                f"exit onto the new offset.")
 
     @staticmethod
-    def _wall_gap(outer, inner):
+    def _wall_gap(outer_w, inner_w):
         """Perpendicular distance between two (near-)parallel HNF lines.
 
         Outer normals point inward, inner normals point outward (toward the lane),
         so the two normals are roughly opposite. Flip the inner one to compare, then
         the gap is the difference of the offsets along the common normal.
         """
-        onx, ony, od = outer
-        inx, iny, ind = inner
+        onx, ony, od = outer_w
+        inx, iny, ind = inner_w
         if onx * inx + ony * iny < 0.0:      # opposite normals -> align them
             inx, iny, ind = -inx, -iny, -ind
         # both normals now point the same way; gap = |d_inner - d_outer|
@@ -1520,110 +1541,110 @@ class Round1Controller(Node):
         # (we stop at every corner for that). A "new" block appearing in lap 2 or 3
         # can only be a false positive -- and acting on it would wreck a good run.
         if (self.corner_count // 4) >= self.obs_freeze_lap:
-            if self.obstacles_roh is not None and len(msg.obstacles) != len(self.obstacles_roh):
+            if self.obstacles_raw is not None and len(msg.obstacles) != len(self.obstacles_raw):
                 self.get_logger().warn(
-                    f"/obstacles nach Runde {self.obs_freeze_lap} ignoriert "
-                    f"({len(msg.obstacles)} statt {len(self.obstacles_roh)} gemeldet) "
-                    f"-- Hindernisse sind eingefroren.")
+                    f"/obstacles after lap {self.obs_freeze_lap} ignored "
+                    f"({len(msg.obstacles)} instead of {len(self.obstacles_raw)} reported) "
+                    f"-- obstacles are frozen.")
             return
 
         obs = []
         for o in msg.obstacles:
             obs.append(dict(id=int(o.id), x=float(o.position.x), y=float(o.position.y),
                             color=int(o.color), wall=int(o.wall_idx)))
-        self.obstacles_roh = list(obs)
-        obs = self._phantome_filtern(obs)
+        self.obstacles_raw = list(obs)
+        obs = self._filter_phantoms(obs)
         changed = (self.obstacles is None or
                    {(o['id'], o['color']) for o in obs} !=
                    {(o['id'], o['color']) for o in self.obstacles})
-        o_out_alt = None
+        o_out_old = None
         if changed and self.state == 'DRIVE' and self.arc is not None:
             try:
-                o_out_alt = self.corner_o_out(self.corner_idx)
+                o_out_old = self.corner_o_out(self.corner_idx)
             except Exception:
-                o_out_alt = None
+                o_out_old = None
         self.obstacles = obs
         if changed:
             self.get_logger().info(
-                f"/obstacles: {len(obs)} Hindernisse " +
+                f"/obstacles: {len(obs)} obstacles " +
                 ", ".join(f"id{o['id']}(w{o['wall']},"
-                          f"{'gruen' if o['color']==2 else 'rot'})" for o in obs))
+                          f"{'green' if o['color']==2 else 'red'})" for o in obs))
         if self.state in ('DRIVE', 'SCAN_PAUSE') and self.arc is not None:
-            if o_out_alt is not None and self._ecke_neu_planen(o_out_alt):
+            if o_out_old is not None and self._replan_corner(o_out_old):
                 return
             self.plan_obstacle_path()
 
-    def _ecke_neu_planen(self, o_out_alt):
-        """Pylone auf der Geraden NACH der Ecke kam erst nach dem Planen der
-        Ecke herein: Ecke neu planen, wie nach dem Scan-Halt. Lauf 48: das
-        Rot am Anfang von Gerade 2 hatte 0,17 s nach dem Scan-Halt genug
-        Stimmen, die Ecke blieb bei o_out 0,50, und er fuhr innen am Rot
-        vorbei. True = neu geplant (inkl. Hindernispfad)."""
+    def _replan_corner(self, o_out_old):
+        """A pylon on the straight AFTER the corner only came in after the
+        corner was planned: replan the corner, as after the scan hold. Run 48:
+        the red at the start of straight 2 had enough votes 0.17 s after the
+        scan hold, the corner stayed at o_out 0.50, and it passed the red on
+        the inside. True = replanned (incl. obstacle path)."""
         try:
             o_out = self.corner_o_out(self.corner_idx)
         except Exception:
             return False
-        if abs(o_out - o_out_alt) < 0.05 or self.pose is None:
+        if abs(o_out - o_out_old) < 0.05 or self.pose is None:
             return False
-        alt_arc = self.arc
-        old_TA = alt_arc['T_A']
+        old_arc = self.arc
+        old_TA = old_arc['T_A']
         self.arc = None
-        if not self.plan_arc(self.pose[2], o_in_override=alt_arc.get('o_in')) \
+        if not self.plan_arc(self.pose[2], o_in_override=old_arc.get('o_in')) \
                 or self.arc is None:
-            self.arc = alt_arc
+            self.arc = old_arc
             return False
         self.plan_obstacle_path()
         tr = self.arc['travel']
         new_TA = self.arc['T_A']
         shift = (new_TA[0] - old_TA[0]) * tr[0] + (new_TA[1] - old_TA[1]) * tr[1]
         self.get_logger().warn(
-            f"Neue Pylone hinter Ecke {self.corner_count + 1}: Ausfahrt o_out "
-            f"{o_out_alt:.2f} -> {o_out:.2f}, Ecke neu geplant (Einlenkpunkt "
+            f"New pylon behind corner {self.corner_count + 1}: exit o_out "
+            f"{o_out_old:.2f} -> {o_out:.2f}, corner replanned (turn-in point "
             f"{shift:+.2f} m).")
         return True
 
-    def _start_wand(self):
-        """Index der Startgeraden: die Wand, an der er in der Luecke stand."""
-        if self.walls is None or self.park_ursprung is None:
+    def _start_wall(self):
+        """Index of the start straight: the wall it stood at in the bay."""
+        if self.walls is None or self.park_origin is None:
             return None
-        ux, uy, _ = self.park_ursprung
+        ux, uy, _ = self.park_origin
         return min(range(len(self.walls)),
                    key=lambda i: abs(self.walls[i][0] * ux + self.walls[i][1] * uy
                                      - self.walls[i][2]))
 
-    def _phantome_filtern(self, obs):
-        """Regelwerk: mit Parkluecke stehen auf der Startgeraden NUR Zeichen in
-        der inneren Spalte. Eine Meldung in der aeusseren Spalte dort kann nur
-        falsch sein -- im CCW-Einparktest war es vermutlich eine Magenta-
-        Parkwand, als Rot gelesen (id20, kein echtes Hindernis auf der Bahn).
-        Sitzkodierung: id = Gruppe*6 + k, gerades k = aeussere Spalte."""
-        if self.ausp_richtung is None and not self.parking_lot_present:
+    def _filter_phantoms(self, obs):
+        """Rules: with a parking bay there are ONLY markers in the inner column
+        on the start straight. A report in the outer column there can only be
+        wrong -- in the CCW park test it was probably a magenta parking wall
+        read as red (id20, no real obstacle on the path).
+        Seat coding: id = group*6 + k, even k = outer column."""
+        if self.unpark_direction is None and not self.parking_lot_present:
             return obs
-        w = self._start_wand()
+        w = self._start_wall()
         if w is None:
             return obs
         nx, ny, dw = self.walls[w]
-        breite = (self.lane_width[w] if self.lane_width is not None
+        lane_w = (self.lane_width[w] if self.lane_width is not None
                   and w < len(self.lane_width) else 1.0)
-        behalten, weg = [], []
+        keep, dropped = [], []
         for o in obs:
-            # ZWEI Bedingungen, beide muessen stimmen: Sitzkodierung sagt aussen
-            # UND die Lage liegt wirklich in der aeusseren Spurhaelfte. Ein
-            # echtes inneres Zeichen zu verwerfen hiesse hineinfahren -- falls
-            # die Kodierung einmal nicht stimmt, haelt die Geometrie es fest.
+            # TWO conditions, both must hold: the seat coding says outer AND
+            # the position really lies in the outer half of the lane. Discarding
+            # a real inner marker would mean driving into it -- if the coding
+            # is ever wrong, the geometry holds it back.
             q = (nx * o['x'] + ny * o['y']) - dw
-            aussen = (o['id'] % 6) % 2 == 0 and q < 0.5 * breite
-            (weg if (o['wall'] == w and aussen) else behalten).append(o)
-        neu = {o['id'] for o in weg} - self._phantom_ids
-        if neu:
-            self._phantom_ids |= neu
+            outer = (o['id'] % 6) % 2 == 0 and q < 0.5 * lane_w
+            (dropped if (o['wall'] == w and outer) else keep).append(o)
+        new = {o['id'] for o in dropped} - self._phantom_ids
+        if new:
+            self._phantom_ids |= new
             self.get_logger().warn(
-                "Phantom verworfen: %s auf der Startgeraden w%d in der AEUSSEREN "
-                "Spalte -- mit Parkluecke stehen dort nur innere Zeichen. "
-                "(Magenta-Parkwand als Rot gelesen?)"
-                % (', '.join('id%d(%s)' % (o['id'], 'gruen' if o['color'] == 2 else 'rot')
-                             for o in weg if o['id'] in neu), w))
-        return behalten
+                "Phantom discarded: %s on the start straight w%d in the OUTER "
+                "column -- with a parking bay there are only inner markers there. "
+                "(Magenta parking wall read as red?)"
+                % (', '.join('id%d(%s)' % (o['id'], 'green' if o['color'] == 2 else 'red')
+                             for o in dropped if o['id'] in new), w))
+        return keep
 
     def plan_obstacle_path(self):
         """Plan the (x,y) polyline for the straight we are currently driving.
@@ -1672,151 +1693,151 @@ class Round1Controller(Node):
         # only what is still ahead of us (plus a little behind for hysteresis)
         obs_lane = [t for t in obs_lane if t[0] > -0.10]
 
-        # Zielgerade mit Einparken: nur Hindernisse, an denen er VOR dem
-        # Haltepunkt vorbeikommt. Was dahinter steht, faehrt er nie an --
-        # darauf auszuweichen hiesse, neben der Parklinie anzuhalten.
-        # Nach dem Pflichthalt: die Seite ist frei. Alle Pylonen auf der
-        # AUSSENseite, dort liegt die Parklinie. Pylonen, die gerade neben dem
-        # Wagen stehen, nicht "ueberholen" -- Spur halten, bis sie hinter dem
-        # Heck liegen, sonst schwenkt er seitlich in sie hinein.
-        seiten_frei = self.seiten_frei and self._auf_zielgerade()
-        s_halten = 0.0
-        alle_voraus = []
-        if seiten_frei:
-            self.park_fahrt_ziel_f = None
+        # Finish straight with parking: only obstacles it passes BEFORE the
+        # halt point. Whatever stands behind it, it never reaches -- dodging
+        # it would mean stopping beside the parking line.
+        # After the mandatory hold: the side is clear. All pylons on the
+        # OUTER side, the parking line lies there. Do not "overtake" pylons
+        # that stand right beside the car -- hold the lane until they are
+        # behind the rear, otherwise it swings sideways into them.
+        sides_clear = self.sides_clear and self._on_finish_straight()
+        s_hold = 0.0
+        all_ahead = []
+        if sides_clear:
+            self.park_drive_target_f = None
             ccw_ = self.dir_step() > 0
-            c_aussen = OBST_ROT if ccw_ else OBST_GRUEN     # Farbe -> Aussenseite
-            c_innen = OBST_GRUEN if ccw_ else OBST_ROT
-            neben = [t for t in obs_lane if t[0] < self.obs_clear_before]
-            if neben:
-                s_halten = max(0.0, max(t[0] for t in neben)
-                               + self.obs_clear_after - FZ_HECK)
-            # Seite je Pylone: aussen (Parklinie), wenn der Wechsel dorthin
-            # fahrbar ist -- sonst auf der Seite bleiben, auf der er gerade ist.
-            # "Alle aussen" um jeden Preis plante nach einem Halt auf der
-            # Innenseite einen unfahrbar steilen Wechsel quer durch die Pylonen.
+            c_outer = OBST_RED if ccw_ else OBST_GREEN     # colour -> outer side
+            c_inner = OBST_GREEN if ccw_ else OBST_RED
+            beside = [t for t in obs_lane if t[0] < self.obs_clear_before]
+            if beside:
+                s_hold = max(0.0, max(t[0] for t in beside)
+                             + self.obs_clear_after - CAR_REAR)
+            # Side per pylon: outer (parking line) if the change to there is
+            # drivable -- otherwise stay on the side it is on right now.
+            # "All outer" at any price planned, after a hold on the inner
+            # side, an undrivably steep change right through the pylons.
             pl_ = self._obs_planner()
             q_cur = to_lane(x, y)[1]
-            s_cur = s_halten
-            neu = []
+            s_cur = s_hold
+            new = []
             for (so, qo, _c) in sorted(obs_lane, key=lambda t: t[0]):
                 if so < self.obs_clear_before:
                     continue
-                q_a = pl_.pass_offset(qo, c_aussen, ccw_)
-                platz = so - self.obs_clear_before - s_cur
+                q_a = pl_.pass_offset(qo, c_outer, ccw_)
+                space = so - self.obs_clear_before - s_cur
                 if abs(q_a - q_cur) < 0.02 or (
-                        platz > 0.0 and abs(q_a - q_cur) / platz
-                        <= self.einparken_rueck_steigung_max):
-                    farbe = c_aussen
+                        space > 0.0 and abs(q_a - q_cur) / space
+                        <= self.park_return_slope_max):
+                    colour = c_outer
                 else:
-                    farbe = c_aussen if q_cur < qo else c_innen
+                    colour = c_outer if q_cur < qo else c_inner
                     self.get_logger().info(
-                        "Seite frei: Pylone bei %.2f m auf der %s passiert -- "
-                        "Wechsel nach aussen waere zu steil."
-                        % (so, 'Aussenseite' if farbe == c_aussen else 'Innenseite'))
-                q_cur = pl_.pass_offset(qo, farbe, ccw_)
+                        "Side clear: pylon at %.2f m passed on the %s -- "
+                        "change to the outside would be too steep."
+                        % (so, 'outer side' if colour == c_outer else 'inner side'))
+                q_cur = pl_.pass_offset(qo, colour, ccw_)
                 s_cur = so + self.obs_clear_after
-                neu.append((so, qo, farbe))
-            obs_lane = neu
-            alle_voraus = list(neu)           # auch jenseits der Startpose
-            # Alle aussen und die Parklinie selbst hat an jeder genug Luft?
-            # Dann kein Ausweichpfad -- einfach die Parklinie fahren, statt
-            # mittig in die Luecke (q~0,29) und kurz vor der Startpose zurueck.
+                new.append((so, qo, colour))
+            obs_lane = new
+            all_ahead = list(new)           # also beyond the start pose
+            # All outer and the parking line itself has enough clearance at each?
+            # Then no dodge path -- just drive the parking line instead of the
+            # middle into the gap (q~0.29) and back shortly before the start pose.
             q_pl = self._park_offset_for_wall(w_entry)
-            if (q_pl is not None and all(f == c_aussen for (_so, _qo, f) in neu)
-                    and all(q_pl + 0.06 + 0.05 <= qo - BLOCK_HALB for (_so, qo, _f) in neu)):
+            if (q_pl is not None and all(f == c_outer for (_so, _qo, f) in new)
+                    and all(q_pl + 0.06 + 0.05 <= qo - BLOCK_HALF for (_so, qo, _f) in new)):
                 obs_lane = []
 
         q_park = None
         s_stop = None
-        if self._auf_zielgerade():
+        if self._on_finish_straight():
             q_park = self._park_offset_for_wall(w_entry)
             if q_park is not None:
                 fc = self.corners[self.corner_idx]
-                vorn = (fc[0] - x) * tx + (fc[1] - y) * ty
-                # vor dem Halt: bis zum Haltepunkt; danach: bis zur Startpose
-                s_stop = vorn - ((self._park_front_abstand() - self.park_ueber)
-                                 if seiten_frei else self._ziel_abstand())
+                front_d = (fc[0] - x) * tx + (fc[1] - y) * ty
+                # before the hold: up to the halt point; after it: up to the start pose
+                s_stop = front_d - ((self._park_front_dist() - self.park_overshoot)
+                                    if sides_clear else self._finish_dist())
                 obs_lane = [t for t in obs_lane if t[0] < s_stop + 0.10]
-        if not obs_lane and not (seiten_frei and q_park is not None):
+        if not obs_lane and not (sides_clear and q_park is not None):
             return
 
         _, q_now = to_lane(x, y)
         # how far the straight still runs: up to the turn-in point T_A
         tA = self.arc['T_A']
         s_end = (tA[0] - x) * tx + (tA[1] - y) * ty
-        if obs_lane:                           # nach dem Halt ggf. leer
+        if obs_lane:                           # empty after the hold, possibly
             s_end = max(s_end, max(t[0] for t in obs_lane) + 0.3)
 
         planner = self._obs_planner()
         pts = planner.plan(obs_lane, s_end, self.dir_step() > 0,
-                           q_start=q_now, s_start=s_halten,
-                           q_default=(q_park if seiten_frei else
+                           q_start=q_now, s_start=s_hold,
+                           q_default=(q_park if sides_clear else
                                       (self._lane_default_offset(w_entry)
                                        or self.corner_o_in(idx))))
-        if s_halten > 0.0:
-            pts = [(0.0, q_now)] + pts        # bis s_halten die Spur halten
-        # Zielgerade: nach dem letzten Hindernis zurueck auf die Parklinie,
-        # und zwar fertig VOR dem Haltepunkt. Reicht der Platz nicht, bleibt
-        # er auf dem Vorbeifahr-Offset -- die Anfahrtspruefung nach dem Halt
-        # faengt das ab und parkt dann nicht, statt schief einzuparken.
+        if s_hold > 0.0:
+            pts = [(0.0, q_now)] + pts        # hold the lane up to s_hold
+        # Finish straight: after the last obstacle back onto the parking line,
+        # and done BEFORE the halt point. If the room is not enough, it stays
+        # on the pass-by offset -- the approach check after the hold catches
+        # that and then does not park, instead of parking askew.
         if (q_park is not None and s_stop is not None
-                and (seiten_frei or self.einparken_halt_s > 0.0)):
-            letzte = (max(t[0] for t in obs_lane) + self.obs_clear_after
-                      if obs_lane else s_halten)
-            behalten = [(sv, qv) for (sv, qv) in pts if sv <= letzte + 1e-6]
-            if not behalten:
-                behalten = [pts[0]]
-            q_letzt = behalten[-1][1]
-            # Laenge, die der Rueckschwenk mindestens braucht, um nicht
-            # steiler als einparken_rueck_steigung_max zu werden. Gemessen
-            # schafft er ~1,0 (40 cm quer auf 40 cm laengs bei 0,45 m/s).
-            noetig = abs(q_letzt - q_park) / max(self.einparken_rueck_steigung_max, 0.1)
-            s_zurueck = min(letzte + max(self.obs_transition_pref, noetig),
-                            s_stop - 0.05)
-            s_bis = max(s_end, s_stop + 0.20)
-            # Ueberfahren: passt der Rueckschwenk nicht mehr vor die Startpose,
-            # nach dem Pflichthalt JENSEITS davon auf die Parklinie wechseln --
-            # fertig vor der naechsten Pylone -- und danach geregelt rueckwaerts
-            # zur Startpose (PARK_RUECK). Nach dem Halt zaehlt die Zeit nicht.
-            s_ueber = None
-            if (seiten_frei and abs(q_letzt - q_park) >= 0.01
-                    and s_zurueck - letzte < noetig):
-                weiter = [so for (so, _qo, _f) in alle_voraus if so > letzte]
-                grenze = (min(weiter) - self.obs_clear_before) if weiter \
-                    else letzte + 2.0
-                s_zu2 = min(letzte + max(self.obs_transition_pref, noetig), grenze)
-                if s_zu2 - letzte >= noetig:
-                    s_ueber = s_zu2
+                and (sides_clear or self.park_hold_s > 0.0)):
+            last_s = (max(t[0] for t in obs_lane) + self.obs_clear_after
+                      if obs_lane else s_hold)
+            keep = [(sv, qv) for (sv, qv) in pts if sv <= last_s + 1e-6]
+            if not keep:
+                keep = [pts[0]]
+            q_last = keep[-1][1]
+            # Length the swing back needs at least so as not to get steeper
+            # than park_return_slope_max. Measured it manages ~1.0 (40 cm
+            # lateral over 40 cm along at 0.45 m/s).
+            needed = abs(q_last - q_park) / max(self.park_return_slope_max, 0.1)
+            s_back = min(last_s + max(self.obs_transition_pref, needed),
+                         s_stop - 0.05)
+            s_until = max(s_end, s_stop + 0.20)
+            # Overshoot: if the swing back no longer fits before the start
+            # pose, change onto the parking line BEYOND it after the mandatory
+            # hold -- done before the next pylon -- and then closed-loop in
+            # reverse to the start pose (PARK_REVERSE). After the hold the time does not count.
+            s_over = None
+            if (sides_clear and abs(q_last - q_park) >= 0.01
+                    and s_back - last_s < needed):
+                further = [so for (so, _qo, _f) in all_ahead if so > last_s]
+                bound = (min(further) - self.obs_clear_before) if further \
+                    else last_s + 2.0
+                s_back2 = min(last_s + max(self.obs_transition_pref, needed), bound)
+                if s_back2 - last_s >= needed:
+                    s_over = s_back2
 
-            if abs(q_letzt - q_park) < 0.01:
-                behalten.append((s_bis, q_park))
-            elif s_zurueck - letzte >= noetig:
-                behalten += [(letzte, q_letzt), (s_zurueck, q_park), (s_bis, q_park)]
+            if abs(q_last - q_park) < 0.01:
+                keep.append((s_until, q_park))
+            elif s_back - last_s >= needed:
+                keep += [(last_s, q_last), (s_back, q_park), (s_until, q_park)]
                 self.get_logger().info(
-                    "Zielgerade: nach dem letzten Hindernis zurueck auf die "
-                    "Parklinie (q %.2f -> %.2f ueber %.2f m)."
-                    % (q_letzt, q_park, s_zurueck - letzte))
-            elif s_ueber is not None:
-                behalten += [(letzte, q_letzt), (s_ueber, q_park),
-                             (s_ueber + 0.30, q_park)]
-                self.park_fahrt_ziel_f = vorn - (s_ueber + 0.10)
+                    "Finish straight: after the last obstacle back onto the "
+                    "parking line (q %.2f -> %.2f over %.2f m)."
+                    % (q_last, q_park, s_back - last_s))
+            elif s_over is not None:
+                keep += [(last_s, q_last), (s_over, q_park),
+                         (s_over + 0.30, q_park)]
+                self.park_drive_target_f = front_d - (s_over + 0.10)
                 self.get_logger().info(
-                    "Seite frei: Startpose zu nah fuer den Wechsel auf die "
-                    "Parklinie -- wechselt bis %.2f m voraus, haelt %.2f m vor "
-                    "der Frontwand und setzt dann %.0f cm zurueck."
-                    % (s_ueber, self.park_fahrt_ziel_f,
-                       (self._park_front_abstand() - self.park_fahrt_ziel_f) * 100))
+                    "Side clear: start pose too close for the change onto the "
+                    "parking line -- changes up to %.2f m ahead, stops %.2f m from "
+                    "the front wall and then backs up %.0f cm."
+                    % (s_over, self.park_drive_target_f,
+                       (self._park_front_dist() - self.park_drive_target_f) * 100))
             else:
-                behalten.append((s_bis, q_letzt))
+                keep.append((s_until, q_last))
                 self.get_logger().warn(
-                    "Zielgerade: zu wenig Platz zwischen letztem Hindernis und "
-                    "Haltepunkt (%.2f m, noetig %.2f m) -- er haelt neben der "
-                    "Parklinie (q %.2f statt %.2f), Einparken wird dann ausfallen."
-                    % (max(s_zurueck - letzte, 0.0), noetig, q_letzt, q_park))
-            # stabil nach s sortieren, gleiche s nur einmal (der erste bleibt)
+                    "Finish straight: too little room between the last obstacle and "
+                    "the halt point (%.2f m, needed %.2f m) -- it stops beside the "
+                    "parking line (q %.2f instead of %.2f), parking will then be skipped."
+                    % (max(s_back - last_s, 0.0), needed, q_last, q_park))
+            # sort stably by s, equal s only once (the first one stays)
             pts = []
-            for sv, qv in sorted(behalten, key=lambda pq: pq[0]):
+            for sv, qv in sorted(keep, key=lambda pq: pq[0]):
                 if pts and abs(sv - pts[-1][0]) < 1e-9:
                     continue
                 pts.append((sv, qv))
@@ -1825,70 +1846,70 @@ class Round1Controller(Node):
         self.obs_path = [to_map(s, q) for (s, q) in dense]
         self.obs_path_end_q = dense[-1][1]
         self.get_logger().info(
-            f"Hindernis-Pfad geplant (Gerade w{w_entry}, {len(obs_lane)} Hindernisse, "
-            f"steilster Wechsel {self.obs_max_slope:.2f}, {len(self.obs_path)} Punkte, "
-            f"Ende bei q={self.obs_path_end_q:.2f}).")
+            f"Obstacle path planned (straight w{w_entry}, {len(obs_lane)} obstacles, "
+            f"steepest change {self.obs_max_slope:.2f}, {len(self.obs_path)} points, "
+            f"end at q={self.obs_path_end_q:.2f}).")
 
         # --- reconcile the two planners -------------------------------------
         # The obstacle path holds its pass-by offset to the end of the straight;
         # the arc was planned with its own o_in. If they disagree, the robot
         # arrives somewhere the turn-in point is not -- that is exactly the
-        # "lat=0.65 -> NOTSTOP" case. Re-plan the arc onto the path's END offset
+        # "lat=0.65 -> EMERGENCY STOP" case. Re-plan the arc onto the path's END offset
         # so the corner starts where the robot really is.
         arc_o_in = self.arc.get('o_in')
         if arc_o_in is not None and abs(arc_o_in - self.obs_path_end_q) > 0.03:
             self.get_logger().info(
-                f"Bogen an Pfadende angeglichen: o_in {arc_o_in:.2f} -> "
-                f"{self.obs_path_end_q:.2f} (Hindernis am Geradenende).")
+                f"Arc matched to the path end: o_in {arc_o_in:.2f} -> "
+                f"{self.obs_path_end_q:.2f} (obstacle at the end of the straight).")
             self.plan_arc(self.pose[2], o_in_override=self.obs_path_end_q)
 
-    def _rueckfuehr_pfad(self):
-        """Nach der Kurve ohne Hindernispfad: sanfter Pfad von der Ist-Lage
-        auf die Spurlinie der neuen Geraden (Eintrittslinie LA).
+    def _return_path(self):
+        """After the corner without an obstacle path: a gentle path from the
+        actual position onto the lane line of the new straight (entry line LA).
 
-        Die Kurve endet einige cm neben dieser Linie. Stanley zielte bisher
-        sofort auf sie -- der Lenkbefehl sprang am Kurvenende in einem Takt
-        von der Kurvenlenkung in die Gegenrichtung (parken_test_28: -4,5 ->
-        +9,8, -8,6 -> +6,6, -7,2 -> +12 grad). Mit dem Pfad beginnt der
-        Querfehler bei null und wird ueber mindestens 0,5 m abgebaut
-        (hoechstens 0,2 quer je laengs), mit Kruemmungsvorsteuerung."""
+        The corner ends a few cm beside this line. Stanley used to aim at it
+        at once -- at the end of the corner the steering command jumped in one
+        tick from the corner steering to the opposite direction
+        (parken_test_28: -4.5 -> +9.8, -8.6 -> +6.6, -7.2 -> +12 deg). With the
+        path the lateral error starts at zero and is reduced over at least
+        0.5 m (at most 0.2 lat per long), with curvature feedforward."""
         if self.arc is None or self.pose is None or self.walls is None:
             return
         tx, ty = self.arc['travel']
         nx, ny, d = self.walls[self._entry_wall_idx(self.corner_idx)]
         x, y, _ = self.pose
-        q_ist = (nx * x + ny * y) - d
-        q_ziel = self.arc['o_in']
-        dq = q_ziel - q_ist
+        q_act = (nx * x + ny * y) - d
+        q_target = self.arc['o_in']
+        dq = q_target - q_act
         if abs(dq) < 0.02:
             return
         tA = self.arc['T_A']
-        s_ende = (tA[0] - x) * tx + (tA[1] - y) * ty
-        lang = max(0.50, abs(dq) / 0.20)
-        if s_ende < lang + 0.05:
-            return                      # zu kurz: dann lieber direkt wie bisher
-        fx = x - q_ist * nx
-        fy = y - q_ist * ny             # Fusspunkt auf der Aussenbande
+        s_to_ta = (tA[0] - x) * tx + (tA[1] - y) * ty
+        change_len = max(0.50, abs(dq) / 0.20)
+        if s_to_ta < change_len + 0.05:
+            return                      # too short: then rather directly as before
+        fx = x - q_act * nx
+        fy = y - q_act * ny             # foot point on the outer wall
         from ekf.obstacle_path import ObstaclePathPlanner
-        dicht = ObstaclePathPlanner.densify([(0.0, q_ist), (lang, q_ziel), (s_ende + 0.3, q_ziel)], 0.05)
-        self.obs_path = [(fx + tx * s + nx * q, fy + ty * s + ny * q) for (s, q) in dicht]
-        self.obs_path_end_q = q_ziel
-        self.obs_max_slope = abs(dq) / lang
+        dense_pts = ObstaclePathPlanner.densify([(0.0, q_act), (change_len, q_target), (s_to_ta + 0.3, q_target)], 0.05)
+        self.obs_path = [(fx + tx * s + nx * q, fy + ty * s + ny * q) for (s, q) in dense_pts]
+        self.obs_path_end_q = q_target
+        self.obs_max_slope = abs(dq) / change_len
         self._path_idx = 0
         self.get_logger().info(
-            "Kurvenausgang %.1f cm neben der Spurlinie -- Rueckfuehrpfad ueber %.2f m."
-            % (abs(dq) * 100.0, lang))
+            "Corner exit %.1f cm beside the lane line -- return path over %.2f m."
+            % (abs(dq) * 100.0, change_len))
 
     def _obs_planner(self):
         from ekf.obstacle_path import ObstaclePathPlanner
         w_idx = self._entry_wall_idx(self.corner_idx)
         w = self.lane_width[w_idx]
-        # Startgerade mit Parkluecke: die Magenta-Waende ragen LUECKE_TIEFE von
-        # der AUSSENbande ins Feld. Frueher wurde die Spur innen um 0,20
-        # verschmaelert -- auf der falschen Seite; an Rot (CCW aussen) fuhr er
-        # mittig zwischen Bande und Pylone, 1-4 cm an der Luecke vorbei.
+        # Start straight with a parking bay: the magenta walls reach BAY_DEPTH
+        # from the OUTER wall into the field. The lane used to be narrowed by
+        # 0.20 on the inside -- the wrong side; at red (CCW outer) it drove
+        # centred between wall and pylon, passing the bay by 1-4 cm.
         return ObstaclePathPlanner(
-            outer_margin=self._aussen_rand(w_idx),
+            outer_margin=self._outer_margin(w_idx),
             lane_width=w,
             clear_before=self.obs_clear_before,
             clear_after=self.obs_clear_after,
@@ -1908,14 +1929,14 @@ class Round1Controller(Node):
             if e0 > 0.02 or e1 > 0.02:
                 ok = False
                 self.get_logger().error(
-                    f"ASSERT: wall[{i}] passt nicht zu corners[{i}]->[{i+1}] "
-                    f"(Abw {e0:.3f}/{e1:.3f} m). Kanten-Ecken-Konvention verletzt!")
+                    f"ASSERT: wall[{i}] does not match corners[{i}]->[{i+1}] "
+                    f"(dev {e0:.3f}/{e1:.3f} m). Edge-corner convention violated!")
         if ok:
-            self.get_logger().info("Kanten-Ecken-Konvention verifiziert (walls<->corners).")
-        # Hindernisse, die VOR der Geometrie kamen, jetzt nachfiltern: vorher
-        # war die Startwand unbekannt.
-        if self.obstacles_roh is not None:
-            self.obstacles = self._phantome_filtern(list(self.obstacles_roh))
+            self.get_logger().info("Edge-corner convention verified (walls<->corners).")
+        # Obstacles that came BEFORE the geometry: filter them now -- before,
+        # the start wall was unknown.
+        if self.obstacles_raw is not None:
+            self.obstacles = self._filter_phantoms(list(self.obstacles_raw))
 
     def wall_dist_cb(self, msg):
         """Live side-wall distances [left, right] -- used ONLY on the start straight,
@@ -1943,1684 +1964,1682 @@ class Round1Controller(Node):
         self.start_center_y = (x + e_lat * lx, y + e_lat * ly)
 
     def obstacles_live_cb(self, msg):
-        """Rohdetektionen (Roboterframe) fuer die Startgerade sammeln.
+        """Collect raw detections (robot frame) for the start straight.
 
-        Sofort in den MAP-Frame umgerechnet und mit Zeitstempel abgelegt: der
-        Roboter faehrt zwischen zwei Meldungen rund 6 cm, im Roboterframe waere
-        dieselbe Pylone also jedes Mal woanders und liesse sich nicht abstimmen.
-        Nach dem Latch wird der Puffer nicht mehr gebraucht -- dann planen
-        /obstacles und der Hindernispfad.
+        Converted to the MAP frame at once and stored with a timestamp: the
+        robot drives about 6 cm between two messages, so in the robot frame
+        the same pylon would be somewhere else every time and could not be
+        voted on. After the latch the buffer is no longer needed -- then
+        /obstacles and the obstacle path do the planning.
         """
         if self.pose is None or self.geometry_ready():
             return
         x, y, th = self.pose
         c, s = math.cos(th), math.sin(th)
-        jetzt = self.get_clock().now().nanoseconds * 1e-9
+        t_now = self.get_clock().now().nanoseconds * 1e-9
         for o in msg.obstacles:
-            self.live_obs.append((jetzt,
+            self.live_obs.append((t_now,
                                   x + c * o.position.x - s * o.position.y,
                                   y + s * o.position.x + c * o.position.y,
                                   int(o.color)))
 
-    def _start_ausweich_y(self, cy, breite):
-        """Ziel-y auf der Startgeraden, wenn ein Hindernis davor steht.
+    def _start_dodge_y(self, cy, lane_w):
+        """Target y on the start straight when an obstacle stands ahead.
 
-        Gibt ``(ziel_y, info)`` zurueck; ``ziel_y`` ist ``cy``, wenn nichts zu
-        umfahren ist. Braucht KEINE Fahrtrichtung: die Regel lautet im
-        Roboterframe "rot rechts vorbei, gruen links vorbei", und die
-        Startgerade zeigt per Definition nach map +x, links ist also +y.
+        Returns ``(target_y, info)``; ``target_y`` is ``cy`` if there is
+        nothing to drive around. Needs NO direction of travel: in the robot
+        frame the rule is "pass red on the right, green on the left", and the
+        start straight points along map +x by definition, so left is +y.
 
-        Gefahren wird -- wie im Rennbetrieb, siehe ObstaclePathPlanner.
-        pass_offset -- mittig zwischen Klotz und der Wand, an der vorbeigefahren
-        wird. Fuer die gruene Pylone auf (0.95,-0.10) ergibt das y=+0.21, exakt
-        den Wert, den der Hindernispfad spaeter selbst plant.
+        It drives -- as in race mode, see ObstaclePathPlanner.
+        pass_offset -- centred between the block and the wall it passes
+        along. For the green pylon at (0.95,-0.10) that gives y=+0.21, exactly
+        the value the obstacle path later plans by itself.
         """
         if not self.start_dodge or self.pose is None:
             return cy, None
         x, y, _th = self.pose
-        jetzt = self.get_clock().now().nanoseconds * 1e-9
-        frisch = [o for o in self.live_obs
-                  if jetzt - o[0] <= self.start_dodge_window_s]
-        if not frisch:
-            return self._start_ausweich_halten(x, cy)
+        t_now = self.get_clock().now().nanoseconds * 1e-9
+        fresh = [o for o in self.live_obs
+                 if t_now - o[0] <= self.start_dodge_window_s]
+        if not fresh:
+            return self._start_dodge_hold(x, cy)
 
-        # Kandidaten: voraus im Fenster und seitlich in der Gasse. Der Bereich
-        # reicht bewusst ein Stueck nach HINTEN, damit der Versatz beim
-        # Vorbeifahren gehalten und nicht mitten neben dem Klotz zurueck-
-        # geschnappt wird.
-        kand = [o for o in frisch
-                if -self.start_dodge_back <= (o[1] - x) <= self.start_dodge_look
-                and abs(o[2] - cy) <= self.start_dodge_lane]
-        if not kand:
-            return self._start_ausweich_halten(x, cy)
+        # Candidates: ahead within the window and laterally in the lane. The
+        # range deliberately reaches a bit BACKWARDS, so that the offset is
+        # held while passing and does not snap back in the middle next to
+        # the block.
+        candidates = [o for o in fresh
+                      if -self.start_dodge_back <= (o[1] - x) <= self.start_dodge_look
+                      and abs(o[2] - cy) <= self.start_dodge_lane]
+        if not candidates:
+            return self._start_dodge_hold(x, cy)
 
-        # Abstimmen: raeumlich gruppieren und die naechstliegende Gruppe nehmen,
-        # die genug Sichtungen hat. Eine einzelne Fehldetektion lenkt so nicht.
-        kand.sort(key=lambda o: o[1] - x)
-        gruppe, farben = [], []
-        for o in kand:
-            if not gruppe or abs(o[1] - gruppe[0][1]) < 0.12:
-                if not gruppe or abs(o[2] - gruppe[0][2]) < 0.12:
-                    gruppe.append(o)
-                    farben.append(o[3])
+        # Vote: group spatially and take the nearest group that has enough
+        # sightings. A single false detection does not steer that way.
+        candidates.sort(key=lambda o: o[1] - x)
+        group, colours = [], []
+        for o in candidates:
+            if not group or abs(o[1] - group[0][1]) < 0.12:
+                if not group or abs(o[2] - group[0][2]) < 0.12:
+                    group.append(o)
+                    colours.append(o[3])
                     continue
-            if len(gruppe) >= self.start_dodge_votes:
+            if len(group) >= self.start_dodge_votes:
                 break
-            gruppe, farben = [o], [o[3]]
-        if len(gruppe) < self.start_dodge_votes:
-            return self._start_ausweich_halten(x, cy)
+            group, colours = [o], [o[3]]
+        if len(group) < self.start_dodge_votes:
+            return self._start_dodge_hold(x, cy)
 
-        ox = sum(o[1] for o in gruppe) / len(gruppe)
-        oy = sum(o[2] for o in gruppe) / len(gruppe)
-        farbe = max(set(farben), key=farben.count)
+        ox = sum(o[1] for o in group) / len(group)
+        oy = sum(o[2] for o in group) / len(group)
+        colour = max(set(colours), key=colours.count)
 
-        y_links = cy + 0.5 * breite
-        y_rechts = cy - 0.5 * breite
-        if farbe == OBST_GRUEN:
-            ziel = 0.5 * ((oy + BLOCK_HALB) + y_links)      # links am Klotz vorbei
-            seite = 'links'
-        elif farbe == OBST_ROT:
-            ziel = 0.5 * (y_rechts + (oy - BLOCK_HALB))     # rechts vorbei
-            seite = 'rechts'
+        y_left = cy + 0.5 * lane_w
+        y_right = cy - 0.5 * lane_w
+        if colour == OBST_GREEN:
+            target = 0.5 * ((oy + BLOCK_HALF) + y_left)      # pass the block on the left
+            side = 'left'
+        elif colour == OBST_RED:
+            target = 0.5 * (y_right + (oy - BLOCK_HALF))     # pass on the right
+            side = 'right'
         else:
-            # Farbe unklar: nicht raten, sondern auf die Seite mit mehr Platz.
-            if (y_links - oy) >= (oy - y_rechts):
-                ziel = 0.5 * ((oy + BLOCK_HALB) + y_links)
-                seite = 'links (Farbe unklar)'
+            # Colour unknown: do not guess, take the side with more room.
+            if (y_left - oy) >= (oy - y_right):
+                target = 0.5 * ((oy + BLOCK_HALF) + y_left)
+                side = 'left (colour unknown)'
             else:
-                ziel = 0.5 * (y_rechts + (oy - BLOCK_HALB))
-                seite = 'rechts (Farbe unklar)'
-        ziel = min(max(ziel, y_rechts + self.start_dodge_margin),
-                   y_links - self.start_dodge_margin)
-        info = (ox - x, oy, farbe, seite, ziel, len(gruppe))
-        # Festhalten, bis der Klotz sicher hinter uns ist. Ohne das faellt
-        # der Versatz genau beim Vorbeifahren weg -- dort verliert
-        # /obstacles_live die Pylone, weil unter 0.17 m Laserentfernung
-        # range_min_m greift -- und der Roboter zoege mitten neben dem
-        # Klotz zurueck zur Spurmitte.
-        self._start_halt = (ox, ziel, info)
-        return ziel, info
+                target = 0.5 * (y_right + (oy - BLOCK_HALF))
+                side = 'right (colour unknown)'
+        target = min(max(target, y_right + self.start_dodge_margin),
+                     y_left - self.start_dodge_margin)
+        info = (ox - x, oy, colour, side, target, len(group))
+        # Hold it until the block is safely behind us. Without that the
+        # offset drops away exactly while passing -- there /obstacles_live
+        # loses the pylon because range_min_m kicks in below 0.17 m laser
+        # range -- and the robot would pull back to the lane centre right
+        # next to the block.
+        self._start_hold = (ox, target, info)
+        return target, info
 
-    def _start_ausweich_halten(self, x, cy):
-        """Den zuletzt bestimmten Versatz halten, solange der Klotz noch
-        nicht passiert ist. Danach zurueck auf die Spurmitte."""
-        halt = self._start_halt
-        if halt is None:
+    def _start_dodge_hold(self, x, cy):
+        """Hold the offset determined last as long as the block has not
+        been passed yet. After that back to the lane centre."""
+        hold = self._start_hold
+        if hold is None:
             return cy, None
-        ox, ziel, info = halt
+        ox, target, info = hold
         if x > ox + self.start_dodge_back:
-            self._start_halt = None
+            self._start_hold = None
             return cy, None
-        return ziel, info
+        return target, info
 
-    # ------------------------------------------------------------ Ausparken
+    # ------------------------------------------------------------ Unparking
     #
-    # Ablauf: AUSPARK_BUTTON -> AUSPARK_RICHTUNG -> AUSPARK_FAHREN -> weiter.
-    # Waehrend AUSPARK_FAHREN wird KEIN /cmd_vel veroeffentlicht: die Bruecke
-    # wuerde daraufhin die Lenkung neu stellen, und ein Motorbefehl bricht die
-    # laufende Positionsfahrt ab.
+    # Sequence: UNPARK_BUTTON -> UNPARK_DIRECTION -> UNPARK_DRIVE -> onwards.
+    # During UNPARK_DRIVE NO /cmd_vel is published: the bridge would then set
+    # the steering anew, and a motor command aborts the running position
+    # move.
 
-    def ausparken_scan_cb(self, msg):
-        """Eine Stimme fuer die Fahrtrichtung. Laeuft nur waehrend der Suche."""
-        if self.state != 'AUSPARK_RICHTUNG':
+    def unpark_scan_cb(self, msg):
+        """One vote for the direction of travel. Runs only during the search."""
+        if self.state != 'UNPARK_DIRECTION':
             return
-        ergebnis = richtung_aus_scan(
-            scan_to_points(msg), halbwinkel_grad=self.ausparken_sektor_grad)
-        self.ausp_letzter_grund = ergebnis['grund']
-        if not ergebnis['sicher']:
-            self.ausp_stimmen = []
+        result = direction_from_scan(
+            scan_to_points(msg), half_angle_deg=self.unpark_sector_deg)
+        self.unpark_last_reason = result['reason']
+        if not result['confident']:
+            self.unpark_votes = []
             return
-        # Nur EINIGE Stimmen zaehlen, keine Mehrheit: ein einziger Widerspruch
-        # setzt zurueck. Wer den Roboter waehrend der Suche anfasst, bekommt
-        # keine Entscheidung statt einer knappen.
-        if self.ausp_stimmen and self.ausp_stimmen[-1] != ergebnis['richtung']:
-            self.ausp_stimmen = []
-        self.ausp_stimmen.append(ergebnis['richtung'])
+        # Count only SEVERAL votes, not a majority: a single contradiction
+        # resets. Whoever touches the robot during the search gets no decision
+        # instead of a narrow one.
+        if self.unpark_votes and self.unpark_votes[-1] != result['direction']:
+            self.unpark_votes = []
+        self.unpark_votes.append(result['direction'])
 
-    def ausparken_move_done_cb(self, msg):
-        """Quittung der Bruecke: [move_id, status, position_zehntelgrad]."""
+    def unpark_move_done_cb(self, msg):
+        """Ack from the bridge: [move_id, status, position_decideg]."""
         if len(msg.data) >= 3:
-            self.ausp_move_done = (self.now_s(), int(msg.data[0]),
-                                   int(msg.data[1]), msg.data[2] / 10.0)
+            self.unpark_move_done = (self.now_s(), int(msg.data[0]),
+                                     int(msg.data[1]), msg.data[2] / 10.0)
 
-    def _ausparken_pid(self, flach):
-        """Regelparameter des ESP setzen. Fluechtig, nicht ins NVS."""
-        werte = list(flach)
-        if len(werte) % 2 != 0:
+    def _unpark_pid(self, flat):
+        """Set the ESP control parameters. Volatile, not into the NVS."""
+        vals = list(flat)
+        if len(vals) % 2 != 0:
             self.get_logger().warn(
-                "Ausparken: PID-Liste braucht Paare aus Index und Wert, "
-                "bekam %d Werte -- uebersprungen." % len(werte))
+                "Unparking: PID list needs pairs of index and value, "
+                "got %d values -- skipped." % len(vals))
             return
-        namen = {0: 'kp', 1: 'ki', 2: 'kd', 3: 'ilimit', 4: 'maxduty',
+        names = {0: 'kp', 1: 'ki', 2: 'kd', 3: 'ilimit', 4: 'maxduty',
                  5: 'tol_deg', 6: 'settle_ms', 7: 'timeout_ms', 8: 'minduty'}
-        gesetzt = []
-        for i in range(0, len(werte), 2):
+        applied = []
+        for i in range(0, len(vals), 2):
             self.pub_pid.publish(
-                Float32MultiArray(data=[float(werte[i]), float(werte[i + 1])]))
-            gesetzt.append('%s=%g' % (namen.get(int(werte[i]), '?%d' % werte[i]),
-                                      werte[i + 1]))
-        self.get_logger().info("Ausparken: Regelparameter %s"
-                               % ', '.join(gesetzt))
+                Float32MultiArray(data=[float(vals[i]), float(vals[i + 1])]))
+            applied.append('%s=%g' % (names.get(int(vals[i]), '?%d' % vals[i]),
+                                      vals[i + 1]))
+        self.get_logger().info("Unparking: control parameters %s"
+                               % ', '.join(applied))
 
-    def _ausparken_abbruch(self, grund):
-        """Fahrt abbrechen, Regelparameter zuruecksetzen, stehen bleiben."""
-        self.pub_motor.publish(Int32(data=0))      # loest die Positionsfahrt ab
-        self._ausparken_pid(self.ausparken_pid_nachher)
+    def _unpark_abort(self, reason):
+        """Abort the move, reset the control parameters, stand still."""
+        self.pub_motor.publish(Int32(data=0))      # replaces the position move
+        self._unpark_pid(self.unpark_pid_after)
         self.publish_stop()
         self.state = 'DONE'
-        self.get_logger().error("%s abgebrochen: %s"
-                                % ('Einparken' if self.ausp_modus == 'ein'
-                                   else 'Ausparken', grund))
+        self.get_logger().error("%s aborted: %s"
+                                % ('Parking' if self.unpark_mode == 'in'
+                                   else 'Unparking', reason))
 
-    def _auspark_variante(self, richtung):
-        """Welche Ausparkfolge? Entscheidend ist die NAECHSTE Pylone VOR dem
-        geparkten Roboter (ausparken_entscheid_ab..bis voraus): Farbe verlangt
-        innen (CW rot, CCW gruen) -> 'innen', andere Farbe -> 'aussen', keine
-        -> 'mitte'. Relativ zum Roboter statt zu einer festen Reihe, weil die
-        Luecke je nach Aufbau an anderer Stelle der Geraden liegt.
-        Rueckgabe (variante, Pylone|None)."""
+    def _unpark_variant(self, direction):
+        """Which unpark sequence? What decides is the NEAREST pylon AHEAD of
+        the parked robot (unpark_decide_from..to ahead): a colour that
+        demands inside (CW red, CCW green) -> 'inner', the other colour ->
+        'outer', none -> 'middle'. Relative to the robot instead of a fixed
+        row, because the bay lies at a different place of the straight
+        depending on the layout. Returns (variant, pylon|None)."""
         if self.obstacles is None or self.walls is None or self.pose is None:
-            return 'mitte', None
+            return 'middle', None
         x, y, th = self.pose
-        vorn = self._abstand_erste_ecke(x, y, th)
+        front_d = self._first_corner_dist(x, y, th)
         w = min(range(len(self.walls)),
                 key=lambda i: abs(self.walls[i][0] * x + self.walls[i][1] * y
                                   - self.walls[i][2]))
         c, sn = math.cos(th), math.sin(th)
         nx, ny, dw = self.walls[w]
-        breite = (self.lane_width[w] if self.lane_width is not None
+        lane_w = (self.lane_width[w] if self.lane_width is not None
                   and w < len(self.lane_width) else 1.0)
-        naechste = None
+        nearest = None
         for o in self.obstacles:
             if o['wall'] != w:
                 continue
-            # Zweite, unabhaengige Bedingung: die Pylone muss auch SEITLICH in der
-            # Startspur liegen. Steht die Frontwand nah (Start bei 1,25 m), liegt
-            # die innere Spalte der NAECHSTEN Geraden nur ~0,65 m vor ihm -- in
-            # Reichweite. Sie steht aber ~1,0 m von der Aussenbande; die Sitze der
-            # Startgeraden bei 0,4 / 0,6 m. Faellt der Wandindex nahe der Ecke
-            # einmal falsch aus, haelt die Geometrie sie trotzdem heraus.
+            # Second, independent condition: the pylon must also lie
+            # LATERALLY in the start lane. If the front wall is close (start at
+            # 1.25 m), the inner column of the NEXT straight lies only ~0.65 m
+            # ahead of it -- within reach. But it stands ~1.0 m from the outer
+            # wall; the seats of the start straight at 0.4 / 0.6 m. If the wall
+            # index near the corner ever comes out wrong, the geometry still keeps it out.
             q_o = (nx * o['x'] + ny * o['y']) - dw
-            if not (0.05 < q_o < breite - 0.10):
+            if not (0.05 < q_o < lane_w - 0.10):
                 self.get_logger().warn(
-                    "Startgerade: Pylone #%d liegt %.2f m von der Aussenbande -- "
-                    "nicht in der Startspur, zaehlt nicht fuer das Ausparken."
+                    "Start straight: pylon #%d lies %.2f m from the outer wall -- "
+                    "not in the start lane, does not count for unparking."
                     % (o['id'], q_o))
                 continue
-            s_o = (o['x'] - x) * c + (o['y'] - y) * sn          # + = voraus
+            s_o = (o['x'] - x) * c + (o['y'] - y) * sn          # + = ahead
             self.get_logger().info(
-                "Startgerade: Pylone #%d %s, %.2f m %s%s." % (
-                    o['id'], 'gruen' if o['color'] == OBST_GRUEN else
-                    'rot' if o['color'] == OBST_ROT else '?', abs(s_o),
-                    'voraus' if s_o >= 0 else 'zurueck',
-                    '' if vorn is None else ' (%.2f m vor der Frontwand)' % (vorn - s_o)))
-            if (self.ausparken_entscheid_ab < s_o < self.ausparken_entscheid_bis
-                    and (naechste is None or s_o < naechste[1])):
-                naechste = (o, s_o)
+                "Start straight: pylon #%d %s, %.2f m %s%s." % (
+                    o['id'], 'green' if o['color'] == OBST_GREEN else
+                    'red' if o['color'] == OBST_RED else '?', abs(s_o),
+                    'ahead' if s_o >= 0 else 'back',
+                    '' if front_d is None else ' (%.2f m from the front wall)' % (front_d - s_o)))
+            if (self.unpark_decide_from < s_o < self.unpark_decide_to
+                    and (nearest is None or s_o < nearest[1])):
+                nearest = (o, s_o)
         if self.start_scan_state != 'complete':
             self.get_logger().warn(
-                "Startgerade nicht vollstaendig abgetastet -- vor ihm kann eine "
-                "Pylone unentdeckt sein.")
-        if naechste is None:
-            return 'mitte', None
-        o = naechste[0]
-        innen = OBST_ROT if richtung == 'CW' else OBST_GRUEN
-        aussen = OBST_GRUEN if richtung == 'CW' else OBST_ROT
-        if o['color'] == innen:
-            return 'innen', o
-        if o['color'] == aussen:
-            return 'aussen', o
-        return 'mitte', o
+                "Start straight not completely sampled -- a pylon ahead of it "
+                "may be undetected.")
+        if nearest is None:
+            return 'middle', None
+        o = nearest[0]
+        inner = OBST_RED if direction == 'CW' else OBST_GREEN
+        outer = OBST_GREEN if direction == 'CW' else OBST_RED
+        if o['color'] == inner:
+            return 'inner', o
+        if o['color'] == outer:
+            return 'outer', o
+        return 'middle', o
 
-    def _ausparken_planen(self):
-        """Tabelle auf die erkannte Seite drehen und den Trockenlauf mitloggen."""
-        richtung = self.ausp_stimmen[-1]
-        if self.ausparken_richtung_invertieren:
-            richtung = 'CW' if richtung == 'CCW' else 'CCW'
+    def _unpark_plan(self):
+        """Turn the table to the detected side and log the dry run along."""
+        direction = self.unpark_votes[-1]
+        if self.unpark_invert_direction:
+            direction = 'CW' if direction == 'CCW' else 'CCW'
             self.get_logger().warn(
-                "Ausparken: Richtung per Parameter invertiert.")
-        offen_links = (richtung == 'CCW')
+                "Unparking: direction inverted by parameter.")
+        open_left = (direction == 'CCW')
         try:
-            roh, herkunft = schritte_fuer(
-                richtung, gemeinsam=self.ausparken_schritte,
-                cw=self.ausparken_schritte_cw,
-                ccw=self.ausparken_schritte_ccw)
-            tabelle = schritte_aus_flach(roh)
-        except ValueError as fehler:
-            self._ausparken_abbruch("Schrittliste unbrauchbar: %s" % fehler)
+            raw, origin = steps_for(
+                direction, shared=self.unpark_steps,
+                cw=self.unpark_steps_cw,
+                ccw=self.unpark_steps_ccw)
+            table = steps_from_flat(raw)
+        except ValueError as err:
+            self._unpark_abort("Step list unusable: %s" % err)
             return
-        if not tabelle:
-            self._ausparken_abbruch("Schrittliste ist leer")
+        if not table:
+            self._unpark_abort("Step list is empty")
             return
 
-        self.ausp_schritte = spiegeln(tabelle, offen_links)
-        self.ausp_richtung = richtung
-        # Die NORMALE Folge immer merken: eingeparkt wird mit ihrer Umkehrung,
-        # auch wenn gleich die Innen-Folge gefahren wird.
-        self.ausp_schritte_std = list(self.ausp_schritte)
-        self.ausp_variante = 'normal'
-        variante, pyl = self._auspark_variante(richtung)
-        liste = AUSPARK_VARIANTEN[(richtung, variante)]
-        grund = ("keine Pylone vor ihm" if pyl is None else
-                 "Pylone #%d %s vor ihm" % (pyl['id'], 'rot' if pyl['color'] == OBST_ROT
-                                            else 'gruen' if pyl['color'] == OBST_GRUEN else '?'))
-        tab_v = None
-        if liste:
+        self.unpark_steps_run = mirror_steps(table, open_left)
+        self.unpark_direction = direction
+        # ALWAYS remember the NORMAL sequence: parking uses its reversal,
+        # even if the inner sequence is driven in a moment.
+        self.unpark_steps_std = list(self.unpark_steps_run)
+        self.unpark_variant = 'normal'
+        variant, pyl = self._unpark_variant(direction)
+        seq_list = UNPARK_VARIANTS[(direction, variant)]
+        reason = ("no pylon ahead of it" if pyl is None else
+                  "pylon #%d %s ahead of it" % (pyl['id'], 'red' if pyl['color'] == OBST_RED
+                                               else 'green' if pyl['color'] == OBST_GREEN else '?'))
+        table_v = None
+        if seq_list:
             try:
-                tab_v = schritte_aus_flach(list(liste))
-            except ValueError as fehler:
-                self.get_logger().error("SCHRITTE_%s_%s unbrauchbar: %s"
-                                        % (richtung, variante.upper(), fehler))
-        if tab_v and tab_v == tabelle:
-            # identisch mit der normalen Folge: als normal behandeln, dann
-            # behaelt das Einparken Bogenkorrektur und gemessene Startpose
+                table_v = steps_from_flat(list(seq_list))
+            except ValueError as err:
+                self.get_logger().error("STEPS_%s_%s unusable: %s"
+                                        % (direction, variant.upper(), err))
+        if table_v and table_v == table:
+            # identical to the normal sequence: treat it as normal, then
+            # parking keeps the arc correction and the measured start pose
             self.get_logger().info(
-                "Ausparken %s: %s -> %s-Folge (identisch mit der normalen)."
-                % (richtung, grund, variante))
-        elif tab_v:
-            tabelle = tab_v
-            self.ausp_schritte = spiegeln(tab_v, offen_links)
-            self.ausp_variante = variante
-            herkunft = '%s-%s-Folge' % (richtung, variante)
+                "Unparking %s: %s -> %s sequence (identical to the normal one)."
+                % (direction, reason, variant))
+        elif table_v:
+            table = table_v
+            self.unpark_steps_run = mirror_steps(table_v, open_left)
+            self.unpark_variant = variant
+            origin = '%s-%s sequence' % (direction, variant)
             self.get_logger().info(
-                "Ausparken %s: %s -> %s-Folge." % (richtung, grund, variante))
-        elif variante == 'innen':
+                "Unparking %s: %s -> %s sequence." % (direction, reason, variant))
+        elif variant == 'inner':
             self.get_logger().error(
-                "Ausparken %s: %s verlangt die Innenseite, aber SCHRITTE_%s_INNEN ist "
-                "leer. Faehrt die normale Folge -- die Pylone wird dann auf der "
-                "FALSCHEN Seite passiert." % (richtung, grund, richtung))
+                "Unparking %s: %s demands the inner side, but STEPS_%s_INNER is "
+                "empty. Drives the normal sequence -- the pylon will then be passed "
+                "on the WRONG side." % (direction, reason, direction))
         else:
             self.get_logger().info(
-                "Ausparken %s: %s -> %s-Folge, SCHRITTE_%s_%s ist leer: faehrt die "
-                "normale." % (richtung, grund, variante, richtung, variante.upper()))
+                "Unparking %s: %s -> %s sequence, STEPS_%s_%s is empty: drives the "
+                "normal one." % (direction, reason, variant, direction, variant.upper()))
 
-        # Trockenlauf zum Mitschreiben, immer in der Lage "offen links"
-        # gerechnet: die Luecke ist spiegelsymmetrisch, die Lenkung nur fast
-        # (R 0,306 m links gegen 0,312 m rechts). Fuer die Warnung reicht das.
-        probe = simuliere(spiegeln(tabelle, True))
+        # Dry run for the record, always computed in the pose "open left":
+        # the bay is mirror-symmetric, the steering only almost (R 0.306 m
+        # left against 0.312 m right). That is enough for the warning.
+        probe = simulate(mirror_steps(table, True))
         self.get_logger().info(
-            "Ausparken: %s -- offene Seite %s (%s). %s: %d Zuege, %.0f cm Weg."
-            % (richtung, 'links' if offen_links else 'rechts',
-               self.ausp_letzter_grund, herkunft, len(tabelle),
-               sum(abs(cm) for _l, cm in tabelle)))
+            "Unparking: %s -- open side %s (%s). %s: %d moves, %.0f cm travel."
+            % (direction, 'left' if open_left else 'right',
+               self.unpark_last_reason, origin, len(table),
+               sum(abs(cm) for _l, cm in table)))
         self.get_logger().info(
-            "Ausparken: Trockenlauf -- %s, engster Abstand %.0f mm zur "
-            "Magenta-Wand, am Ende %s."
-            % ('KOLLISION in Zug %s' % probe['bei_schritt'] if probe['kollision']
-               else 'kollisionsfrei',
-               probe['magenta_abstand_m'] * 1000,
-               'frei' if probe['frei'] else 'NOCH IN DER LUECKE'))
-        if probe['kollision'] or not probe['frei']:
+            "Unparking: dry run -- %s, closest distance %.0f mm to the "
+            "magenta wall, at the end %s."
+            % ('COLLISION in move %s' % probe['at_step'] if probe['collision']
+               else 'collision-free',
+               probe['magenta_dist_m'] * 1000,
+               'clear' if probe['clear'] else 'STILL IN THE BAY'))
+        if probe['collision'] or not probe['clear']:
             self.get_logger().warn(
-                "Ausparken: die Schrittfolge geht rechnerisch nicht auf. "
-                "Sie wird trotzdem gefahren -- die Masse der Luecke koennen "
-                "von meinem Modell abweichen. Hand an den Nothalt.")
+                "Unparking: by calculation the step sequence does not work out. "
+                "It is driven anyway -- the dimensions of the bay may differ "
+                "from my model. Keep a hand on the stop button.")
 
-        self._ausparken_pid(self.ausparken_pid)
-        self.ausp_modus = 'aus'
-        # Hier soll er am Ende wieder stehen. Hat er sich seit dem EKF-Start
-        # nicht bewegt (Encoder), ist das der Kartenursprung: die Karte ist so
-        # verankert, dass er beim Commit genau dort steht. Die EKF-POSITION
-        # dagegen springt in CW im Stand um bis zu +-5 cm (Wandabgleich mit
-        # kaum sichtbarer Frontwand) -- genommen im Moment des ersten Zugs
-        # wanderte die berechnete Einpark-Startpose von Lauf zu Lauf um 6 cm
-        # (parken_test_27-29). Den Kurs misst der Abgleich an Aussen- und
-        # Innenbande dagegen gut: der bleibt aus dem EKF.
-        if self.odo_weg_vorher < 0.01 and self.pose is not None:
+        self._unpark_pid(self.unpark_pid)
+        self.unpark_mode = 'out'
+        # This is where it should stand again at the end. If it has not moved
+        # since the EKF start (encoder), this is the map origin: the map is
+        # anchored so that it stands exactly there at the commit. The EKF
+        # POSITION on the other hand jumps by up to +-5 cm at standstill in CW
+        # (wall matching with a barely visible front wall) -- taken at the
+        # moment of the first move, the computed park start pose wandered by
+        # 6 cm from run to run (parken_test_27-29). The heading, however, the
+        # matching measures well at the outer and inner walls: that stays from the EKF.
+        if self.odo_travel_before < 0.01 and self.pose is not None:
             ex, ey, eth = self.pose
-            self.park_ursprung = (0.0, 0.0, eth)
+            self.park_origin = (0.0, 0.0, eth)
             self.get_logger().info(
-                "Lueckenlage = Kartenursprung (Encoderweg seit Start %.1f cm); EKF "
-                "stand bei %+.1f / %+.1f cm, Kurs %+.1f grad uebernommen."
-                % (self.odo_weg_vorher * 100, ex * 100, ey * 100, math.degrees(eth)))
+                "Bay pose = map origin (encoder travel since start %.1f cm); EKF "
+                "was at %+.1f / %+.1f cm, heading %+.1f deg adopted."
+                % (self.odo_travel_before * 100, ex * 100, ey * 100, math.degrees(eth)))
         else:
-            self.park_ursprung = self.pose
+            self.park_origin = self.pose
             self.get_logger().warn(
-                "Lueckenlage aus dem EKF: er ist seit dem Start schon %.1f cm "
-                "gefahren -- steht er nicht mehr, wo die Karte verankert wurde?"
-                % (self.odo_weg_vorher * 100))
-        self.ausp_bahn = [self.park_ursprung]  # dazu die Pose nach jedem Zug
-        self.ausp_pos_prev = None
-        self.state = 'AUSPARK_FAHREN'
-        self.ausp_index = 0
-        self.ausp_phase = 'lenken'
-        self.ausp_lenk_gesendet = False
+                "Bay pose from the EKF: it has already driven %.1f cm since the "
+                "start -- is it no longer standing where the map was anchored?"
+                % (self.odo_travel_before * 100))
+        self.unpark_trajectory = [self.park_origin]  # plus the pose after every move
+        self.unpark_pos_prev = None
+        self.state = 'UNPARK_DRIVE'
+        self.unpark_index = 0
+        self.unpark_phase = 'steer'
+        self.unpark_steer_sent = False
 
-    def _ausparken_schritt(self, x, y, theta):
-        jetzt = self.now_s()
+    def _unpark_step(self, x, y, theta):
+        t_now = self.now_s()
 
-        # --- auf den Taster warten -------------------------------------
-        if self.state == 'AUSPARK_BUTTON':
+        # --- wait for the button ---------------------------------------
+        if self.state == 'UNPARK_BUTTON':
             if self.require_button and not self.button_pressed:
                 self.publish_stop()
                 return
-            self.state = 'AUSPARK_RICHTUNG'
-            self.ausp_t0 = jetzt
+            self.state = 'UNPARK_DIRECTION'
+            self.unpark_t0 = t_now
             self.get_logger().info(
-                "Ausparken: suche die offene Seite, %d einige Scans noetig."
-                % self.ausparken_scans)
+                "Unparking: looking for the open side, %d scans needed."
+                % self.unpark_scans)
             return
 
-        # --- Fahrtrichtung aus dem rohen Scan --------------------------
-        if self.state == 'AUSPARK_RICHTUNG':
+        # --- direction of travel from the raw scan ---------------------
+        if self.state == 'UNPARK_DIRECTION':
             self.publish_stop()
-            if len(self.ausp_stimmen) < self.ausparken_scans:
-                if jetzt - self.ausp_t0 > self.ausparken_richtung_timeout:
-                    self._ausparken_abbruch(
-                        "keine eindeutige Richtung in %.0f s -- zuletzt: %s"
-                        % (self.ausparken_richtung_timeout,
-                           self.ausp_letzter_grund or 'kein Scan empfangen'))
+            if len(self.unpark_votes) < self.unpark_scans:
+                if t_now - self.unpark_t0 > self.unpark_direction_timeout:
+                    self._unpark_abort(
+                        "no clear direction in %.0f s -- last: %s"
+                        % (self.unpark_direction_timeout,
+                           self.unpark_last_reason or 'no scan received'))
                 else:
                     self.get_logger().info(
-                        "Ausparken: %d/%d Stimmen -- %s"
-                        % (len(self.ausp_stimmen), self.ausparken_scans,
-                           self.ausp_letzter_grund or 'warte auf /scan'),
+                        "Unparking: %d/%d votes -- %s"
+                        % (len(self.unpark_votes), self.unpark_scans,
+                           self.unpark_last_reason or 'waiting for /scan'),
                         throttle_duration_sec=1.0)
                 return
-            # Eigene Messung steht. Jetzt auf die Perzeption warten und
-            # abgleichen: mit start_from_bay misst sie Richtung und Pose im
-            # Stand und committet, BEVOR er losfahren darf.
-            eigene = self.ausp_stimmen[-1]
-            if self.ausparken_richtung_invertieren:
-                eigene = 'CW' if eigene == 'CCW' else 'CCW'
+            # Own measurement is done. Now wait for the perception and
+            # compare: with start_from_bay it measures direction and pose at
+            # standstill and commits BEFORE it may drive off.
+            own_dir = self.unpark_votes[-1]
+            if self.unpark_invert_direction:
+                own_dir = 'CW' if own_dir == 'CCW' else 'CCW'
             if self.race_direction not in ('CW', 'CCW'):
-                if self.ausp_richtung_wart_t0 is None:
-                    self.ausp_richtung_wart_t0 = jetzt
-                gewartet = jetzt - self.ausp_richtung_wart_t0
-                if gewartet < self.ausparken_warte_auf_richtung_s:
+                if self.unpark_direction_wait_t0 is None:
+                    self.unpark_direction_wait_t0 = t_now
+                waited = t_now - self.unpark_direction_wait_t0
+                if waited < self.unpark_wait_direction_s:
                     self.get_logger().info(
-                        "Ausparken: eigene Messung %s, warte auf /race_direction "
-                        "(%.1f s)." % (eigene, gewartet), throttle_duration_sec=0.5)
+                        "Unparking: own measurement %s, waiting for /race_direction "
+                        "(%.1f s)." % (own_dir, waited), throttle_duration_sec=0.5)
                     return
                 self.get_logger().warn(
-                    "Ausparken: nach %.1f s kein /race_direction -- faehrt mit "
-                    "der eigenen Messung %s (Perzeption ohne start_from_bay?)."
-                    % (gewartet, eigene), throttle_duration_sec=60.0)
-            elif self.race_direction != eigene:
-                # Auf der falschen Seite ausparken heisst in die Buchtwand
-                # fahren. Lieber gar nicht.
-                self._ausparken_abbruch(
-                    "Richtung widerspruechlich: eigene Messung %s (offene Seite), "
-                    "Perzeption %s. Er faehrt nicht los." % (eigene, self.race_direction))
+                    "Unparking: no /race_direction after %.1f s -- drives with "
+                    "its own measurement %s (perception without start_from_bay?)."
+                    % (waited, own_dir), throttle_duration_sec=60.0)
+            elif self.race_direction != own_dir:
+                # Unparking to the wrong side means driving into the bay wall.
+                # Better not at all.
+                self._unpark_abort(
+                    "direction contradictory: own measurement %s (open side), "
+                    "perception %s. It does not drive off." % (own_dir, self.race_direction))
                 return
-            # Abtastung der Startgeraden abwarten: sie laeuft im Stand, jede
-            # Bewegung bricht sie ab. Erst mit 'complete' ist /obstacles fuer die
-            # Startgerade vollstaendig -- ein fehlender Sitz ist dann GEMESSEN
-            # frei, nicht uebersehen. Davon haengt die Wahl der Ausparkfolge ab.
+            # Wait for the sampling of the start straight: it runs at
+            # standstill, every movement aborts it. Only with 'complete' is
+            # /obstacles complete for the start straight -- a missing seat is
+            # then MEASURED empty, not overlooked. The choice of the unpark sequence depends on it.
             if self.start_scan_state not in ('complete', 'incomplete'):
-                if self.ausp_scan_wart_t0 is None:
-                    self.ausp_scan_wart_t0 = jetzt
-                gewartet = jetzt - self.ausp_scan_wart_t0
-                if gewartet < self.ausparken_warte_scan_s:
+                if self.unpark_scan_wait_t0 is None:
+                    self.unpark_scan_wait_t0 = t_now
+                waited = t_now - self.unpark_scan_wait_t0
+                if waited < self.unpark_wait_scan_s:
                     self.get_logger().info(
-                        "Ausparken: warte auf die Abtastung der Startgeraden "
-                        "(%s, %.1f s)." % (self.start_scan_state or 'noch nichts', gewartet),
+                        "Unparking: waiting for the sampling of the start straight "
+                        "(%s, %.1f s)." % (self.start_scan_state or 'nothing yet', waited),
                         throttle_duration_sec=0.5)
                     return
                 self.get_logger().warn(
-                    "Ausparken: nach %.1f s kein Ergebnis der Startgeraden-Abtastung "
-                    "(%s) -- faehrt mit dem, was bekannt ist."
-                    % (gewartet, self.start_scan_state or 'kein /start_scan_state'),
+                    "Unparking: no result of the start straight sampling after %.1f s "
+                    "(%s) -- drives with what is known."
+                    % (waited, self.start_scan_state or 'no /start_scan_state'),
                     throttle_duration_sec=60.0)
-            # Erst senden, wenn die Bruecke die Topics auch abonniert hat.
-            # Die allerersten Nachrichten auf einer frisch angelegten
-            # Verbindung gehen in der DDS-Erkennung verloren -- und das sind
-            # hier ausgerechnet pid_set (maxduty, also das Tempo) und der
-            # erste Lenkbefehl. Ohne diese Pruefung faehrt Zug 1 ungebremst
-            # und ohne Lenkeinschlag.
-            fehlt = [name for name, pub in (
-                ('steer', self.pub_steer), ('move', self.pub_move),
-                ('pid_set', self.pub_pid), ('motor', self.pub_motor))
+            # Only send once the bridge has also subscribed to the topics.
+            # The very first messages on a freshly created connection get lost
+            # in the DDS discovery -- and here those are of all things pid_set
+            # (maxduty, i.e. the speed) and the first steering command. Without
+            # this check move 1 runs unthrottled and without steering lock.
+            missing = [name for name, pub in (
+                ('/steer', self.pub_steer), ('/move', self.pub_move),
+                ('/pid_set', self.pub_pid), ('/motor', self.pub_motor))
                 if pub.get_subscription_count() == 0]
-            if fehlt:
-                if jetzt - self.ausp_t0 > self.ausparken_richtung_timeout:
-                    self._ausparken_abbruch(
-                        "Bruecke hoert nicht zu (%s ohne Abonnent) -- laeuft "
-                        "der esp_serial_bridge?" % ', '.join(fehlt))
+            if missing:
+                if t_now - self.unpark_t0 > self.unpark_direction_timeout:
+                    self._unpark_abort(
+                        "Bridge is not listening (%s without subscriber) -- is "
+                        "the esp_serial_bridge running?" % ', '.join(missing))
                 else:
                     self.get_logger().info(
-                        "Ausparken: warte auf die Bruecke (%s)"
-                        % ', '.join(fehlt), throttle_duration_sec=1.0)
+                        "Unparking: waiting for the bridge (%s)"
+                        % ', '.join(missing), throttle_duration_sec=1.0)
                 return
-            self._ausparken_planen()
+            self._unpark_plan()
             return
 
-        # --- Scan-Halt nach dem Ausparken ------------------------------
-        if self.state == 'AUSPARK_SCAN':
-            self._ausparken_scanhalt(x, y, theta)
+        # --- scan hold after unparking ---------------------------------
+        if self.state == 'UNPARK_SCAN':
+            self._unpark_scan_hold(x, y, theta)
             return
 
-        # --- die Zuege abfahren ----------------------------------------
-        if self.state == 'AUSPARK_FAHREN':
-            if self.ausp_index >= len(self.ausp_schritte):
-                if self.ausp_modus == 'ein':
-                    self._einparken_fertig(x, y, theta)
-                elif self.ausp_modus == 'anfahrt':
-                    self.state = 'PARK_NACHMESSEN'
+        # --- drive the moves -------------------------------------------
+        if self.state == 'UNPARK_DRIVE':
+            if self.unpark_index >= len(self.unpark_steps_run):
+                if self.unpark_mode == 'in':
+                    self._park_done(x, y, theta)
+                elif self.unpark_mode == 'approach':
+                    self.state = 'PARK_REMEASURE'
                     self.park_t0 = self.now_s()
-                    self.park_mittel = []
-                elif self.ausp_modus == 'zurueck':
-                    self._erste_ecke_zurueck_fertig(x, y, theta)
-                elif self.ausp_modus == 'rangieren':
-                    self._rangieren_fertig(x, y, theta)
+                    self.park_avg_poses = []
+                elif self.unpark_mode == 'back':
+                    self._first_corner_backup_done(x, y, theta)
+                elif self.unpark_mode == 'manoeuvre':
+                    self._manoeuvre_done(x, y, theta)
                 else:
-                    self._ausparken_fertig(x, y, theta)
+                    self._unpark_done(x, y, theta)
                 return
-            lenk, cm = self.ausp_schritte[self.ausp_index]
+            steer, cm = self.unpark_steps_run[self.unpark_index]
 
-            # Einparken: Leerzuege (0 cm, nur Lenkung) ueberspringen. Sie kosten
-            # je 0,6 s Lenkwartezeit plus Quittung, und der naechste echte Zug
-            # stellt seine Lenkung ohnehin selbst ein. Der Index laeuft weiter,
-            # damit die Zuordnung zur Ausparkbahn stimmt. Ausparken unveraendert.
-            if (self.ausp_modus == 'ein' and self.einparken_leerzuege_weg
-                    and abs(cm) < 0.05 and self.ausp_phase == 'lenken'):
-                self.ausp_index += 1
-                self.ausp_lenk_gesendet = False
+            # Parking: skip empty moves (0 cm, steering only). They each cost
+            # 0.6 s of steering wait plus the ack, and the next real move sets
+            # its steering by itself anyway. The index keeps running so that
+            # the mapping to the unpark trajectory stays right. Unparking unchanged.
+            if (self.unpark_mode == 'in' and self.park_skip_empty_moves
+                    and abs(cm) < 0.05 and self.unpark_phase == 'steer'):
+                self.unpark_index += 1
+                self.unpark_steer_sent = False
                 return
 
-            # Erst lenken, dann fahren. Der Servo braucht bis zum Anschlag
-            # laenger als ein Regelzyklus.
-            if self.ausp_phase == 'lenken':
-                if not self.ausp_lenk_gesendet:
-                    self.ausp_lenk_gesendet = True
-                    self.ausp_t0 = jetzt
-                # Waehrend der ganzen Wartezeit wiederholen statt einmalig:
-                # ein verlorener Lenkbefehl faellt sonst erst auf, wenn der
-                # Zug ohne Einschlag gefahren ist. Die Pakete sind 5 Byte.
-                self.pub_steer.publish(Float32(data=float(lenk)))
-                if jetzt - self.ausp_t0 < self.ausparken_lenk_wartezeit:
+            # Steer first, then drive. The servo needs longer than one control
+            # cycle to reach the end stop.
+            if self.unpark_phase == 'steer':
+                if not self.unpark_steer_sent:
+                    self.unpark_steer_sent = True
+                    self.unpark_t0 = t_now
+                # Repeat during the whole wait instead of once: otherwise a
+                # lost steering command only shows up once the move has been
+                # driven without lock. The packets are 5 bytes.
+                self.pub_steer.publish(Float32(data=float(steer)))
+                if t_now - self.unpark_t0 < self.unpark_steer_wait_s:
                     return
-                if self.ausp_modus == 'ein':
-                    cm = self._park_bogen_korrigieren(self.ausp_index, lenk, cm,
-                                                      x, y, theta)
-                    self.ausp_schritte[self.ausp_index] = (lenk, cm)
-                grad = cm_zu_grad(cm)
-                self.ausp_move_done = None
-                self.ausp_gesendet_t = jetzt
-                self.ausp_theta0 = theta
-                self.ausp_pose0 = (x, y)
-                self.pub_move.publish(Float32(data=float(grad)))
-                self.ausp_phase = 'fahren'
+                if self.unpark_mode == 'in':
+                    cm = self._park_correct_arc(self.unpark_index, steer, cm,
+                                                x, y, theta)
+                    self.unpark_steps_run[self.unpark_index] = (steer, cm)
+                deg = cm_to_deg(cm)
+                self.unpark_move_done = None
+                self.unpark_sent_t = t_now
+                self.unpark_theta0 = theta
+                self.unpark_pose0 = (x, y)
+                self.pub_move.publish(Float32(data=float(deg)))
+                self.unpark_phase = 'drive'
                 self.get_logger().info(
-                    "Ausparken Zug %d/%d: Lenkung %+.0f %%, %+.1f cm "
-                    "(%+.0f grad Welle)."
-                    % (self.ausp_index + 1, len(self.ausp_schritte),
-                       lenk, cm, grad))
+                    "Unparking move %d/%d: steering %+.0f %%, %+.1f cm "
+                    "(%+.0f deg shaft)."
+                    % (self.unpark_index + 1, len(self.unpark_steps_run),
+                       steer, cm, deg))
                 return
 
-            # --- auf die Quittung warten --------------------------------
-            quittung = self.ausp_move_done
-            if quittung is not None and quittung[0] >= self.ausp_gesendet_t:
-                _t, _mid, status, _pos = quittung
-                plan = bahn((0.0, 0.0, 0.0), [(lenk, cm)])[-1][0]
-                soll = plan[2]
-                erwartet = math.hypot(plan[0], plan[1])
-                ist = wrap(theta - self.ausp_theta0)
-                gefahren = math.hypot(x - self.ausp_pose0[0],
-                                      y - self.ausp_pose0[1])
-                # Gegen die SEHNE vergleichen, nicht gegen die Bogenlaenge:
-                # ueber Grund misst die Pose den direkten Abstand, und bei
-                # 37 cm Vollkreisbogen sind das schon 2 cm Unterschied.
-                fehlt = abs(gefahren - erwartet)
-                # Besser: der Encoder. Die Differenz zweier Quittungen ist die
-                # Wellendrehung dieses Zuges -- ein Sprung der Lokalisierung
-                # kann den Zug dann nicht mehr faelschlich abbrechen (so
-                # geschehen im CCW-Ausparktest). Nur fuer den ersten Zug einer
-                # Folge fehlt der Vorgaenger, dort bleibt es bei der Pose.
-                if self.ausp_pos_prev is not None:
-                    gedreht = _pos - self.ausp_pos_prev
-                    fehlt = abs(grad_zu_cm(gedreht - cm_zu_grad(cm))) / 100.0
-                self.ausp_pos_prev = _pos
+            # --- wait for the ack ---------------------------------------
+            ack = self.unpark_move_done
+            if ack is not None and ack[0] >= self.unpark_sent_t:
+                _t, _mid, status, _pos = ack
+                plan = trajectory((0.0, 0.0, 0.0), [(steer, cm)])[-1][0]
+                setpoint = plan[2]
+                expected = math.hypot(plan[0], plan[1])
+                actual = wrap(theta - self.unpark_theta0)
+                travelled = math.hypot(x - self.unpark_pose0[0],
+                                       y - self.unpark_pose0[1])
+                # Compare against the CHORD, not the arc length: over the
+                # ground the pose measures the direct distance, and with a
+                # 37 cm full-circle arc that is already 2 cm difference.
+                missing = abs(travelled - expected)
+                # Better: the encoder. The difference of two acks is the shaft
+                # rotation of this move -- a jump of the localisation can then
+                # no longer abort the move wrongly (as happened in the CCW
+                # unpark test). Only for the first move of a sequence the
+                # predecessor is missing, there it stays with the pose.
+                if self.unpark_pos_prev is not None:
+                    turned = _pos - self.unpark_pos_prev
+                    missing = abs(deg_to_cm(turned - cm_to_deg(cm))) / 100.0
+                self.unpark_pos_prev = _pos
 
-                if status == 1 and fehlt <= self.ausparken_weg_toleranz_cm / 100.0:
-                    # Der ESP hat nicht eingeschwungen, ist aber weit genug
-                    # gekommen. Fuer uns zaehlt der Weg.
+                if status == 1 and missing <= self.unpark_travel_tol_cm / 100.0:
+                    # The ESP did not settle, but got far enough. What counts
+                    # for us is the travel.
                     self.get_logger().warn(
-                        "Ausparken Zug %d: ESP meldet Zeitueberschreitung, "
-                        "Weg stimmt aber (%.1f statt %.1f cm) -- weiter. "
-                        "Wenn das bei jedem Zug passiert, minduty erhoehen."
-                        % (self.ausp_index + 1, gefahren * 100, erwartet * 100))
-                elif status != 0 and self.ausp_modus == 'rangieren':
-                    # Rangieren: auch ein halber Rueckweg hilft -- neu planen.
+                        "Unparking move %d: ESP reports timeout, "
+                        "but the travel is right (%.1f instead of %.1f cm) -- carrying on. "
+                        "If this happens on every move, raise minduty."
+                        % (self.unpark_index + 1, travelled * 100, expected * 100))
+                elif status != 0 and self.unpark_mode == 'manoeuvre':
+                    # Manoeuvring: even half the way back helps -- replan.
                     self.get_logger().warn(
-                        "Rangieren: Zug nicht ganz gefahren (Status %d, %.1f statt "
-                        "%.1f cm) -- plant trotzdem neu."
-                        % (status, gefahren * 100, erwartet * 100))
+                        "Manoeuvring: move not driven completely (status %d, %.1f instead of "
+                        "%.1f cm) -- replans anyway."
+                        % (status, travelled * 100, expected * 100))
                 elif status != 0:
-                    # MOVE_OK/TIMEOUT/ABORTED aus esp_serial_bridge.py. Status 2
-                    # heisst: irgendetwas hat einen Motorbefehl geschickt und
-                    # die Fahrt damit abgeloest -- der haeufigste Fall ist eine
-                    # Bruecke ohne die move-Sperre in _velocity_control.
-                    bedeutung = {1: "Zeitueberschreitung im ESP, und der Weg "
-                                    "fehlt auch",
-                                 2: "von einem Motorbefehl abgeloest -- laeuft "
-                                    "die Bruecke mit der move-Sperre?"}
+                    # MOVE_OK/TIMEOUT/ABORTED from esp_serial_bridge.py. Status 2
+                    # means: something sent a motor command and thereby replaced
+                    # the move -- the most common case is a bridge without the
+                    # move lock in _velocity_control.
+                    meaning = {1: "timeout in the ESP, and the travel "
+                                  "is missing too",
+                               2: "replaced by a motor command -- is the "
+                                  "bridge running with the move lock?"}
                     self.get_logger().error(
-                        "Ausparken Zug %d NICHT ausgefuehrt: Status %d (%s). "
-                        "%.1f cm ueber Grund statt %.1f cm."
-                        % (self.ausp_index + 1, status,
-                           bedeutung.get(status, "unbekannt"),
-                           gefahren * 100, erwartet * 100))
-                    self._ausparken_abbruch(
-                        "Zug %d quittiert mit Status %d" % (self.ausp_index + 1, status))
+                        "Unparking move %d NOT executed: status %d (%s). "
+                        "%.1f cm over the ground instead of %.1f cm."
+                        % (self.unpark_index + 1, status,
+                           meaning.get(status, "unknown"),
+                           travelled * 100, expected * 100))
+                    self._unpark_abort(
+                        "move %d acked with status %d" % (self.unpark_index + 1, status))
                     return
                 else:
                     self.get_logger().info(
-                        "Ausparken Zug %d fertig: Kurs %+.1f grad (geplant "
-                        "%+.1f), %.1f cm ueber Grund (geplant %.1f)."
-                        % (self.ausp_index + 1, math.degrees(ist),
-                           math.degrees(soll), gefahren * 100, erwartet * 100))
-                if self.ausp_modus == 'aus':
-                    self.ausp_bahn.append((x, y, theta))
-                elif self.ausp_modus == 'ein':
-                    self._park_zug_abweichung(self.ausp_index, theta)
-                self.ausp_index += 1
-                self.ausp_phase = 'lenken'
-                self.ausp_lenk_gesendet = False
+                        "Unparking move %d done: heading %+.1f deg (planned "
+                        "%+.1f), %.1f cm over the ground (planned %.1f)."
+                        % (self.unpark_index + 1, math.degrees(actual),
+                           math.degrees(setpoint), travelled * 100, expected * 100))
+                if self.unpark_mode == 'out':
+                    self.unpark_trajectory.append((x, y, theta))
+                elif self.unpark_mode == 'in':
+                    self._park_move_deviation(self.unpark_index, theta)
+                self.unpark_index += 1
+                self.unpark_phase = 'steer'
+                self.unpark_steer_sent = False
                 return
 
-            if jetzt - self.ausp_gesendet_t > self.ausparken_zug_timeout:
-                self._ausparken_abbruch(
-                    "Zug %d ohne Quittung nach %.0f s -- laeuft der "
-                    "esp_serial_bridge mit der move-Sperre?"
-                    % (self.ausp_index + 1, self.ausparken_zug_timeout))
+            if t_now - self.unpark_sent_t > self.unpark_move_timeout:
+                self._unpark_abort(
+                    "move %d without ack after %.0f s -- is the "
+                    "esp_serial_bridge running with the move lock?"
+                    % (self.unpark_index + 1, self.unpark_move_timeout))
             return
 
-    def _ausparken_fertig(self, x, y, theta):
-        self._ausparken_pid(self.ausparken_pid_nachher)
+    def _unpark_done(self, x, y, theta):
+        self._unpark_pid(self.unpark_pid_after)
         self.publish_stop()
-        self.ausp_ende_pose = (x, y, theta)   # Vergleich nach dem Scan-Halt
+        self.unpark_end_pose = (x, y, theta)   # comparison after the scan hold
         self.get_logger().info(
-            "Ausparken fertig: Pose (%.2f, %.2f), Kurs %+.1f grad."
+            "Unparking done: pose (%.2f, %.2f), heading %+.1f deg."
             % (x, y, math.degrees(theta)))
-        if self.ausparken_nur:
+        if self.unpark_only:
             self.state = 'DONE'
             self.get_logger().info(
-                "ausparken_nur gesetzt -- Regler haelt hier an.")
+                "unpark_only set -- controller stops here.")
             return
-        # Die Richtung JETZT bekanntgeben, nicht erst nach dem Halt: die
-        # Wahrnehmung braucht sie, um ueberhaupt mit der
-        # Startpositionserkennung anzufangen -- und die soll im Stillstand
-        # laufen, also genau waehrend des Halts.
-        self._ausparken_richtung_uebernehmen()
-        if self.ausparken_halt_s > 0.0:
-            self.state = 'AUSPARK_SCAN'
-            self.ausp_t0 = self.now_s()
-            self.ausp_scan_hier = None
+        # Announce the direction NOW, not only after the hold: the perception
+        # needs it to start the start position detection at all -- and that
+        # should run at standstill, i.e. exactly during the hold.
+        self._unpark_adopt_direction()
+        if self.unpark_hold_s > 0.0:
+            self.state = 'UNPARK_SCAN'
+            self.unpark_t0 = self.now_s()
+            self.unpark_scan_here = None
             self.get_logger().info(
-                "Nach dem Ausparken: warte auf die Eckengeometrie, dann entscheide, "
-                "ob hier gescannt wird.")
+                "After unparking: waiting for the corner geometry, then deciding "
+                "whether to scan here.")
             return
-        self._ausparken_uebergeben()
+        self._unpark_handover()
 
-    def _park_gerade(self):
-        """Aussenwand (einwaerts gerichtete HNF) und Fahrtrichtung der
-        Zielgeraden = Startgerade."""
+    def _park_straight(self):
+        """Outer wall (inward-pointing HNF) and direction of travel of the
+        finish straight = start straight."""
         w = self._entry_wall_idx(self.corner_idx)
         nx, ny, dw = self.walls[w]
         tx, ty = self.arc['travel']
         return nx, ny, dw, tx, ty
 
-    def _park_lage(self, x, y, theta):
-        """Wo liegt die Einpark-Startpose relativ zum Roboter -- WANDBEZOGEN.
+    def _park_pose_error(self, x, y, theta):
+        """Where does the park start pose lie relative to the robot -- WALL-RELATIVE.
 
-        d    laengs, entlang der Geraden (+ voraus). Aus der gemerkten Pose:
-             laengs passen Startrahmen und Karte (front_wall_x und Eckpunkt
-             stimmen ueberein).
-        quer Abstand zur Aussenbande minus Parklinie (+ = zu weit innen).
-             NICHT aus der gemerkten Pose -- die liegt quer ~14 cm daneben.
-        kurs gegen die Richtung der Geraden; das Ausparken endet parallel.
+        d        along the straight (+ ahead). From the remembered pose: along
+                 the line start frame and map agree (front_wall_x and corner
+                 point match).
+        lat_off  distance to the outer wall minus the parking line (+ = too far
+                 inside). NOT from the remembered pose -- that lies ~14 cm off laterally.
+        heading  against the direction of the straight; unparking ends parallel.
         """
-        nx, ny, dw, tx, ty = self._park_gerade()
+        nx, ny, dw, tx, ty = self._park_straight()
         px, py, _pth = self.park_start
         d = (px * tx + py * ty) - (x * tx + y * ty)
-        quer = ((nx * x + ny * y) - dw) - self.park_q
-        kurs = wrap(theta - math.atan2(ty, tx))
-        return d, quer, kurs
+        lat_off = ((nx * x + ny * y) - dw) - self.park_q
+        heading = wrap(theta - math.atan2(ty, tx))
+        return d, lat_off, heading
 
-    def _park_mittelpose(self):
-        """Mittel der im Stand gesammelten Posen. Ein Einzelwert traegt das
-        EKF-Rauschen voll in den Korrekturzug -- und weil jeder Vorwaertszug
-        ~1 cm Ueberschuss hat, pendelt die Anfahrt dann hin und her. Simuliert
-        mit dem gemessenen Fahrmodell: Einzelwert 89 Prozent, gemittelt 100."""
-        n = len(self.park_mittel)
-        mx = sum(p[0] for p in self.park_mittel) / n
-        my = sum(p[1] for p in self.park_mittel) / n
-        mth = math.atan2(sum(math.sin(p[2]) for p in self.park_mittel),
-                         sum(math.cos(p[2]) for p in self.park_mittel))
+    def _park_mean_pose(self):
+        """Mean of the poses collected at standstill. A single value carries
+        the EKF noise fully into the correction move -- and because every
+        forward move has ~1 cm excess, the approach then swings back and
+        forth. Simulated with the measured drive model: single value 89
+        percent, averaged 100."""
+        n = len(self.park_avg_poses)
+        mx = sum(p[0] for p in self.park_avg_poses) / n
+        my = sum(p[1] for p in self.park_avg_poses) / n
+        mth = math.atan2(sum(math.sin(p[2]) for p in self.park_avg_poses),
+                         sum(math.cos(p[2]) for p in self.park_avg_poses))
         return mx, my, mth
 
-    def _park_lage_ok(self, d, quer, kurs, max_anfahrt):
-        gruende = []
-        if abs(quer) > self.einparken_quer_tol:
-            gruende.append("%.1f cm seitlich (Grenze %.1f)"
-                           % (quer * 100, self.einparken_quer_tol * 100))
-        if abs(math.degrees(kurs)) > self.einparken_kurs_tol_grad:
-            gruende.append("Kurs %+.1f grad (Grenze %.1f)"
-                           % (math.degrees(kurs), self.einparken_kurs_tol_grad))
-        if abs(d) > max_anfahrt:
-            gruende.append("Anfahrt %.2f m (Grenze %.2f)" % (abs(d), max_anfahrt))
-        return gruende
+    def _park_pose_ok(self, d, lat_off, heading, max_approach):
+        reasons = []
+        if abs(lat_off) > self.park_lat_tol:
+            reasons.append("%.1f cm sideways (limit %.1f)"
+                           % (lat_off * 100, self.park_lat_tol * 100))
+        if abs(math.degrees(heading)) > self.park_heading_tol_deg:
+            reasons.append("heading %+.1f deg (limit %.1f)"
+                           % (math.degrees(heading), self.park_heading_tol_deg))
+        if abs(d) > max_approach:
+            reasons.append("approach %.2f m (limit %.2f)" % (abs(d), max_approach))
+        return reasons
 
-    def _park_zuege_starten(self, schritte, modus):
-        self.ausp_schritte = schritte
-        self.ausp_modus = modus
-        self.state = 'AUSPARK_FAHREN'
-        self.ausp_index = 0
-        self.ausp_phase = 'lenken'
-        self.ausp_lenk_gesendet = False
+    def _park_start_moves(self, steps, mode):
+        self.unpark_steps_run = steps
+        self.unpark_mode = mode
+        self.state = 'UNPARK_DRIVE'
+        self.unpark_index = 0
+        self.unpark_phase = 'steer'
+        self.unpark_steer_sent = False
 
-    def _park_halt(self, x, y, theta):
-        """Pflichtstillstand nach drei Runden, danach zur Startpose anfahren.
+    def _park_hold(self, x, y, theta):
+        """Mandatory standstill after three laps, then approach the start pose.
 
-        Eingeparkt wird mit der UMGEKEHRTEN Ausparkfolge, die er zu Beginn
-        selbst gefahren ist -- am Roboter nachgemessen trifft der Rueckweg die
-        Lueckenlage auf rund 2 cm, Achsen parallel. Das gilt aber nur, wenn die
-        Folge exakt an der Pose beginnt, an der das Ausparken endete.
+        Parking uses the REVERSED unpark sequence it drove itself at the
+        beginning -- measured on the robot the way back hits the bay pose to
+        about 2 cm, axles parallel. But that only holds if the sequence
+        starts exactly at the pose where unparking ended.
         """
         self.publish_stop()
-        jetzt = self.now_s()
-        rest = self.einparken_halt_s - (jetzt - self.park_t0)
-        # Nur bei eingerasteter Lokalisierung messen: die Startpose der
-        # Umkehrfolge muss auf 1-2 cm stimmen. Solange sie unsicher ist,
-        # verwerfen, und danach die Mittelung neu beginnen.
-        if not self._lok_ok() and not self.park_lok_unsicher:
-            self.park_mittel = []
-            if self.lok_warte_t0 is None:
-                self.lok_warte_t0 = jetzt
-            if rest <= 0.0 and jetzt - max(self.lok_warte_t0, self.park_t0
-                                             + self.einparken_halt_s) \
-                    > self.einparken_lok_warte_s:
-                # Nichts zu verlieren: trotzdem einparken, aber ohne die
-                # posenbasierten Korrekturen -- die Pose ist gerade nicht belastbar.
-                self.park_lok_unsicher = True
-                self.lok_warte_t0 = None
+        t_now = self.now_s()
+        rest = self.park_hold_s - (t_now - self.park_t0)
+        # Only measure with the localisation locked in: the start pose of the
+        # reversed sequence must be right to 1-2 cm. As long as it is
+        # uncertain, discard, and restart the averaging afterwards.
+        if not self._loc_ok() and not self.park_loc_uncertain:
+            self.park_avg_poses = []
+            if self.loc_wait_t0 is None:
+                self.loc_wait_t0 = t_now
+            if rest <= 0.0 and t_now - max(self.loc_wait_t0, self.park_t0
+                                           + self.park_hold_s) \
+                    > self.park_loc_wait_s:
+                # Nothing to lose: park anyway, but without the pose-based
+                # corrections -- the pose is not reliable right now.
+                self.park_loc_uncertain = True
+                self.loc_wait_t0 = None
                 self.get_logger().warn(
-                    "Lokalisierung '%s' -- parkt trotzdem ein, aber ohne "
-                    "Korrekturen (Pose nicht belastbar)." % self.lok_state)
+                    "Localisation '%s' -- parks anyway, but without "
+                    "corrections (pose not reliable)." % self.loc_state)
             else:
-                self.get_logger().warn("Einparken wartet auf Lokalisierung 'ok' (jetzt '%s')."
-                                       % self.lok_state, throttle_duration_sec=0.5)
+                self.get_logger().warn("Parking waits for localisation 'ok' (now '%s')."
+                                       % self.loc_state, throttle_duration_sec=0.5)
                 return
-        if self.lok_warte_t0 is not None:
-            # gerade wieder 'ok': Mittelungsfenster von vorn
-            self.lok_warte_t0 = None
-            if rest < self.einparken_mittel_s:
-                self.park_t0 = jetzt - (self.einparken_halt_s - self.einparken_mittel_s)
-                rest = self.einparken_mittel_s
-        if rest <= self.einparken_mittel_s:
-            self.park_mittel.append((x, y, theta))
+        if self.loc_wait_t0 is not None:
+            # just back to 'ok': averaging window from the start
+            self.loc_wait_t0 = None
+            if rest < self.park_average_s:
+                self.park_t0 = t_now - (self.park_hold_s - self.park_average_s)
+                rest = self.park_average_s
+        if rest <= self.park_average_s:
+            self.park_avg_poses.append((x, y, theta))
         if rest > 0.0:
-            self.get_logger().info("Pflichtstillstand, noch %.1f s." % rest,
+            self.get_logger().info("Mandatory standstill, %.1f s to go." % rest,
                                    throttle_duration_sec=0.5)
             return
 
-        d, quer, kurs = self._park_lage(*self._park_mittelpose())
-        self.park_mittel = []
+        d, lat_off, heading = self._park_pose_error(*self._park_mean_pose())
+        self.park_avg_poses = []
         self.get_logger().info(
-            "Einparken: Startpose %.1f cm %s, %.1f cm seitlich, Kursfehler "
-            "%+.1f grad." % (abs(d) * 100, 'voraus' if d >= 0 else 'zurueck',
-                             quer * 100, math.degrees(kurs)))
-        gruende = self._park_lage_ok(d, quer, kurs, self.einparken_max_anfahrt)
-        if gruende:
-            # Nichts zu verlieren: melden und trotzdem einparken. Den Kurs
-            # holen die Boegen wieder rein, solange die Sensoren reichen.
+            "Parking: start pose %.1f cm %s, %.1f cm sideways, heading error "
+            "%+.1f deg." % (abs(d) * 100, 'ahead' if d >= 0 else 'back',
+                            lat_off * 100, math.degrees(heading)))
+        reasons = self._park_pose_ok(d, lat_off, heading, self.park_max_approach)
+        if reasons:
+            # Nothing to lose: report and park anyway. The arcs bring the
+            # heading back in as long as the sensors suffice.
             self.get_logger().warn(
-                "Einparken: Startlage ungenau (%s) -- parkt trotzdem ein."
-                % '; '.join(gruende))
-        if abs(d) > self.einparken_max_anfahrt:
-            # Nur die Anfahrt deckeln: mehr als das faehrt Richtung Frontwand.
-            d = math.copysign(self.einparken_max_anfahrt, d)
+                "Parking: start pose inaccurate (%s) -- parks anyway."
+                % '; '.join(reasons))
+        if abs(d) > self.park_max_approach:
+            # Only cap the approach: more than that drives towards the front wall.
+            d = math.copysign(self.park_max_approach, d)
 
-        # Buchtpruefung: landet die Umkehrfolge (= Startlage) zwischen den
-        # gemessenen Waenden? Nur Warnung -- die Startlage WAR in der Bucht,
-        # eine Abweichung spricht eher fuer eine unvollstaendige Messung.
-        if self.park_ursprung is not None:
-            r = self._bucht_abstaende(*self.park_ursprung)
+        # Bay check: does the reversed sequence (= start pose) end up between
+        # the measured walls? Only a warning -- the start pose WAS in the bay,
+        # a deviation rather points to an incomplete measurement.
+        if self.park_origin is not None:
+            r = self._bay_dists(*self.park_origin)
             if r is None:
                 self.get_logger().info(
-                    "Einparken: keine Buchtmessung zur Pruefung%s."
-                    % ('' if self.bucht is None else ' (Bucht liegt nicht um die Startlage)'))
+                    "Parking: no bay measurement for the check%s."
+                    % ('' if self.bay is None else ' (bay does not lie around the start pose)'))
             else:
-                heck, front, luecke = r
-                self._log(min(heck, front) < 0.005,
-                    "Einparken: laut Buchtmessung erwartet Heck %.1f cm, Front "
-                    "%.1f cm Luft (Luecke %.1f cm)." % (heck * 100, front * 100, luecke * 100))
+                rear, front, bay_len = r
+                self._log(min(rear, front) < 0.005,
+                    "Parking: from the bay measurement expected rear %.1f cm, front "
+                    "%.1f cm clearance (bay %.1f cm)." % (rear * 100, front * 100, bay_len * 100))
 
-        # Die Ausparkfolge JETZT sichern und umkehren: der Ausfuehrer bekommt
-        # gleich die Anfahrtszuege, und die ueberschreiben ausp_schritte.
-        self.park_einpark = self._einparkfolge_bilden()
-        self.park_korr_angewandt = False
-        self.ausp_pos_prev = None       # Welle hat sich in den Runden gedreht
-        self.anfahrt_iter = 0
-        if d > self.einparken_fahrt_ab and not self.park_lok_unsicher:
-            # Pflichthalt ist vorbei: ab hier duerfen die Pylonen auf beliebiger
-            # Seite passiert werden. Pfad dafuer neu planen.
-            self.seiten_frei = True
-            self._park_ueber_festlegen()
+        # Save the unpark sequence NOW and reverse it: the executor is about
+        # to get the approach moves, and they overwrite unpark_steps_run.
+        self.park_in_steps = self._build_park_sequence()
+        self.park_corr_applied = False
+        self.unpark_pos_prev = None       # shaft has turned during the laps
+        self.approach_iter = 0
+        if d > self.park_drive_from and not self.park_loc_uncertain:
+            # Mandatory hold is over: from here on the pylons may be passed
+            # on either side. Replan the path for that.
+            self.sides_clear = True
+            self._park_choose_overshoot()
             self.plan_obstacle_path()
-            self.state = 'PARK_FAHRT'
+            self.state = 'PARK_DRIVE'
             self.get_logger().info(
-                "Einparken: %.1f cm vorwaerts GEREGELT zur Startpose%s."
-                % (d * 100, ', mit Hindernispfad' if self.obs_path else
-                   ' auf der Parklinie'))
+                "Parking: %.1f cm forward CLOSED-LOOP to the start pose%s."
+                % (d * 100, ', with obstacle path' if self.obs_path else
+                   ' on the parking line'))
             return
-        self._ausparken_pid(self.ausparken_pid)
-        self._park_anfahren(d)
+        self._unpark_pid(self.unpark_pid)
+        self._park_approach(d)
 
-    def _park_anfahren(self, d):
-        """Ein gerader Zug um d. Danach wird nachgemessen (PARK_NACHMESSEN):
-        die Umrechnung Grad -> cm (R_EFF) liegt real rund 6 Prozent daneben,
-        dazu ~1 cm Ueberschuss je Vorwaertszug. Blind gefahren laege er bei 1 m
-        Anfahrt 7 cm daneben -- nachgemessen nach 1-3 Zuegen auf 1 cm."""
-        if abs(d) < self.einparken_laengs_tol:
-            self._park_folge_starten()
+    def _park_approach(self, d):
+        """One straight move by d. After that it remeasures (PARK_REMEASURE):
+        the conversion deg -> cm (R_EFF) is about 6 percent off in reality,
+        plus ~1 cm excess per forward move. Driven blind it would be 7 cm off
+        after a 1 m approach -- remeasured, 1 cm after 1-3 moves."""
+        if abs(d) < self.park_long_tol:
+            self._park_start_sequence()
             return
-        self.anfahrt_iter += 1
-        offen_links = (self.ausp_richtung == 'CCW')
-        # Um den bekannten Fehler ueber Grund verkuerzen (einparken_zug_skala).
-        # Nie unter die Haelfte kuerzen: ein ganz kurzer Rest soll nicht zu
-        # einem Null-Zug werden.
+        self.approach_iter += 1
+        open_left = (self.unpark_direction == 'CCW')
+        # Shorten by the known error over the ground (park_move_scale).
+        # Never shorten below half: a very short remainder should not turn
+        # into a zero move.
         rest = abs(d)
         if d > 0.0:
-            rest = max(rest - self.einparken_zug_ueberschuss, 0.5 * rest)
-        befehl = math.copysign(rest / max(self.einparken_zug_skala, 0.5), d)
+            rest = max(rest - self.park_move_excess, 0.5 * rest)
+        command = math.copysign(rest / max(self.park_move_scale, 0.5), d)
         self.get_logger().info(
-            "Einparken: Anfahrt %d, %+.1f cm gerade (befohlen %+.1f cm Radweg)."
-            % (self.anfahrt_iter, d * 100, befehl * 100))
-        self._park_zuege_starten(spiegeln([(0.0, befehl * 100.0)], offen_links), 'anfahrt')
+            "Parking: approach %d, %+.1f cm straight (commanded %+.1f cm wheel travel)."
+            % (self.approach_iter, d * 100, command * 100))
+        self._park_start_moves(mirror_steps([(0.0, command * 100.0)], open_left), 'approach')
 
-    def _park_nachmessen(self, x, y, theta):
-        """Nach einem Anfahrtszug kurz ruhen lassen, dann Rest bestimmen."""
-        if self.park_lok_unsicher:
-            self._park_folge_starten()      # Pose nicht belastbar: nicht nachmessen
+    def _park_remeasure(self, x, y, theta):
+        """After an approach move let it rest briefly, then determine the remainder."""
+        if self.park_loc_uncertain:
+            self._park_start_sequence()      # pose not reliable: do not remeasure
             return
-        if not self._lok_ok():
-            jetzt = self.now_s()
-            self.park_mittel = []
-            if self.lok_warte_t0 is None:
-                self.lok_warte_t0 = jetzt
-            if jetzt - self.lok_warte_t0 > self.einparken_lok_warte_s:
-                self.park_lok_unsicher = True
-                self.lok_warte_t0 = None
+        if not self._loc_ok():
+            t_now = self.now_s()
+            self.park_avg_poses = []
+            if self.loc_wait_t0 is None:
+                self.loc_wait_t0 = t_now
+            if t_now - self.loc_wait_t0 > self.park_loc_wait_s:
+                self.park_loc_uncertain = True
+                self.loc_wait_t0 = None
                 self.get_logger().warn(
-                    "Lokalisierung '%s' beim Nachmessen -- startet die Einparkfolge "
-                    "trotzdem, ohne Korrekturen." % self.lok_state)
-                self._park_folge_starten()
+                    "Localisation '%s' while remeasuring -- starts the park sequence "
+                    "anyway, without corrections." % self.loc_state)
+                self._park_start_sequence()
                 return
-            self.park_t0 = jetzt        # nach 'ok' Beruhigung + Mittelung von vorn
+            self.park_t0 = t_now        # after 'ok' settling + averaging from the start
             return
-        self.lok_warte_t0 = None
+        self.loc_wait_t0 = None
         t = self.now_s() - self.park_t0
-        if t < self.einparken_nachmess_s:
-            return                      # Fahrzeug und EKF beruhigen lassen
-        self.park_mittel.append((x, y, theta))
-        if t < self.einparken_nachmess_s + self.einparken_mittel_s:
+        if t < self.park_remeasure_s:
+            return                      # let the car and the EKF settle
+        self.park_avg_poses.append((x, y, theta))
+        if t < self.park_remeasure_s + self.park_average_s:
             return
-        d, quer, kurs = self._park_lage(*self._park_mittelpose())
-        self.park_mittel = []
-        # Der erste Vollanschlag-Bogen holt den Kursfehler ueber seine Laenge
-        # rein -- dabei verschiebt sich der ganze Bogen laengs (Lauf 34: -6,3
-        # grad -> 2,7 cm kuerzer -> Nase in der Buchtwand). Die Startpose
-        # wandert deshalb um genau diesen Betrag mit.
-        d_kurs = self._park_kurs_laengs(kurs)
-        d += d_kurs
-        if abs(d) < self.einparken_laengs_tol:
+        d, lat_off, heading = self._park_pose_error(*self._park_mean_pose())
+        self.park_avg_poses = []
+        # The first full-lock arc brings the heading error back in over its
+        # length -- that shifts the whole arc along the line (run 34: -6.3
+        # deg -> 2.7 cm shorter -> nose in the bay wall). The start pose
+        # therefore moves by exactly this amount.
+        d_heading = self._park_heading_long(heading)
+        d += d_heading
+        if abs(d) < self.park_long_tol:
             self.get_logger().info(
-                "Einparken: Startpose erreicht (%.1f cm, %.1f cm seitlich, "
-                "%+.1f grad%s) nach %d Anfahrtszug/-zuegen."
-                % (d * 100, quer * 100, math.degrees(kurs),
-                   '' if abs(d_kurs) < 0.002 else
-                   ', Startpose wegen Kurs um %+.1f cm verschoben' % (d_kurs * 100),
-                   self.anfahrt_iter))
-            self._park_folge_starten()
+                "Parking: start pose reached (%.1f cm, %.1f cm sideways, "
+                "%+.1f deg%s) after %d approach move(s)."
+                % (d * 100, lat_off * 100, math.degrees(heading),
+                   '' if abs(d_heading) < 0.002 else
+                   ', start pose shifted by %+.1f cm because of the heading' % (d_heading * 100),
+                   self.approach_iter))
+            self._park_start_sequence()
             return
-        if abs(d_kurs) >= 0.002:
+        if abs(d_heading) >= 0.002:
             self.get_logger().info(
-                "Einparken: Kurs %+.1f grad -> Startpose %+.1f cm laengs verschoben "
-                "(der erste Bogen wird zum Kursausgleich %s)."
-                % (math.degrees(kurs), d_kurs * 100,
-                   'kuerzer' if d_kurs < 0 else 'laenger'))
-        if (d < -self.einparken_rueck_ab and not self.park_lok_unsicher
-                and self.rueck_versuche < 2):
-            self._park_rueck_starten(-d)
+                "Parking: heading %+.1f deg -> start pose shifted %+.1f cm along "
+                "(the first arc becomes %s to even out the heading)."
+                % (math.degrees(heading), d_heading * 100,
+                   'shorter' if d_heading < 0 else 'longer'))
+        if (d < -self.park_reverse_from and not self.park_loc_uncertain
+                and self.rev_attempts < 2):
+            self._park_reverse_start(-d)
             return
-        if self.anfahrt_iter >= self.einparken_anfahrt_max_zuege:
+        if self.approach_iter >= self.park_approach_max_moves:
             self.get_logger().warn(
-                "Einparken: nach %d Anfahrtszuegen noch %.1f cm laengs daneben "
-                "-- startet die Folge trotzdem." % (self.anfahrt_iter, d * 100))
-            self._park_folge_starten()
+                "Parking: after %d approach moves still %.1f cm off along the line "
+                "-- starts the sequence anyway." % (self.approach_iter, d * 100))
+            self._park_start_sequence()
             return
-        # Quer- und Kursfehler kann ein gerader Zug nicht beheben -- nur melden.
-        # Den Kurs holt der erste Bogen der Einparkfolge wieder rein.
-        for g in self._park_lage_ok(0.0, quer, kurs, 1.0):
-            self.get_logger().warn("Einparken: %s -- wird im Bogen korrigiert." % g)
-        self._park_anfahren(max(-0.30, min(0.30, d)))
+        # A straight move cannot fix lateral and heading errors -- only report.
+        # The first arc of the park sequence brings the heading back in.
+        for g in self._park_pose_ok(0.0, lat_off, heading, 1.0):
+            self.get_logger().warn("Parking: %s -- will be corrected in the arc." % g)
+        self._park_approach(max(-0.30, min(0.30, d)))
 
-    def _park_kurs_laengs(self, kurs):
-        """Um wie viel die Startpose laengs wandern muss (+ = weiter voraus),
-        damit der erste Vollanschlag-Bogen trotz Kursfehler ``kurs`` (rad, zur
-        Geraden) dort endet, wo er ohne Fehler geendet haette. Gerechnet wie
-        _park_bogen_korrigieren: der Bogen wird auf den Soll-Endkurs
-        verlaengert/verkuerzt, Grenze einparken_korr_max."""
-        folge = list(getattr(self, 'park_einpark', None) or [])
-        if not folge or abs(kurs) < math.radians(0.5):
+    def _park_heading_long(self, heading):
+        """How far the start pose has to move along the line (+ = further
+        ahead) so that the first full-lock arc, despite the heading error
+        ``heading`` (rad, to the straight), ends where it would have ended
+        without the error. Computed like _park_correct_arc: the arc is
+        lengthened/shortened to the target end heading, limit park_corr_max."""
+        seq = list(getattr(self, 'park_in_steps', None) or [])
+        if not seq or abs(heading) < math.radians(0.5):
             return 0.0
-        k = next((i for i, (lenk, cm) in enumerate(folge)
-                  if abs(lenk) >= 50.0 and abs(cm) >= 1.0), None)
+        k = next((i for i, (steer, cm) in enumerate(seq)
+                  if abs(steer) >= 50.0 and abs(cm) >= 1.0), None)
         if k is None:
             return 0.0
-        vor = folge[:k]
-        lenk, cm = folge[k]
-        th_vor = bahn((0.0, 0.0, 0.0), vor)[-1][0][2] if vor else 0.0
-        soll = bahn((0.0, 0.0, 0.0), vor + [(lenk, cm)])[-1][0]
-        geplant = wrap(soll[2] - th_vor)
-        if abs(math.degrees(geplant)) < 5.0:
+        before = seq[:k]
+        steer, cm = seq[k]
+        th_before = trajectory((0.0, 0.0, 0.0), before)[-1][0][2] if before else 0.0
+        setpoint = trajectory((0.0, 0.0, 0.0), before + [(steer, cm)])[-1][0]
+        planned = wrap(setpoint[2] - th_before)
+        if abs(math.degrees(planned)) < 5.0:
             return 0.0
-        f = wrap(soll[2] - (th_vor + kurs)) / geplant
-        f = max(1.0 - self.einparken_korr_max, min(1.0 + self.einparken_korr_max, f))
-        ist = bahn((0.0, 0.0, kurs), vor + [(lenk, cm * f)])[-1][0]
-        return soll[0] - ist[0]
+        f = wrap(setpoint[2] - (th_before + heading)) / planned
+        f = max(1.0 - self.park_corr_max, min(1.0 + self.park_corr_max, f))
+        actual = trajectory((0.0, 0.0, heading), before + [(steer, cm * f)])[-1][0]
+        return setpoint[0] - actual[0]
 
-    def _einparkfolge_bilden(self):
-        """Einparkfolge (Leitungswerte, in Fahrreihenfolge): SCHRITTE_EINPARKEN_CW
-        bzw. _CCW aus ausparken.py. Fehlt die Liste oder ist sie unbrauchbar, die
-        Umkehrung der normalen Ausparkfolge wie bisher.
+    def _build_park_sequence(self):
+        """Park sequence (wire values, in driving order): STEPS_PARK_CW or
+        _CCW from unpark.py. If the list is missing or unusable, the reversal
+        of the normal unpark sequence as before.
 
-        Weicht sie von dieser Umkehrung ab, passt die Ausparkbahn nicht mehr
-        Zug fuer Zug (_park_ziel_kurse nimmt an: Einparkzug k = Ausparkzug
-        n-1-k rueckwaerts) -- dann ohne Bogenkorrektur."""
-        umkehr = [(lenk, -cm) for lenk, cm in
-                  reversed(self.ausp_schritte_std or self.ausp_schritte)]
+        If it differs from this reversal, the unpark trajectory no longer
+        matches move by move (_park_target_headings assumes: park move k =
+        unpark move n-1-k in reverse) -- then without arc correction."""
+        rev_seq = [(steer, -cm) for steer, cm in
+                   reversed(self.unpark_steps_std or self.unpark_steps_run)]
         try:
-            flach, name = einparkfolge(self.ausp_richtung)
-            folge = spiegeln(schritte_aus_flach(flach), self.ausp_richtung == 'CCW')
-        except (ValueError, KeyError) as fehler:
+            flat, name = park_sequence(self.unpark_direction)
+            seq = mirror_steps(steps_from_flat(flat), self.unpark_direction == 'CCW')
+        except (ValueError, KeyError) as err:
             self.get_logger().warn(
-                "Einparkfolge: %s -- nehme die Umkehrung der Ausparkfolge." % fehler)
-            return umkehr
-        gleich = (len(folge) == len(umkehr) and all(
+                "Park sequence: %s -- using the reversal of the unpark sequence." % err)
+            return rev_seq
+        same = (len(seq) == len(rev_seq) and all(
             abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6
-            for a, b in zip(folge, umkehr)))
-        if gleich:
+            for a, b in zip(seq, rev_seq)))
+        if same:
             self.get_logger().info(
-                "Einparkfolge aus %s (%d Zuege, = Umkehrung der Ausparkfolge)."
-                % (name, len(folge)))
+                "Park sequence from %s (%d moves, = reversal of the unpark sequence)."
+                % (name, len(seq)))
         else:
             self.get_logger().info(
-                "Einparkfolge aus %s (%d Zuege, weicht von der Umkehrung der "
-                "Ausparkfolge ab -- ohne Bogenkorrektur): %s"
-                % (name, len(folge), ", ".join("%+.0f%%/%+.1fcm" % z for z in folge)))
-            self.ausp_bahn = []
-        return folge
+                "Park sequence from %s (%d moves, differs from the reversal of the "
+                "unpark sequence -- without arc correction): %s"
+                % (name, len(seq), ", ".join("%+.0f%%/%+.1fcm" % z for z in seq)))
+            self.unpark_trajectory = []
+        return seq
 
-    def _park_ziel_kurse(self, k):
-        """Kurs am Anfang und am Ende von Einparkzug k laut Ausparkbahn.
-        Einparkzug k faehrt Ausparkzug j = n-1-k rueckwaerts: er beginnt, wo
-        dieser endete, und endet, wo dieser begann."""
-        n = len(self.park_einpark)
-        if len(self.ausp_bahn) != n + 1 or not (0 <= k < n):
+    def _park_target_headings(self, k):
+        """Heading at the start and at the end of park move k according to the
+        unpark trajectory. Park move k drives unpark move j = n-1-k in
+        reverse: it starts where that one ended and ends where that one began."""
+        n = len(self.park_in_steps)
+        if len(self.unpark_trajectory) != n + 1 or not (0 <= k < n):
             return None
         j = n - 1 - k
-        return self.ausp_bahn[j + 1][2], self.ausp_bahn[j][2]
+        return self.unpark_trajectory[j + 1][2], self.unpark_trajectory[j][2]
 
-    def _park_sensoren_reichen(self, x, y):
-        """Korrigieren nur, solange die Pose traegt: Lokalisierung 'ok' und
-        der Lidar noch nicht in der Bucht (dort sieht er die nahe Wand nicht)."""
-        if self.park_lok_unsicher or not self._lok_ok():
+    def _park_sensors_sufficient(self, x, y):
+        """Correct only as long as the pose holds: localisation 'ok' and the
+        lidar not yet in the bay (there it does not see the near wall)."""
+        if self.park_loc_uncertain or not self._loc_ok():
             return False
         try:
-            nx, ny, dw, _tx, _ty = self._park_gerade()
+            nx, ny, dw, _tx, _ty = self._park_straight()
         except Exception:
             return False
-        return (nx * x + ny * y) - dw >= self.einparken_korr_min_abstand
+        return (nx * x + ny * y) - dw >= self.park_corr_min_dist
 
-    def _park_bogen_korrigieren(self, k, lenk, cm, x, y, theta):
-        """Vollanschlag-Bogen so verlaengern/verkuerzen, dass er mit dem Kurs
-        endet, den die Ausparkbahn an dieser Stelle hatte.
+    def _park_correct_arc(self, k, steer, cm, x, y, theta):
+        """Lengthen/shorten a full-lock arc so that it ends with the heading
+        the unpark trajectory had at this point.
 
-        Den Kursfehler bringen vor allem die GERADEN Zuege mit: bei -2 Prozent
-        bleiben die Raeder durch das Lenkspiel 2-5 grad auf der Seite stehen,
-        von der sie kamen. Kleine Lenkkorrekturen verschluckt dasselbe Spiel --
-        der Anschlag dagegen hat keins. Also Kurs ueber die Bogenlaenge."""
-        if abs(lenk) < 50.0 or abs(cm) < 1.0:
-            return cm                       # gerader Zug: nicht korrigierbar
-        ziel = self._park_ziel_kurse(k)
-        if ziel is None:
+        The heading error comes mainly from the STRAIGHT moves: at -2 percent
+        the wheels stay 2-5 deg on the side they came from because of the
+        steering play. The same play swallows small steering corrections --
+        the end stop on the other hand has none. So heading via the arc length."""
+        if abs(steer) < 50.0 or abs(cm) < 1.0:
+            return cm                       # straight move: cannot be corrected
+        target = self._park_target_headings(k)
+        if target is None:
             return cm
-        th_start, th_ende = ziel
-        geplant = wrap(th_ende - th_start)
-        noetig = wrap(th_ende - theta)
-        abweichung = math.degrees(wrap(theta - th_start))
-        if abs(math.degrees(geplant)) < 5.0:
+        th_start, th_end = target
+        planned = wrap(th_end - th_start)
+        needed = wrap(th_end - theta)
+        deviation = math.degrees(wrap(theta - th_start))
+        if abs(math.degrees(planned)) < 5.0:
             return cm
-        if not self._park_sensoren_reichen(x, y):
-            if abs(abweichung) > self.einparken_kurs_warn_grad:
+        if not self._park_sensors_sufficient(x, y):
+            if abs(deviation) > self.park_heading_warn_deg:
                 self.get_logger().warn(
-                    "Einparken Zug %d: %+.1f grad neben der Ausparkbahn, Sensoren "
-                    "reichen hier nicht mehr zum Korrigieren -- faehrt wie geplant."
-                    % (k + 1, abweichung))
+                    "Parking move %d: %+.1f deg off the unpark trajectory, the sensors "
+                    "are no longer good enough here to correct -- drives as planned."
+                    % (k + 1, deviation))
             return cm
-        f = noetig / geplant
-        f_k = max(1.0 - self.einparken_korr_max, min(1.0 + self.einparken_korr_max, f))
-        cm_neu = cm * f_k
-        if abs(cm_neu - cm) >= 0.3:
+        f = needed / planned
+        f_k = max(1.0 - self.park_corr_max, min(1.0 + self.park_corr_max, f))
+        cm_new = cm * f_k
+        if abs(cm_new - cm) >= 0.3:
             self._log(f_k != f,
-                "Einparken Zug %d: Kurs %+.1f grad neben der Ausparkbahn -> Bogen "
-                "%.1f statt %.1f cm%s." % (
-                    k + 1, abweichung, abs(cm_neu), abs(cm),
-                    '' if f_k == f else ' (Korrektur begrenzt, voll waeren %.1f cm)'
+                "Parking move %d: heading %+.1f deg off the unpark trajectory -> arc "
+                "%.1f instead of %.1f cm%s." % (
+                    k + 1, deviation, abs(cm_new), abs(cm),
+                    '' if f_k == f else ' (correction limited, full would be %.1f cm)'
                     % abs(cm * f)))
-        return cm_neu
+        return cm_new
 
-    def _park_zug_abweichung(self, k, theta):
-        """Nach jedem Einparkzug melden, wie weit der Kurs neben der
-        Ausparkbahn liegt -- ohne abzubrechen."""
-        ziel = self._park_ziel_kurse(k)
-        if ziel is None:
+    def _park_move_deviation(self, k, theta):
+        """After every park move report how far the heading lies off the
+        unpark trajectory -- without aborting."""
+        target = self._park_target_headings(k)
+        if target is None:
             return
-        dev = math.degrees(wrap(theta - ziel[1]))
-        self._log(abs(dev) > self.einparken_kurs_warn_grad,
-            "Einparken Zug %d fertig: Kurs %+.1f grad neben der Ausparkbahn."
+        dev = math.degrees(wrap(theta - target[1]))
+        self._log(abs(dev) > self.park_heading_warn_deg,
+            "Parking move %d done: heading %+.1f deg off the unpark trajectory."
             % (k + 1, dev))
 
-    def _park_uebergang(self, x, y, theta):
-        """Drei Runden fertig, OHNE anzuhalten ins Einparken uebergehen: die
-        Seite an den Pylonen ist ab hier frei, der Pfad wird dafuer neu
-        geplant, und er faehrt geregelt zur Einpark-Startpose weiter."""
+    def _park_transition(self, x, y, theta):
+        """Three laps done, go into parking WITHOUT stopping: from here on the
+        side at the pylons is clear, the path is replanned for that, and it
+        drives on closed-loop to the park start pose."""
         self.get_logger().info(
-            "Drei Runden fertig (%d Ecken) -- Seiten frei, faehrt ohne Halt zur "
-            "Einpark-Startpose." % self.corner_count)
-        if not self._lok_ok():
-            self.park_lok_unsicher = True
+            "Three laps done (%d corners) -- sides clear, drives without a hold to "
+            "the park start pose." % self.corner_count)
+        if not self._loc_ok():
+            self.park_loc_uncertain = True
             self.get_logger().warn(
-                "Lokalisierung '%s' beim Uebergang -- parkt ohne posenbasierte "
-                "Korrekturen." % self.lok_state)
-        self.park_einpark = self._einparkfolge_bilden()
-        self.park_korr_angewandt = False
-        self.ausp_pos_prev = None
-        self.anfahrt_iter = 0
-        self.rueck_versuche = 0
-        self.seiten_frei = True
-        self._park_ueber_festlegen()
+                "Localisation '%s' at the transition -- parks without pose-based "
+                "corrections." % self.loc_state)
+        self.park_in_steps = self._build_park_sequence()
+        self.park_corr_applied = False
+        self.unpark_pos_prev = None
+        self.approach_iter = 0
+        self.rev_attempts = 0
+        self.sides_clear = True
+        self._park_choose_overshoot()
         self.plan_obstacle_path()
-        self.state = 'PARK_FAHRT'
+        self.state = 'PARK_DRIVE'
 
-    def _park_ueber_festlegen(self):
-        """Ueberfahrweite fuer diese Anfahrt: einparken_ueberfahren, aber nur
-        bis vor eine Pylone, die AUF der Parklinie steht (daran vorbei geht es
-        nicht, und rueckwaerts faehrt er stur die Parklinie). Unter der
-        Rueckfahr-Schwelle lohnt es nicht -- dann wie bisher."""
-        self.park_ueber = 0.0
-        weite = (self.einparken_ueberfahren_ccw if self.race_direction == 'CCW'
-                 else self.einparken_ueberfahren_cw)
-        if weite <= 0.0 or self.park_start is None or self.park_lok_unsicher:
+    def _park_choose_overshoot(self):
+        """Overshoot distance for this approach: park_overshoot_cw/_ccw, but
+        only up to before a pylon that stands ON the parking line (there is no
+        way past it, and in reverse it stubbornly drives the parking line).
+        Below the reverse threshold it is not worth it -- then as before."""
+        self.park_overshoot = 0.0
+        overshoot = (self.park_overshoot_ccw if self.race_direction == 'CCW'
+                     else self.park_overshoot_cw)
+        if overshoot <= 0.0 or self.park_start is None or self.park_loc_uncertain:
             return
         try:
-            nx, ny, dw, tx, ty = self._park_gerade()
+            nx, ny, dw, tx, ty = self._park_straight()
         except Exception:
             return
         w = self._entry_wall_idx(self.corner_idx)
         s_ps = self.park_start[0] * tx + self.park_start[1] * ty
-        halb = FZ_BREITE / 2.0 + BLOCK_HALB + 0.05
-        grund = ''
+        half = CAR_WIDTH / 2.0 + BLOCK_HALF + 0.05
+        reason = ''
         for o in (self.obstacles or []):
             if o.get('wall') != w:
                 continue
             s_o = o['x'] * tx + o['y'] * ty - s_ps
             q_o = (nx * o['x'] + ny * o['y']) - dw
-            if s_o <= 0.0 or abs(q_o - self.park_q) >= halb:
+            if s_o <= 0.0 or abs(q_o - self.park_q) >= half:
                 continue
-            frei = s_o - FZ_NASE - BLOCK_HALB - 0.05
-            if frei < weite:
-                weite = frei
-                grund = ' (Pylone %.2f m hinter der Startpose auf der Parklinie)' % s_o
-        if weite < self.einparken_rueck_ab + 0.02:
+            clear = s_o - CAR_NOSE - BLOCK_HALF - 0.05
+            if clear < overshoot:
+                overshoot = clear
+                reason = ' (pylon %.2f m past the start pose on the parking line)' % s_o
+        if overshoot < self.park_reverse_from + 0.02:
             self.get_logger().info(
-                "Einparken: kein Ueberfahren%s -- Anfahrt wie bisher." % (grund or ''))
+                "Parking: no overshoot%s -- approach as before." % (reason or ''))
             return
-        self.park_ueber = weite
+        self.park_overshoot = overshoot
         self.get_logger().info(
-            "Einparken: faehrt %.0f cm ueber die Startpose hinaus und setzt dann "
-            "geregelt zurueck%s." % (weite * 100, grund))
+            "Parking: drives %.0f cm past the start pose and then backs up "
+            "closed-loop%s." % (overshoot * 100, reason))
 
-    def _park_front_abstand(self):
-        """Abstand der Einpark-Startpose zur Frontwand der Zielgeraden."""
+    def _park_front_dist(self):
+        """Distance of the park start pose to the front wall of the finish straight."""
         if self.park_start is None or self.corners is None or self.arc is None:
             return None
         fc = self.corners[self.corner_idx]
         tx, ty = self.arc['travel']
         return (fc[0] - self.park_start[0]) * tx + (fc[1] - self.park_start[1]) * ty
 
-    def _ziel_abstand(self):
-        """Haltepunkt am Ziel (base_link zur Frontwand).
+    def _finish_dist(self):
+        """Halt point at the finish (base_link to the front wall).
 
-        Mit Einparken so nah an der Einpark-Startpose wie erlaubt: dann ist
-        die Anfahrt danach kurz. Eine lange blinde Anfahrt hat einmal 55 cm
-        mit 7,6 grad Kursfehler gefahren und kam 12 cm seitlich und 17 grad
-        schief an. Die Zone gilt, wenn ziel_zone_ganzes_fz, fuers ganze
-        Fahrzeug -- dann muss auch die Nase noch drin sein."""
-        if self._park_aktiv() and self.einparken_halt_s <= 0.0:
-            if not self._ziel_gemeldet:
-                self._ziel_gemeldet = True
-                f_ps = self._park_front_abstand()
+        With parking as close to the park start pose as allowed: then the
+        approach afterwards is short. A long blind approach once drove 55 cm
+        with 7.6 deg heading error and arrived 12 cm sideways and 17 deg
+        askew. The zone applies, if finish_zone_whole_car, to the whole car
+        -- then the nose must also still be inside."""
+        if self._park_active() and self.park_hold_s <= 0.0:
+            if not self._finish_reported:
+                self._finish_reported = True
+                f_ps = self._park_front_dist()
                 self.get_logger().info(
-                    "Kein Pflichthalt: Pylonen bis %.2f m vor der Frontwand nach "
-                    "Regel, danach Seite frei; Einpark-Startpose bei %s m."
-                    % (self.seiten_frei_ab, '%.2f' % f_ps if f_ps is not None else '?'))
-            return self.seiten_frei_ab
-        if not (self.ziel_an_parkstart and self._park_aktiv()):
+                    "No mandatory hold: pylons up to %.2f m from the front wall by "
+                    "the rules, after that the side is clear; park start pose at %s m."
+                    % (self.sides_clear_from, '%.2f' % f_ps if f_ps is not None else '?'))
+            return self.sides_clear_from
+        if not (self.finish_at_park_start and self._park_active()):
             return self.finish_front_dist
-        f_ps = self._park_front_abstand()
+        f_ps = self._park_front_dist()
         if f_ps is None:
             return self.finish_front_dist
-        nase = FZ_NASE if self.ziel_zone_ganzes_fz else 0.0
-        heck = -FZ_HECK if self.ziel_zone_ganzes_fz else 0.0
-        lo = self.ziel_zone_min + nase + self.ziel_zone_rand
-        hi = self.ziel_zone_max - heck - self.ziel_zone_rand
-        # frueh: hinterer Zonenrand -- die Startpose liegt dann immer voraus,
-        # und die Anfahrt kann immer vorwaerts geregelt gefahren werden
-        ziel = hi if self.ziel_frueh else max(lo, min(hi, f_ps))
-        if not self._ziel_gemeldet:
-            self._ziel_gemeldet = True
+        nose = CAR_NOSE if self.finish_zone_whole_car else 0.0
+        rear = -CAR_REAR if self.finish_zone_whole_car else 0.0
+        lo = self.finish_zone_min + nose + self.finish_zone_margin
+        hi = self.finish_zone_max - rear - self.finish_zone_margin
+        # early: rear edge of the zone -- the start pose then always lies ahead,
+        # and the approach can always be driven forward closed-loop
+        target = hi if self.finish_early else max(lo, min(hi, f_ps))
+        if not self._finish_reported:
+            self._finish_reported = True
             self.get_logger().info(
-                "Haltepunkt %.2f m vor der Frontwand (Einpark-Startpose bei %.2f m, "
-                "erlaubt %.2f..%.2f m) -> danach %.0f cm Anfahrt."
-                % (ziel, f_ps, lo, hi, abs(ziel - f_ps) * 100))
-        return ziel
+                "Halt point %.2f m from the front wall (park start pose at %.2f m, "
+                "allowed %.2f..%.2f m) -> then %.0f cm of approach."
+                % (target, f_ps, lo, hi, abs(target - f_ps) * 100))
+        return target
 
-    def _park_fahrt(self, x, y, theta):
-        """Vorwaerts zur Startpose, GEREGELT: Stanley auf der Parklinie im
-        Kriechtempo, Zielbremsung auf den Abstand der Startpose. Kurs und
-        Querlage werden unterwegs korrigiert -- ein gerader ESP-Zug kann das
-        nicht, und das Lenkspiel dreht ihn dabei noch weiter weg."""
+    def _park_drive(self, x, y, theta):
+        """Forward to the start pose, CLOSED-LOOP: Stanley on the parking line
+        at crawling speed, finish braking onto the distance of the start
+        pose. Heading and lateral position are corrected on the way -- a
+        straight ESP move cannot do that, and the steering play turns it even further off."""
         fc = self.corners[self.corner_idx]
         tr = self.arc['travel']
-        vorn = (fc[0] - x) * tr[0] + (fc[1] - y) * tr[1]
-        lead = abs(self.v_ist) * self.finish_lead_time
-        vorhalt = self.einparken_vorhalt
-        if self.park_fahrt_ziel_f is not None:
-            ziel_f = self.park_fahrt_ziel_f
-        elif self.park_ueber > 0.0:
-            ziel_f = self._park_front_abstand() - self.park_ueber
-            vorhalt = 0.0               # zurueck faehrt ohnehin PARK_RUECK
+        front_d = (fc[0] - x) * tr[0] + (fc[1] - y) * tr[1]
+        lead = abs(self.v_act) * self.finish_lead_time
+        early = self.park_stop_short
+        if self.park_drive_target_f is not None:
+            target_f = self.park_drive_target_f
+        elif self.park_overshoot > 0.0:
+            target_f = self._park_front_dist() - self.park_overshoot
+            early = 0.0               # PARK_REVERSE drives back anyway
         else:
-            ziel_f = self._park_front_abstand()
-        rest = vorn - ziel_f - lead - vorhalt
-        if rest <= self.einparken_laengs_tol:
+            target_f = self._park_front_dist()
+        rest = front_d - target_f - lead - early
+        if rest <= self.park_long_tol:
             self.publish_stop()
-            if self.park_ueber > 0.0 and self.park_fahrt_ziel_f is None:
+            if self.park_overshoot > 0.0 and self.park_drive_target_f is None:
                 self.get_logger().info(
-                    "Einparken: %.1f cm ueber die Startpose gefahren -- misst nach "
-                    "und setzt geregelt zurueck." % ((self.park_ueber - rest) * 100))
+                    "Parking: drove %.1f cm past the start pose -- remeasures "
+                    "and backs up closed-loop." % ((self.park_overshoot - rest) * 100))
             else:
                 self.get_logger().info(
-                    "Einparken: geregelte Anfahrt fertig, %.1f cm vor der Startpose "
-                    "(Vorhalt %.0f cm, den Rest faehrt der ESP als Positionsfahrt)."
-                    % ((rest + vorhalt) * 100, vorhalt * 100))
-            self._ausparken_pid(self.ausparken_pid)
-            self.state = 'PARK_NACHMESSEN'
+                    "Parking: closed-loop approach done, %.1f cm before the start pose "
+                    "(stop-short %.0f cm, the ESP drives the rest as a position move)."
+                    % ((rest + early) * 100, early * 100))
+            self._unpark_pid(self.unpark_pid)
+            self.state = 'PARK_REMEASURE'
             self.park_t0 = self.now_s()
-            self.park_mittel = []
+            self.park_avg_poses = []
             return
-        px_, py_, pth_ = self._pose_nach_totzeit(x, y, theta)
+        px_, py_, pth_ = self._pose_after_dead_time(x, y, theta)
         omega = None
         if self.obs_path:
             omega = self._stanley_follow_path(px_, py_, pth_, self.obs_path)
         if omega is None:
             omega = self._stanley_steer(px_, py_, pth_, self.arc['LA'], tr)
-        v = min(self.v_park_fahrt, self.v_park_anfahrt,
+        v = min(self.v_park_drive, self.v_park_approach,
                 math.sqrt(2.0 * self.finish_decel * max(rest, 0.0)))
         self.publish_cmd(max(v, self.v_finish_min), omega)
 
-    def _lenk_prozent(self, delta):
-        """Lenkwinkel (rad, + = links) -> Servoprozent, ueber die gemessene
-        Kennlinie aus steer_calib.json (dieselbe wie beim Ausparken)."""
-        paare = sorted((g, p) for p, g in LENK_KENNLINIE)
+    def _steer_percent(self, delta):
+        """Steer angle (rad, + = left) -> servo percent, via the measured
+        curve from steer_calib.json (the same as for unparking)."""
+        pairs = sorted((g, p) for p, g in STEER_CURVE)
         g = math.degrees(delta)
-        if g <= paare[0][0]:
-            return paare[0][1]
-        if g >= paare[-1][0]:
-            return paare[-1][1]
-        for (g0, p0), (g1, p1) in zip(paare, paare[1:]):
+        if g <= pairs[0][0]:
+            return pairs[0][1]
+        if g >= pairs[-1][0]:
+            return pairs[-1][1]
+        for (g0, p0), (g1, p1) in zip(pairs, pairs[1:]):
             if g0 <= g <= g1:
                 return p0 + (p1 - p0) * (g - g0) / (g1 - g0) if g1 > g0 else p0
-        return paare[-1][1]
+        return pairs[-1][1]
 
-    def _rueck_lenkwinkel(self, x, y, theta):
-        """Stetiges Rueckwaerts-Gesetz, Hinterachse auf der Parklinie:
-            delta = k_kurs * psi - k_quer * e
-        e = Versatz nach LINKS der Fahrtrichtung, psi = Kursfehler. Rueckwaerts
-        kehrt sich die Wirkung der Lenkung auf den Kurs um (dpsi = -u tan d / L)
-        -- deshalb NICHT das Stanley-Gesetz der Vorwaertsfahrt."""
-        nx, ny, dw, tx, ty = self._park_gerade()
-        seite = 1.0 if (nx * -ty + ny * tx) >= 0.0 else -1.0
-        e = seite * (((nx * x + ny * y) - dw) - self.park_q)
+    def _rev_steer_angle(self, x, y, theta):
+        """Continuous reverse law, rear axle on the parking line:
+            delta = k_heading * psi - k_lat * e
+        e = offset to the LEFT of the direction of travel, psi = heading error.
+        In reverse the effect of the steering on the heading flips
+        (dpsi = -u tan d / L) -- therefore NOT the Stanley law of forward driving."""
+        nx, ny, dw, tx, ty = self._park_straight()
+        side = 1.0 if (nx * -ty + ny * tx) >= 0.0 else -1.0
+        e = side * (((nx * x + ny * y) - dw) - self.park_q)
         psi = wrap(theta - math.atan2(ty, tx))
-        if self.rueck_praed_s > 0.0:
-            u, T = abs(self.v_ist), self.rueck_praed_s
+        if self.rev_pred_s > 0.0:
+            u, T = abs(self.v_act), self.rev_pred_s
             e -= u * T * math.sin(psi)
-            psi -= u * T * math.tan(self.rueck_delta) / RADSTAND
-        d = self.rueck_k_kurs * psi - self.rueck_k_quer * e
-        grenze = math.radians(self.rueck_max_lenk_grad)
-        return max(-grenze, min(grenze, d)), e, psi
+            psi -= u * T * math.tan(self.rev_delta) / WHEELBASE
+        d = self.rev_k_heading * psi - self.rev_k_lat * e
+        bound = math.radians(self.rev_max_steer_deg)
+        return max(-bound, min(bound, d)), e, psi
 
-    def _park_rueck_starten(self, strecke):
-        self.rueck_versuche += 1
-        self.rueck_strecke = strecke
-        self.rueck_phase = 'lenken'
-        self.rueck_t0 = self.now_s()
-        self.rueck_delta_max = 0.0
-        self.state = 'PARK_RUECK'
+    def _park_reverse_start(self, distance):
+        self.rev_attempts += 1
+        self.rev_distance = distance
+        self.rev_phase = 'steer'
+        self.rev_t0 = self.now_s()
+        self.rev_delta_max = 0.0
+        self.state = 'PARK_REVERSE'
         self.get_logger().info(
-            "Einparken: %.1f cm rueckwaerts zur Startpose, stetig geregelt "
-            "(Versuch %d)." % (strecke * 100, self.rueck_versuche))
+            "Parking: %.1f cm in reverse to the start pose, continuously closed-loop "
+            "(attempt %d)." % (distance * 100, self.rev_attempts))
 
-    def _park_rueck(self, x, y, theta):
-        """Der ESP faehrt die Strecke als EINEN Zug; waehrenddessen lenkt der
-        Controller in jedem Takt ueber die Rohlenkung nach. So bleibt die
-        Regelung stetig, ohne von der Lenkumrechnung der Bruecke fuer negative
-        Geschwindigkeit abzuhaengen -- die ist nur vorwaerts kalibriert."""
-        jetzt = self.now_s()
-        delta, e, psi = self._rueck_lenkwinkel(x, y, theta)
-        self.rueck_delta = delta
-        self.rueck_delta_max = max(self.rueck_delta_max, abs(delta))
-        self.pub_steer.publish(Float32(data=float(self._lenk_prozent(delta))))
-        if self.rueck_phase == 'lenken':
-            if jetzt - self.rueck_t0 < self.ausparken_lenk_wartezeit:
+    def _park_reverse(self, x, y, theta):
+        """The ESP drives the distance as ONE move; meanwhile the controller
+        steers along every tick via the raw steering. That keeps the control
+        continuous without depending on the bridge's steering conversion for
+        negative speed -- that one is only calibrated forward."""
+        t_now = self.now_s()
+        delta, e, psi = self._rev_steer_angle(x, y, theta)
+        self.rev_delta = delta
+        self.rev_delta_max = max(self.rev_delta_max, abs(delta))
+        self.pub_steer.publish(Float32(data=float(self._steer_percent(delta))))
+        if self.rev_phase == 'steer':
+            if t_now - self.rev_t0 < self.unpark_steer_wait_s:
                 return
-            self.ausp_move_done = None
-            self.rueck_gesendet = jetzt
-            self.pub_move.publish(Float32(data=float(cm_zu_grad(-self.rueck_strecke * 100.0))))
-            self.rueck_phase = 'fahren'
+            self.unpark_move_done = None
+            self.rev_sent = t_now
+            self.pub_move.publish(Float32(data=float(cm_to_deg(-self.rev_distance * 100.0))))
+            self.rev_phase = 'drive'
             return
-        q = self.ausp_move_done
-        fertig = q is not None and q[0] >= self.rueck_gesendet
-        if not fertig and jetzt - self.rueck_gesendet > self.ausparken_zug_timeout:
+        q = self.unpark_move_done
+        done = q is not None and q[0] >= self.rev_sent
+        if not done and t_now - self.rev_sent > self.unpark_move_timeout:
             self.pub_motor.publish(Int32(data=0))
-            self.get_logger().warn("Einparken rueckwaerts: keine Quittung -- abgeloest.")
-            fertig = True
-        if not fertig:
+            self.get_logger().warn("Parking reverse: no ack -- replaced.")
+            done = True
+        if not done:
             return
         if q is not None:
-            self.ausp_pos_prev = q[3]        # Encoder-Bezug fuer den naechsten Zug
+            self.unpark_pos_prev = q[3]        # encoder reference for the next move
         self.get_logger().info(
-            "Einparken rueckwaerts fertig: %.1f cm neben der Parklinie, Kurs %+.1f "
-            "grad, groesster Lenkwinkel %.1f grad."
-            % (e * 100, math.degrees(psi), math.degrees(self.rueck_delta_max)))
-        self.state = 'PARK_NACHMESSEN'
-        self.park_t0 = jetzt
-        self.park_mittel = []
+            "Parking reverse done: %.1f cm beside the parking line, heading %+.1f "
+            "deg, largest steer angle %.1f deg."
+            % (e * 100, math.degrees(psi), math.degrees(self.rev_delta_max)))
+        self.state = 'PARK_REMEASURE'
+        self.park_t0 = t_now
+        self.park_avg_poses = []
 
-    def _park_folge_starten(self):
-        if getattr(self, 'park_korr_angewandt', False):
-            self._park_zuege_starten(list(self.park_einpark), 'ein')   # schon korrigiert
+    def _park_start_sequence(self):
+        if getattr(self, 'park_corr_applied', False):
+            self._park_start_moves(list(self.park_in_steps), 'in')   # already corrected
             return
-        self.park_korr_angewandt = True
-        folge = []
-        for k, (lenk, cm) in enumerate(self.park_einpark):
-            korr = 0.0
-            if abs(cm) >= 0.5:                      # Nullzuege (nur Lenkung) bleiben
-                korr = (self.einparken_vor_korr_cm if cm > 0.0
-                        else self.einparken_rueck_korr_cm)
-            if k < len(self.einparken_zug_korr):
-                korr += self.einparken_zug_korr[k]
-            if korr != 0.0 and abs(cm) >= 0.5:
-                betrag = max(0.5, abs(cm) + korr)   # Richtung bleibt, Mindestweg 0,5 cm
-                neu = math.copysign(betrag, cm)
+        self.park_corr_applied = True
+        seq = []
+        for k, (steer, cm) in enumerate(self.park_in_steps):
+            corr = 0.0
+            if abs(cm) >= 0.5:                      # zero moves (steering only) stay
+                corr = (self.park_fwd_corr_cm if cm > 0.0
+                        else self.park_rev_corr_cm)
+            if k < len(self.park_move_corr):
+                corr += self.park_move_corr[k]
+            if corr != 0.0 and abs(cm) >= 0.5:
+                magnitude = max(0.5, abs(cm) + corr)   # direction stays, minimum travel 0.5 cm
+                new = math.copysign(magnitude, cm)
                 self.get_logger().info(
-                    "Einparken Zug %d: %+.1f statt %+.1f cm (Korrektur %+.1f)."
-                    % (k + 1, neu, cm, korr))
-                cm = neu
-            folge.append((lenk, cm))
-        self.park_einpark = folge
-        if len(self.ausp_bahn) != len(folge) + 1:
-            self._park_referenz_aus_folge(folge)
+                    "Parking move %d: %+.1f instead of %+.1f cm (correction %+.1f)."
+                    % (k + 1, new, cm, corr))
+                cm = new
+            seq.append((steer, cm))
+        self.park_in_steps = seq
+        if len(self.unpark_trajectory) != len(seq) + 1:
+            self._park_reference_from_sequence(seq)
         self.get_logger().info(
-            "Einparken: %d Zuege aus der umgekehrten Ausparkfolge." % len(folge))
-        self._park_zuege_starten(list(folge), 'ein')
+            "Parking: %d moves from the reversed unpark sequence." % len(seq))
+        self._park_start_moves(list(seq), 'in')
 
-    def _park_referenz_aus_folge(self, folge):
-        """Soll-Kurse fuer die Bogenkorrektur, wenn es keine gemessene
-        Ausparkbahn gibt (eigene Einparkfolge, innen/mitte-Folge, Einparktest).
+    def _park_reference_from_sequence(self, seq):
+        """Target headings for the arc correction when there is no measured
+        unpark trajectory (own park sequence, inner/middle sequence, park test).
 
-        Die Folge wird mit dem Fahrmodell ab Kurs der Geraden abgefahren; die
-        Kurse an den Zuggrenzen sind die Sollwerte. Ohne das blieb ein
-        Kursfehler der Startlage (gerader Anfahrtszug mit Lenkspiel: bis zu
-        4-5 grad) unkorrigiert bis in die Luecke. ausp_bahn wird in der
-        Reihenfolge des Ausparkens abgelegt (_park_ziel_kurse: Einparkzug k =
-        Ausparkzug n-1-k rueckwaerts)."""
+        The sequence is run through the drive model from the heading of the
+        straight; the headings at the move boundaries are the targets. Without
+        that a heading error of the start pose (straight approach move with
+        steering play: up to 4-5 deg) stayed uncorrected all the way into the
+        bay. unpark_trajectory is stored in the order of unparking
+        (_park_target_headings: park move k = unpark move n-1-k in reverse)."""
         try:
-            _nx, _ny, _dw, tx, ty = self._park_gerade()
+            _nx, _ny, _dw, tx, ty = self._park_straight()
             th0 = math.atan2(ty, tx)
         except Exception:
-            if self.park_ursprung is None:
+            if self.park_origin is None:
                 return
-            th0 = self.park_ursprung[2]
-        grenzen = {}
-        for pose, nr in bahn((0.0, 0.0, th0), folge):
-            grenzen[nr] = pose
-        posen = [grenzen.get(k) for k in range(len(folge) + 1)]
-        for k in range(1, len(posen)):          # Zug ohne Weg: Pose bleibt
-            if posen[k] is None:
-                posen[k] = posen[k - 1]
-        self.ausp_bahn = list(reversed(posen))
+            th0 = self.park_origin[2]
+        bounds = {}
+        for pose, step_no in trajectory((0.0, 0.0, th0), seq):
+            bounds[step_no] = pose
+        poses = [bounds.get(k) for k in range(len(seq) + 1)]
+        for k in range(1, len(poses)):          # move without travel: pose stays
+            if poses[k] is None:
+                poses[k] = poses[k - 1]
+        self.unpark_trajectory = list(reversed(poses))
         self.get_logger().info(
-            "Einparken: Soll-Kurse aus dem Fahrmodell (keine gemessene Ausparkbahn), "
-            "Bogenkorrektur aktiv: %s, Ende %+.1f grad zur Geraden."
-            % (", ".join("%+.1f" % math.degrees(wrap(p[2] - th0)) for p in posen[1:]),
-               math.degrees(wrap(posen[-1][2] - th0))))
+            "Parking: target headings from the drive model (no measured unpark trajectory), "
+            "arc correction active: %s, end %+.1f deg to the straight."
+            % (", ".join("%+.1f" % math.degrees(wrap(p[2] - th0)) for p in poses[1:]),
+               math.degrees(wrap(poses[-1][2] - th0))))
 
-    def _einparken_fertig(self, x, y, theta):
-        # Wie beim Abbruch die Positionsfahrt ausdruecklich abloesen: /cmd_vel
-        # erreicht den ESP waehrend einer Positionsfahrt nicht. Haelt er sonst
-        # seine letzte Zielposition weiter, faehrt er beim Zurueckstellen fuer
-        # den naechsten Lauf dorthin zurueck. Hier gefahrlos -- danach DONE.
+    def _park_done(self, x, y, theta):
+        # As with an abort, explicitly replace the position move: /cmd_vel does
+        # not reach the ESP during a position move. If it otherwise kept its
+        # last target position, it would drive back there when being reset for
+        # the next run. Harmless here -- DONE afterwards.
         self.pub_motor.publish(Int32(data=0))
-        self._ausparken_pid(self.ausparken_pid_nachher)
+        self._unpark_pid(self.unpark_pid_after)
         self.publish_stop()
         self.state = 'DONE'
-        r = self._bucht_abstaende(x, y, theta)
+        r = self._bay_dists(x, y, theta)
         if r is not None:
-            heck, front, _ = r
-            self._log(min(heck, front) < 0.0,
-                "Endlage laut Buchtmessung: Heck %.1f cm, Front %.1f cm Luft%s."
-                % (heck * 100, front * 100,
-                   '' if min(heck, front) >= 0.0 else ' -- steht NICHT ganz in der Bucht'))
-        if not self._lok_ok():
+            rear, front, _ = r
+            self._log(min(rear, front) < 0.0,
+                "Final pose from the bay measurement: rear %.1f cm, front %.1f cm clearance%s."
+                % (rear * 100, front * 100,
+                   '' if min(rear, front) >= 0.0 else ' -- NOT standing fully in the bay'))
+        if not self._loc_ok():
             self.get_logger().warn(
-                "Lokalisierung beim Einparken '%s' -- die Endlage ist NICHT gesichert, "
-                "die Zahlen hier koennen falsch sein." % self.lok_state)
-        # Wandbezogen berichten -- genau das, was man mit dem Lineal nachmisst.
+                "Localisation while parking '%s' -- the final pose is NOT certain, "
+                "the numbers here may be wrong." % self.loc_state)
+        # Report wall-relative -- exactly what you re-measure with the ruler.
         try:
-            nx, ny, dw, tx, ty = self._park_gerade()
+            nx, ny, dw, tx, ty = self._park_straight()
             q = (nx * x + ny * y) - dw
-            kurs = math.degrees(wrap(theta - math.atan2(ty, tx)))
-            achsdiff = 0.105 * math.sin(math.radians(kurs)) * 100   # Radstand
+            heading = math.degrees(wrap(theta - math.atan2(ty, tx)))
+            axle_diff = 0.105 * math.sin(math.radians(heading)) * 100   # wheelbase
             self.get_logger().info(
-                "EINGEPARKT. base_link %.1f cm von der Aussenbande (erwartet "
-                "%s), Kurs %+.1f grad zur Bande = %.1f cm Achsdifferenz "
-                "(Regel: hoechstens 2 cm)."
+                "PARKED. base_link %.1f cm from the outer wall (expected "
+                "%s), heading %+.1f deg to the wall = %.1f cm axle difference "
+                "(rule: at most 2 cm)."
                 % (q * 100,
-                   '%.1f cm' % (self.park_q_luecke * 100)
-                   if self.park_q_luecke is not None else '?',
-                   kurs, abs(achsdiff)))
+                   '%.1f cm' % (self.park_q_bay * 100)
+                   if self.park_q_bay is not None else '?',
+                   heading, abs(axle_diff)))
         except Exception:
-            self.get_logger().info("EINGEPARKT bei (%.2f, %.2f)." % (x, y))
+            self.get_logger().info("PARKED at (%.2f, %.2f)." % (x, y))
 
-    def _ausparken_scanhalt(self, x, y, theta):
-        """Stillstehen, damit die Wahrnehmung die Startgerade aufnehmen kann.
+    def _unpark_scan_hold(self, x, y, theta):
+        """Stand still so that the perception can take in the start straight.
 
-        Der Roboter steht hier zum ersten Mal in der Spur und schaut sie
-        entlang. Fahrend bricht die Bildrate der Kamera von 15,5 auf 2,5 Hz
-        ein und die Farbausbeute von 38 auf 2 Prozent -- die Pylonen der
-        Startgeraden sind jetzt besser zu sehen als spaeter im Lauf.
+        The robot stands in the lane here for the first time and looks along
+        it. While driving the camera frame rate drops from 15.5 to 2.5 Hz and
+        the colour yield from 38 to 2 percent -- the pylons of the start
+        straight can be seen better now than later in the run.
         """
         self.publish_stop()
-        # Parklinie messen: Abstand zur Aussenbande, im Stand gemittelt.
-        # CCW -> Aussenbande rechts, CW -> links.
-        if self.wall_dist is not None and self.ausp_richtung:
+        # Measure the parking line: distance to the outer wall, averaged at standstill.
+        # CCW -> outer wall on the right, CW -> left.
+        if self.wall_dist is not None and self.unpark_direction:
             d_l, d_r = self.wall_dist
-            self.park_q_proben.append(d_r if self.ausp_richtung == 'CCW' else d_l)
-        # Wiederholen, solange gehalten wird: der Publisher ist nicht latched,
-        # und wer erst jetzt zuhoert, soll sie trotzdem bekommen.
-        if self.ausparken_setzt_richtung and self.ausp_richtung:
-            self.pub_park_dir.publish(String(data=self.ausp_richtung))
-        t = self.now_s() - self.ausp_t0
+            self.park_q_samples.append(d_r if self.unpark_direction == 'CCW' else d_l)
+        # Repeat as long as it holds: the publisher is not latched, and
+        # whoever only listens now should still get it.
+        if self.unpark_sets_direction and self.unpark_direction:
+            self.pub_park_dir.publish(String(data=self.unpark_direction))
+        t = self.now_s() - self.unpark_t0
         if self.geometry_ready():
-            if self.ausp_scan_hier is None:
-                vorn = self._abstand_erste_ecke(x, y, theta)
-                self.ausp_scan_hier = (vorn is not None
-                                       and vorn < self.ausparken_scan_ersetzt_bis)
+            if self.unpark_scan_here is None:
+                front_d = self._first_corner_dist(x, y, theta)
+                self.unpark_scan_here = (front_d is not None
+                                         and front_d < self.unpark_scan_replaces_until)
                 self.get_logger().info(
-                    "Ecke 1 liegt %s voraus -> %s." % (
-                        '%.2f m' % vorn if vorn is not None else '?',
-                        'hier scannen (%.1f s Halt)' % self.ausparken_halt_s
-                        if self.ausp_scan_hier else
-                        'gleich losfahren, Scan-Stopp am Ende der Geraden'))
-            halt = self.ausparken_halt_s if self.ausp_scan_hier else self.ausparken_mess_s
-            if t < halt:
-                self.get_logger().info("Halt nach dem Ausparken, noch %.1f s."
-                                       % (halt - t), throttle_duration_sec=0.5)
+                    "Corner 1 lies %s ahead -> %s." % (
+                        '%.2f m' % front_d if front_d is not None else '?',
+                        'scan here (%.1f s hold)' % self.unpark_hold_s
+                        if self.unpark_scan_here else
+                        'drive off at once, scan stop at the end of the straight'))
+            hold = self.unpark_hold_s if self.unpark_scan_here else self.unpark_measure_s
+            if t < hold:
+                self.get_logger().info("Hold after unparking, %.1f s to go."
+                                       % (hold - t), throttle_duration_sec=0.5)
                 return
-            self._ausparken_uebergeben()
+            self._unpark_handover()
             return
-        if t < self.ausparken_geo_timeout_s:
-            self.get_logger().info("Warte auf die Eckengeometrie (%.1f s)." % t,
+        if t < self.unpark_geo_timeout_s:
+            self.get_logger().info("Waiting for the corner geometry (%.1f s)." % t,
                                    throttle_duration_sec=0.5)
             return
         self.get_logger().warn(
-            "Nach %.1f s noch keine Eckengeometrie -- fahre trotzdem los "
-            "(Startmodus, Spurmitte)." % t)
-        self._ausparken_uebergeben()
+            "Still no corner geometry after %.1f s -- driving off anyway "
+            "(start mode, lane centre)." % t)
+        self._unpark_handover()
 
-    def _abstand_erste_ecke(self, x, y, theta):
-        """Abstand entlang des Kurses bis zum Eckpunkt der ersten Ecke."""
+    def _first_corner_dist(self, x, y, theta):
+        """Distance along the heading to the corner point of the first corner."""
         idx = self.pick_first_corner(x, y, theta)
         if idx is None:
             return None
         c = self.corners[idx]
         return (c[0] - x) * math.cos(theta) + (c[1] - y) * math.sin(theta)
 
-    def _ausparken_richtung_uebernehmen(self):
-        """Wer hat bei der Fahrtrichtung das letzte Wort?
+    def _unpark_adopt_direction(self):
+        """Who has the last word on the direction of travel?
 
-        Beim Parken ist die Richtung sicher messbar, aus der Eckengeometrie
-        heraus nicht: der scan_processor sieht aus der Luecke keine brauchbare
-        Ecke, latcht aber trotzdem. In einem Lauf standen dort CW aus dem
-        Ausparken und CCW aus der Wahrnehmung. Mit ausparken_setzt_richtung
-        gilt deshalb das Parken, sonst weiter /race_direction.
+        When parked the direction can be measured reliably, from the corner
+        geometry it cannot: the scan_processor sees no usable corner from the
+        bay, but latches anyway. In one run CW from the unparking and CCW from
+        the perception stood there. With unpark_sets_direction the parking
+        bay therefore applies, otherwise /race_direction as before.
         """
-        if not self.ausp_richtung:
+        if not self.unpark_direction:
             return
-        passt = (self.race_direction is None
-                 or self.race_direction == self.ausp_richtung)
+        fits = (self.race_direction is None
+                or self.race_direction == self.unpark_direction)
 
-        if not self.ausparken_setzt_richtung:
-            if passt:
+        if not self.unpark_sets_direction:
+            if fits:
                 self.get_logger().info(
-                    "Fahrtrichtung %s (aus der Eckengeometrie), das Ausparken "
-                    "kam auf dasselbe." % (self.race_direction or self.ausp_richtung))
+                    "Direction of travel %s (from the corner geometry), unparking "
+                    "came to the same." % (self.race_direction or self.unpark_direction))
             else:
                 self.get_logger().error(
-                    "WIDERSPRUCH: Ausparken %s, /race_direction %s. "
-                    "ausparken_setzt_richtung ist aus, also gilt "
-                    "/race_direction -- der Lauf geht damit vermutlich "
-                    "andersherum als geplant."
-                    % (self.ausp_richtung, self.race_direction))
+                    "CONFLICT: unparking %s, /race_direction %s. "
+                    "unpark_sets_direction is off, so "
+                    "/race_direction applies -- the run will then probably go "
+                    "the other way round than planned."
+                    % (self.unpark_direction, self.race_direction))
             return
 
-        # Das Parken hat das Wort.
-        self.pub_park_dir.publish(String(data=self.ausp_richtung))
-        if passt:
+        # The parking bay has the word.
+        self.pub_park_dir.publish(String(data=self.unpark_direction))
+        if fits:
             self.get_logger().info(
-                "Fahrtrichtung %s aus der Parkluecke%s."
-                % (self.ausp_richtung,
-                   ", bestaetigt durch die Eckengeometrie" if self.race_direction
-                   else " (die Eckengeometrie hat noch nicht gelatcht)"))
+                "Direction of travel %s from the parking bay%s."
+                % (self.unpark_direction,
+                   ", confirmed by the corner geometry" if self.race_direction
+                   else " (the corner geometry has not latched yet)"))
         else:
             self.get_logger().warn(
-                "Fahrtrichtung %s aus der Parkluecke -- /race_direction meldet "
-                "%s. Der Latch stammt aus der Zeit IN der Luecke, wo die "
-                "Eckenerkennung nichts Sinnvolles sehen kann. Das Parken "
-                "gilt; der scan_processor bekommt sie ueber "
-                "/parking_direction." % (self.ausp_richtung, self.race_direction))
-        self.race_direction = self.ausp_richtung
+                "Direction of travel %s from the parking bay -- /race_direction reports "
+                "%s. The latch dates from the time IN the bay, where the "
+                "corner detection cannot see anything sensible. The parking bay "
+                "applies; the scan_processor gets it via "
+                "/parking_direction." % (self.unpark_direction, self.race_direction))
+        self.race_direction = self.unpark_direction
 
-    def _ausparken_uebergeben(self):
-        """An die normale Zustandsmaschine abgeben.
+    def _unpark_handover(self):
+        """Hand over to the normal state machine.
 
-        Die Richtung ist zu diesem Zeitpunkt schon gesetzt und verschickt --
-        das passiert in _ausparken_fertig, vor dem Scan-Halt.
+        The direction is already set and sent at this point -- that happens
+        in _unpark_done, before the scan hold.
         """
-        # Einpark-Startpose JETZT aufzeichnen, nicht direkt nach dem letzten
-        # Zug: dazwischen liegt der Scan-Halt, in dem die Richtung an den
-        # scan_processor geht und der die Karte umschaltet. Ein Sprung der
-        # Pose beim Umschalten ist damit schon eingerechnet -- genau dieser
-        # Sprung hat den CCW-Ausparktest verfaelscht. Der Roboter hat sich
-        # seit dem letzten Zug nicht bewegt.
-        if self.pose is not None and self.ausp_schritte:
+        # Record the park start pose NOW, not right after the last move: in
+        # between lies the scan hold, in which the direction goes to the
+        # scan_processor and that switches the map. A jump of the pose at the
+        # switch is thereby already included -- exactly this jump falsified
+        # the CCW unpark test. The robot has not moved since the last move.
+        if self.pose is not None and self.unpark_steps_run:
             self.park_start = self.pose
-            # Selbstdiagnose Kartenwechsel: seit dem letzten Zug steht er still,
-            # jede Posenaenderung ist also ein Sprung der Lokalisierung. Die
-            # Lueckenlage wurde VOR dem Sprung gemerkt und wird mitverschoben,
-            # sonst misst die Schlussmeldung den Sprung statt der Parkgenauigkeit.
-            if self.ausp_ende_pose is not None:
-                ax, ay, ath = self.ausp_ende_pose
+            # Self-diagnosis map change: it has stood still since the last
+            # move, so every pose change is a jump of the localisation. The
+            # bay pose was remembered BEFORE the jump and is shifted along,
+            # otherwise the final report measures the jump instead of the parking accuracy.
+            if self.unpark_end_pose is not None:
+                ax, ay, ath = self.unpark_end_pose
                 bx, by, bth = self.park_start
                 dth = wrap(bth - ath)
-                sprung = math.hypot(bx - ax, by - ay)
-                self._log(sprung > 0.01 or abs(math.degrees(dth)) > 1.0,
-                    "Kartenwechsel im Scan-Halt: Pose um %.1f cm / %+.1f grad "
-                    "gesprungen (Roboter stand still)."
-                    % (sprung * 100, math.degrees(dth)))
-                if self.park_ursprung is not None:
-                    # starre Transformation alt -> neu auf die Lueckenlage
-                    ux, uy, uth = self.park_ursprung
+                jump = math.hypot(bx - ax, by - ay)
+                self._log(jump > 0.01 or abs(math.degrees(dth)) > 1.0,
+                    "Map change during the scan hold: pose jumped by %.1f cm / %+.1f deg "
+                    "(robot was standing still)."
+                    % (jump * 100, math.degrees(dth)))
+                if self.park_origin is not None:
+                    # rigid transform old -> new applied to the bay pose
+                    ux, uy, uth = self.park_origin
                     c, sn = math.cos(dth), math.sin(dth)
                     rx, ry = ux - ax, uy - ay
-                    self.park_ursprung = (bx + c * rx - sn * ry,
-                                          by + sn * rx + c * ry,
-                                          wrap(uth + dth))
-                neu = []
+                    self.park_origin = (bx + c * rx - sn * ry,
+                                        by + sn * rx + c * ry,
+                                        wrap(uth + dth))
+                new = []
                 c, sn = math.cos(dth), math.sin(dth)
-                for (px_, py_, pth_) in self.ausp_bahn:
+                for (px_, py_, pth_) in self.unpark_trajectory:
                     rx, ry = px_ - ax, py_ - ay
-                    neu.append((bx + c * rx - sn * ry, by + sn * rx + c * ry,
+                    new.append((bx + c * rx - sn * ry, by + sn * rx + c * ry,
                                 wrap(pth_ + dth)))
-                self.ausp_bahn = neu
-            if self.ausparken_halt_s < 1.0:
+                self.unpark_trajectory = new
+            if self.unpark_hold_s < 1.0:
                 self.get_logger().warn(
-                    "Einpark-Startpose ohne Beruhigungszeit aufgezeichnet "
-                    "(ausparken_halt_s=%.1f) -- springt die Pose beim "
-                    "Kartenwechsel, stimmt sie nicht." % self.ausparken_halt_s)
+                    "Park start pose recorded without settling time "
+                    "(unpark_hold_s=%.1f) -- if the pose jumps at the "
+                    "map change, it is wrong." % self.unpark_hold_s)
             self.get_logger().info(
-                "Einpark-Startpose gemerkt: (%.3f, %.3f), Kurs %+.1f grad."
+                "Park start pose remembered: (%.3f, %.3f), heading %+.1f deg."
                 % (self.park_start[0], self.park_start[1],
                    math.degrees(self.park_start[2])))
-        self._parklinie_festlegen()
-        self._park_versatz_anwenden()
-        self.erste_ecke_pruefen = True
-        # Der Taster ist bereits gedrueckt worden, sonst waeren wir nicht hier.
+        self._choose_park_line()
+        self._park_apply_offset()
+        self.first_corner_check = True
+        # The button has already been pressed, otherwise we would not be here.
         self.button_pressed = True
-        if self._erste_ecke_zuruecksetzen():
+        if self._first_corner_back_up():
             return
         self.state = 'WAIT_INPUTS'
-        self.get_logger().info("Weiter zum Rennen. Warte auf Eingaben...")
+        self.get_logger().info("On to the race. Waiting for inputs...")
 
-    def _einpark_test_vorbereiten(self):
-        """Einpark-Test: Luecke, Einpark-Startpose, Parklinie und Einparkfolge
-        so setzen, als waere er ausgeparkt. False = Geometrie fehlt noch."""
+    def _park_test_prepare(self):
+        """Park test: set bay, park start pose, parking line and park sequence
+        as if it had unparked. False = geometry still missing."""
         if not self.geometry_ready() or self.pose is None:
             return False
-        richtung = self.test_richtung
-        if richtung not in ('CW', 'CCW'):
-            self.get_logger().error("test_richtung=%r -- CW oder CCW." % richtung)
+        direction = self.test_direction
+        if direction not in ('CW', 'CCW'):
+            self.get_logger().error("test_direction=%r -- CW or CCW." % direction)
             self.state = 'DONE'
             return False
-        if self.race_direction != richtung:
+        if self.race_direction != direction:
             self.get_logger().error(
-                "Einpark-Test %s, /race_direction meldet %s -- steht er richtig "
-                "herum auf der Startgeraden? Abbruch." % (richtung, self.race_direction))
+                "Park test %s, /race_direction reports %s -- is it standing the right "
+                "way round on the start straight? Aborting." % (direction, self.race_direction))
             self.state = 'DONE'
             return False
         x, y, th = self.pose
         idx = self.pick_first_corner(x, y, th)
         if idx is None:
             return False
-        nx, ny, dw = self.walls[self._entry_wall_idx(idx)]     # Aussenbande, n ins Feld
+        nx, ny, dw = self.walls[self._entry_wall_idx(idx)]     # outer wall, n into the field
         tx, ty = -ny, nx
         if tx * math.cos(th) + ty * math.sin(th) < 0.0:
-            tx, ty = -tx, -ty                                  # Fahrtrichtung
-        cx, cy = self.corners[idx]                             # Ecke an der Frontwand
-        f_b = self.test_bucht_front if self.test_bucht_front > 0.0 else (
-            1.245 if richtung == 'CCW' else 1.96)
-        q_b = self.test_bucht_q
-        # Lueckenlage: f_b vor der Frontwand, q_b von der Aussenbande
+            tx, ty = -tx, -ty                                  # direction of travel
+        cx, cy = self.corners[idx]                             # corner at the front wall
+        f_b = self.test_bay_front if self.test_bay_front > 0.0 else (
+            1.245 if direction == 'CCW' else 1.96)
+        q_b = self.test_bay_lat
+        # Bay pose: f_b from the front wall, q_b from the outer wall
         bx, by = cx - f_b * tx, cy - f_b * ty
         k = q_b - ((nx * bx + ny * by) - dw)
         bx, by = bx + k * nx, by + k * ny
         bth = math.atan2(ty, tx)
-        self.park_ursprung = (bx, by, bth)
-        ccw = richtung == 'CCW'
-        std_laengs = self.park_std_laengs_ccw if ccw else self.park_std_laengs_cw
-        std_quer = self.park_std_quer_ccw if ccw else self.park_std_quer_cw
-        self.park_start = (bx + std_laengs * tx + std_quer * nx,
-                           by + std_laengs * ty + std_quer * ny, bth)
-        self.park_q_luecke = q_b
-        self.park_q = q_b + std_quer
-        self.ausp_richtung = richtung
-        self.ausp_variante = 'test'
-        self.ausp_bahn = []                    # keine Referenzbahn -> ohne Bogenkorrektur
+        self.park_origin = (bx, by, bth)
+        ccw = direction == 'CCW'
+        std_long = self.park_std_long_ccw if ccw else self.park_std_long_cw
+        std_lat = self.park_std_lat_ccw if ccw else self.park_std_lat_cw
+        self.park_start = (bx + std_long * tx + std_lat * nx,
+                           by + std_long * ty + std_lat * ny, bth)
+        self.park_q_bay = q_b
+        self.park_q = q_b + std_lat
+        self.unpark_direction = direction
+        self.unpark_variant = 'test'
+        self.unpark_trajectory = []                    # no reference trajectory -> no arc correction
         try:
-            roh, herkunft = schritte_fuer(
-                richtung, gemeinsam=self.ausparken_schritte,
-                cw=self.ausparken_schritte_cw, ccw=self.ausparken_schritte_ccw)
-            tabelle = schritte_aus_flach(roh)
-        except ValueError as fehler:
-            self.get_logger().error("Einpark-Test: Schrittliste unbrauchbar: %s" % fehler)
+            raw, origin = steps_for(
+                direction, shared=self.unpark_steps,
+                cw=self.unpark_steps_cw, ccw=self.unpark_steps_ccw)
+            table = steps_from_flat(raw)
+        except ValueError as err:
+            self.get_logger().error("Park test: step list unusable: %s" % err)
             self.state = 'DONE'
             return False
-        self.ausp_schritte_std = spiegeln(tabelle, ccw)
-        self.ausp_schritte = list(self.ausp_schritte_std)
-        vorn = (cx - x) * tx + (cy - y) * ty
-        bis_start = (self.park_start[0] - x) * tx + (self.park_start[1] - y) * ty
-        if bis_start < 0.10:
+        self.unpark_steps_std = mirror_steps(table, ccw)
+        self.unpark_steps_run = list(self.unpark_steps_std)
+        front_d = (cx - x) * tx + (cy - y) * ty
+        to_start = (self.park_start[0] - x) * tx + (self.park_start[1] - y) * ty
+        if to_start < 0.10:
             self.get_logger().error(
-                "Einpark-Test: die Einpark-Startpose laege %.2f m %s ihm -- er muss "
-                "VOR der Luecke stehen (Anfang der Startgeraden, Nase Richtung "
-                "Luecke). Steht er %.2f m vor der Frontwand? test_richtung und "
-                "test_bucht_front pruefen. Abbruch, faehrt nicht."
-                % (abs(bis_start), hinter if bis_start < 0 else vor, vorn))
+                "Park test: the park start pose would lie %.2f m %s it -- it must "
+                "stand BEFORE the bay (start of the start straight, nose towards the "
+                "bay). Is it standing %.2f m from the front wall? Check test_direction and "
+                "test_bay_front. Aborting, does not drive."
+                % (abs(to_start), behind if to_start < 0 else before, front_d))
             self.park_start = None
             self.state = DONE
             self.publish_stop()
             return False
         self.get_logger().info(
-            "Einpark-Test %s: steht %.2f m vor der Frontwand, %.3f m von der "
-            "Aussenbande. Luecke angenommen %.3f m vor der Frontwand, %.3f m von "
-            "der Aussenbande; Einpark-Startpose %.1f cm laengs, %.1f cm quer davon "
-            "-> (%.3f, %.3f), Parklinie %.3f m. Einparkfolge: %s (%d Zuege)."
-            % (richtung, vorn, (nx * x + ny * y) - dw, f_b, q_b, std_laengs * 100,
-               std_quer * 100, self.park_start[0], self.park_start[1], self.park_q,
-               herkunft, len(tabelle)))
-        self._park_versatz_anwenden()
+            "Park test %s: stands %.2f m from the front wall, %.3f m from the "
+            "outer wall. Bay assumed %.3f m from the front wall, %.3f m from "
+            "the outer wall; park start pose %.1f cm long, %.1f cm lat from it "
+            "-> (%.3f, %.3f), parking line %.3f m. Park sequence: %s (%d moves)."
+            % (direction, front_d, (nx * x + ny * y) - dw, f_b, q_b, std_long * 100,
+               std_lat * 100, self.park_start[0], self.park_start[1], self.park_q,
+               origin, len(table)))
+        self._park_apply_offset()
         return True
 
-    def _erste_ecke_zuruecksetzen(self):
-        """Liegt der Einlenkpunkt von Ecke 1 hinter ihm, gerade dorthin
-        zuruecksetzen (siehe Parameter erste_ecke_zurueck). True = Zug laeuft."""
-        if (not self.erste_ecke_zurueck or self.pose is None
-                or not self.geometry_ready() or not self.ausp_richtung):
+    def _first_corner_back_up(self):
+        """If the turn-in point of corner 1 lies behind it, back up straight
+        to there (see parameter first_corner_backup). True = move is running."""
+        if (not self.first_corner_backup or self.pose is None
+                or not self.geometry_ready() or not self.unpark_direction):
             return False
         x, y, th = self.pose
         idx = self.pick_first_corner(x, y, th)
         if idx is None:
             return False
-        # Probehalber planen (derselbe Bogen wie gleich beim Losfahren, inkl.
-        # Pylonen-Radius), danach den alten Zustand wiederherstellen: nach dem
-        # Zuruecksetzen wird aus der neuen Lage frisch geplant.
-        alt = (self.corner_idx, self.arc)
+        # Plan on trial (the same arc as when driving off in a moment, incl.
+        # pylon radius), then restore the old state: after backing up it
+        # plans afresh from the new pose.
+        old = (self.corner_idx, self.arc)
         self.corner_idx = idx
         try:
             ok = self.plan_arc(th)
             arc = self.arc
         finally:
-            self.corner_idx, self.arc = alt
+            self.corner_idx, self.arc = old
         if not ok or arc is None:
             return False
         tx, ty = arc['travel']
         tA = arc['T_A']
         to_TA = (tA[0] - x) * tx + (tA[1] - y) * ty
-        if to_TA > -self.erste_ecke_zurueck_min:
+        if to_TA > -self.first_corner_backup_min:
             return False
-        # Waere der Bogen an der Ist-Pose gut genug? (wie _bogen_an_pose_verankern)
+        # Would the arc at the actual pose be good enough? (like _anchor_arc_at_pose)
         sg = arc['s']
         bx, by, lb = arc['LB']
-        nenner = 1.0 - sg * (bx * -math.sin(th) + by * math.cos(th))
-        abst = (bx * x + by * y) - lb
-        if nenner >= 0.2 and abst > 0.0:
-            r_a = abst / nenner
-            verschub = max(0.0, (self.min_turn_radius - r_a) * nenner)
+        denom = 1.0 - sg * (bx * -math.sin(th) + by * math.cos(th))
+        dist_line = (bx * x + by * y) - lb
+        if denom >= 0.2 and dist_line > 0.0:
+            r_a = dist_line / denom
+            push_out = max(0.0, (self.min_turn_radius - r_a) * denom)
             ux, uy = arc['u_B']
-            s_aus = (x * ux + y * uy) + max(r_a, self.min_turn_radius)
-            w_aus = self._exit_wall_idx(idx)
-            voraus = [(o['x'] * ux + o['y'] * uy) - s_aus
-                      for o in (self.obstacles or []) if o['wall'] == w_aus]
-            voraus = [v for v in voraus if v > 0.0]
-            platz = (min(voraus) - self.obs_clear_before) if voraus else 2.0
-            steig = verschub / platz if platz > 0.01 else float('inf')
-            if verschub <= 0.02 or steig <= self.erste_ecke_zurueck_steigung:
+            s_exit = (x * ux + y * uy) + max(r_a, self.min_turn_radius)
+            w_exit = self._exit_wall_idx(idx)
+            ahead = [(o['x'] * ux + o['y'] * uy) - s_exit
+                     for o in (self.obstacles or []) if o['wall'] == w_exit]
+            ahead = [v for v in ahead if v > 0.0]
+            space = (min(ahead) - self.obs_clear_before) if ahead else 2.0
+            slope = push_out / space if space > 0.01 else float('inf')
+            if push_out <= 0.02 or slope <= self.first_corner_backup_slope:
                 self.get_logger().info(
-                    "Ecke 1: Einlenkpunkt %.2f m hinter ihm, Bogen an der Ist-Pose "
-                    "kommt %.0f cm weiter aussen heraus -- bis zur naechsten Pylone "
-                    "%.2f m, Steigung %.2f: kein Zuruecksetzen."
-                    % (-to_TA, verschub * 100, platz, steig))
+                    "Corner 1: turn-in point %.2f m behind it, arc at the actual pose "
+                    "comes out %.0f cm further outward -- to the next pylon "
+                    "%.2f m, slope %.2f: no backing up."
+                    % (-to_TA, push_out * 100, space, slope))
                 return False
-        weg = -to_TA + 0.02
-        if weg > self.erste_ecke_zurueck_max:
+        dist = -to_TA + 0.02
+        if dist > self.first_corner_backup_max:
             self.get_logger().warn(
-                "Ecke 1: Einlenkpunkt %.2f m hinter ihm -- mehr als %.2f m, "
-                "setzt nicht zurueck (Bogen wird an der Ist-Pose verankert)."
-                % (-to_TA, self.erste_ecke_zurueck_max))
+                "Corner 1: turn-in point %.2f m behind it -- more than %.2f m, "
+                "does not back up (arc is anchored at the actual pose)."
+                % (-to_TA, self.first_corner_backup_max))
             return False
-        # Rueckweg frei? Umriss entlang der Geraden gegen die bekannten Pylonen.
+        # Way back clear? Outline along the straight against the known pylons.
         for o in (self.obstacles or []):
             for k in range(11):
-                sv = -weg * k / 10.0
+                sv = -dist * k / 10.0
                 p = (x + sv * math.cos(th), y + sv * math.sin(th), th)
-                luft = self._abstand_umriss(p, o['x'], o['y']) - BLOCK_HALB
-                if luft < 0.03:
+                gap = self._outline_dist(p, o['x'], o['y']) - BLOCK_HALF
+                if gap < 0.03:
                     self.get_logger().warn(
-                        "Ecke 1: Einlenkpunkt %.2f m hinter ihm, aber Pylone "
-                        "#%d im Rueckweg (%.1f cm) -- setzt nicht zurueck."
-                        % (-to_TA, o['id'], luft * 100))
+                        "Corner 1: turn-in point %.2f m behind it, but pylon "
+                        "#%d in the way back (%.1f cm) -- does not back up."
+                        % (-to_TA, o['id'], gap * 100))
                     return False
-        befehl = -weg / max(self.einparken_zug_skala, 0.5)
+        command = -dist / max(self.park_move_scale, 0.5)
         self.get_logger().info(
-            "Ecke 1: Einlenkpunkt %.2f m hinter ihm -- setzt %.1f cm gerade "
-            "zurueck (befohlen %.1f cm Radweg), statt mit dem kleinsten Radius "
-            "zu verankern." % (-to_TA, weg * 100, befehl * 100))
-        self.ausp_pos_prev = None
-        # Die Ausparkfolge ist die Vorlage fuers Einparken (umgekehrt) -- der
-        # Rueckwaertszug darf sie nicht ueberschreiben.
-        self.ausp_schritte_vor_zurueck = list(self.ausp_schritte)
-        self._ausparken_pid(self.ausparken_pid)
-        self._park_zuege_starten(
-            spiegeln([(0.0, befehl * 100.0)], self.ausp_richtung == 'CCW'), 'zurueck')
+            "Corner 1: turn-in point %.2f m behind it -- backs up %.1f cm straight "
+            "(commanded %.1f cm wheel travel) instead of anchoring with the smallest "
+            "radius." % (-to_TA, dist * 100, command * 100))
+        self.unpark_pos_prev = None
+        # The unpark sequence is the template for parking (reversed) -- the
+        # reverse move must not overwrite it.
+        self.unpark_steps_before_backup = list(self.unpark_steps_run)
+        self._unpark_pid(self.unpark_pid)
+        self._park_start_moves(
+            mirror_steps([(0.0, command * 100.0)], self.unpark_direction == 'CCW'), 'back')
         return True
 
-    def _erste_ecke_zurueck_fertig(self, x, y, theta):
-        self.ausp_schritte = self.ausp_schritte_vor_zurueck
-        self.ausp_pos_prev = None
-        self._ausparken_pid(self.ausparken_pid_nachher)
+    def _first_corner_backup_done(self, x, y, theta):
+        self.unpark_steps_run = self.unpark_steps_before_backup
+        self.unpark_pos_prev = None
+        self._unpark_pid(self.unpark_pid_after)
         self.publish_stop()
-        self.arc = None                  # aus der neuen Lage frisch planen
+        self.arc = None                  # plan afresh from the new pose
         self.corner_idx = None
         self.state = 'WAIT_INPUTS'
         self.get_logger().info(
-            "Zurueckgesetzt: Pose (%.2f, %.2f), Kurs %+.1f grad. Weiter zum Rennen."
+            "Backed up: pose (%.2f, %.2f), heading %+.1f deg. On to the race."
             % (x, y, math.degrees(theta)))
 
-    # ------------------------------------------------ Notfall-Rangieren
-    def _rangieren(self, weg, grund):
-        """Statt Nothalt: ein Stueck zuruecksetzen und neu planen. Rueckwaerts
-        wird dabei zur Fahrtrichtung der Geraden hin gelenkt, damit er nach
-        dem Zug nicht wieder schraeg auf dieselbe Bande zeigt. True = Zug laeuft."""
-        if (not self.rangieren or self.pose is None or not hasattr(self, 'pub_move')
-                or self.rangier_versuche >= self.rangier_max):
-            if self.rangieren and self.rangier_versuche >= self.rangier_max:
+    # ------------------------------------------ Emergency manoeuvring
+    def _manoeuvre(self, dist, reason):
+        """Instead of an emergency halt: back up a bit and replan. In reverse
+        it steers towards the direction of the straight, so that after the
+        move it does not point obliquely at the same wall again. True = move is running."""
+        if (not self.manoeuvre or self.pose is None or not hasattr(self, 'pub_move')
+                or self.manoeuvre_attempts >= self.manoeuvre_max):
+            if self.manoeuvre and self.manoeuvre_attempts >= self.manoeuvre_max:
                 self.get_logger().error(
-                    "Rangieren: schon %d Versuche an dieser Ecke -- gibt auf (%s)."
-                    % (self.rangier_versuche, grund))
+                    "Manoeuvring: already %d attempts at this corner -- giving up (%s)."
+                    % (self.manoeuvre_attempts, reason))
             return False
         x, y, th = self.pose
-        lenk = 0.0
+        steer = 0.0
         if self.arc is not None:
             tr = self.arc['travel']
-            fehler = wrap(th - math.atan2(tr[1], tr[0]))
-            # rueckwaerts dreht Linkseinschlag den Kurs nach rechts
-            lenk = max(-100.0, min(100.0, 100.0 * fehler / math.radians(30.0)))
-        weg = max(0.08, min(weg, 0.40))
-        befehl = -weg / max(self.einparken_zug_skala, 0.5)
-        self.rangier_versuche += 1
+            err = wrap(th - math.atan2(tr[1], tr[0]))
+            # in reverse a left lock turns the heading to the right
+            steer = max(-100.0, min(100.0, 100.0 * err / math.radians(30.0)))
+        dist = max(0.08, min(dist, 0.40))
+        command = -dist / max(self.park_move_scale, 0.5)
+        self.manoeuvre_attempts += 1
         self.publish_stop()
         self.get_logger().warn(
-            "NOTFALL-RANGIEREN %d/%d: %s -- setzt %.0f cm zurueck (Lenkung %+.0f %%, "
-            "Kurs %+.0f grad zur Geraden), dann neu planen."
-            % (self.rangier_versuche, self.rangier_max, grund, weg * 100, lenk,
-               math.degrees(fehler) if self.arc is not None else 0.0))
-        self.rangier_zustand_vorher = self.state
-        self.ausp_schritte_vor_rangieren = list(self.ausp_schritte)
-        self.ausp_pos_prev = None
-        self._ausparken_pid(self.ausparken_pid)
-        self._park_zuege_starten([(lenk_auf_leitung(lenk), befehl * 100.0)], 'rangieren')
+            "EMERGENCY MANOEUVRE %d/%d: %s -- backs up %.0f cm (steering %+.0f %%, "
+            "heading %+.0f deg to the straight), then replan."
+            % (self.manoeuvre_attempts, self.manoeuvre_max, reason, dist * 100, steer,
+               math.degrees(err) if self.arc is not None else 0.0))
+        self.manoeuvre_prev_state = self.state
+        self.unpark_steps_before_manoeuvre = list(self.unpark_steps_run)
+        self.unpark_pos_prev = None
+        self._unpark_pid(self.unpark_pid)
+        self._park_start_moves([(steer_to_wire(steer), command * 100.0)], 'manoeuvre')
         return True
 
-    def _rangieren_fertig(self, x, y, theta):
-        self.ausp_schritte = self.ausp_schritte_vor_rangieren
-        self.ausp_pos_prev = None
-        self._ausparken_pid(self.ausparken_pid_nachher)
+    def _manoeuvre_done(self, x, y, theta):
+        self.unpark_steps_run = self.unpark_steps_before_manoeuvre
+        self.unpark_pos_prev = None
+        self._unpark_pid(self.unpark_pid_after)
         self.publish_stop()
         keep_o_in = self.arc.get('o_in') if self.arc else None
         self.arc = None
@@ -3628,17 +3647,17 @@ class Round1Controller(Node):
         self.plan_arc(theta, o_in_override=keep_o_in)
         self.plan_obstacle_path()
         if not self.obs_path:
-            self._rueckfuehr_pfad()
+            self._return_path()
         self.state = 'DRIVE'
         self.get_logger().info(
-            "Rangiert: Pose (%.2f, %.2f), Kurs %+.1f grad -- neu geplant, weiter."
+            "Manoeuvred: pose (%.2f, %.2f), heading %+.1f deg -- replanned, carrying on."
             % (x, y, math.degrees(theta)))
 
-    def anstoss_scan_cb(self, msg):
-        """Etwas direkt vor der Nase (in Wagenbreite)? Dann anhalten und
-        rangieren. Nur vorwaerts in DRIVE/TURN -- Aus- und Einparken fahren
-        absichtlich dicht an die Waende."""
-        if (not self.rangieren or self.rangier_anstoss <= 0.0
+    def trigger_scan_cb(self, msg):
+        """Something right in front of the nose (within the car width)? Then
+        stop and manoeuvre. Only forward in DRIVE/TURN -- unparking and
+        parking deliberately drive close to the walls."""
+        if (not self.manoeuvre or self.manoeuvre_trigger_dist <= 0.0
                 or self.state not in ('DRIVE', 'TURN') or self.last_cmd[0] < 0.05):
             return
         r = np.asarray(msg.ranges, dtype=np.float64)
@@ -3647,21 +3666,21 @@ class Round1Controller(Node):
         if not ok.any():
             return
         r, a = r[ok], a[ok]
-        bx = -r * np.cos(a) + LIDAR_X          # Hinterachse, +x vorn
+        bx = -r * np.cos(a) + LIDAR_X          # rear axle, +x forward
         by = -r * np.sin(a)
-        vorn = (bx > FZ_NASE - 0.03) & (np.abs(by) < FZ_BREITE / 2.0 + 0.01)
-        luft = bx[vorn] - FZ_NASE
-        if np.count_nonzero(luft < self.rangier_anstoss) < 3:
+        front_d = (bx > CAR_NOSE - 0.03) & (np.abs(by) < CAR_WIDTH / 2.0 + 0.01)
+        gap = bx[front_d] - CAR_NOSE
+        if np.count_nonzero(gap < self.manoeuvre_trigger_dist) < 3:
             return
-        abstand = float(np.sort(luft)[2])
-        if not self._rangieren(self.rangier_weg,
-                               "etwas %.0f cm vor der Nase (Zustand %s)"
-                               % (abstand * 100, self.state)):
+        clearance = float(np.sort(gap)[2])
+        if not self._manoeuvre(self.manoeuvre_travel,
+                               "something %.0f cm in front of the nose (state %s)"
+                               % (clearance * 100, self.state)):
             self.state = 'DONE'
             self.publish_stop()
             self.get_logger().error(
-                "NOTSTOP: etwas %.0f cm vor der Nase, Rangieren nicht moeglich."
-                % (abstand * 100))
+                "EMERGENCY STOP: something %.0f cm in front of the nose, manoeuvring not possible."
+                % (clearance * 100))
 
     def publish_lap_state(self):
         """Publish [corner_idx, corner_count, lap] for the perception side.
@@ -3676,8 +3695,8 @@ class Round1Controller(Node):
         self.pub_lap.publish(msg)
 
     def button_cb(self, msg):
-        """Die Bridge publiziert bei jedem Tastendruck einen Header (kein Bool).
-        Die Nachricht selbst IST das Ereignis."""
+        """The bridge publishes a Header (not a Bool) on every button press.
+        The message itself IS the event."""
         self.button_pressed = True
 
     # ------------------------------------------------------------- helpers
@@ -3686,10 +3705,10 @@ class Round1Controller(Node):
         self.v_cmd = 0.0
         self.last_cmd = (0.0, 0.0)
 
-    def _scan_brems_kappe(self):
-        """Tempo-Obergrenze vor dem Scan-Halt: v = sqrt(2 a Rest), Rest bis
-        zum Ausloesepunkt (Soll + Nachlauf bei Ankunftstempo v_finish_min)."""
-        if (self.scan_verzoegerung <= 0.0 or self.state != 'DRIVE'
+    def _scan_brake_cap(self):
+        """Speed limit before the scan hold: v = sqrt(2 a rest), rest up to
+        the trigger point (target + coast at arrival speed v_finish_min)."""
+        if (self.scan_decel <= 0.0 or self.state != 'DRIVE'
                 or not self.scan_pause or self.scan_done_this_straight
                 or (self.corner_count // 4) >= self.scan_pause_laps
                 or self.corner_count >= self.n_corners
@@ -3700,43 +3719,43 @@ class Round1Controller(Node):
         tr = self.arc['travel']
         front_dist = (corner[0] - x) * tr[0] + (corner[1] - y) * tr[1]
         v0 = self.v_finish_min
-        nachlauf = (v0 * self.scan_nachlauf_t + v0 * v0 / (2.0 * max(self.scan_brems_a, 0.1))
-                    if self.scan_brems_a > 0.0 else self.scan_nachlauf)
-        ziel = self.scan_front_dist
-        if not self.vorhalt_done_this_straight and self.scan_vorhalt_front > 0.0:
-            ziel = max(ziel, self.scan_vorhalt_front)
-        rest = front_dist - ziel - nachlauf
+        coast = (v0 * self.scan_coast_t + v0 * v0 / (2.0 * max(self.scan_brake_decel, 0.1))
+                 if self.scan_brake_decel > 0.0 else self.scan_coast)
+        target = self.scan_front_dist
+        if not self.lookahead_halt_done_this_straight and self.scan_lookahead_halt_front > 0.0:
+            target = max(target, self.scan_lookahead_halt_front)
+        rest = front_dist - target - coast
         return max(self.v_finish_min,
-                   math.sqrt(2.0 * self.scan_verzoegerung * max(rest, 0.0)))
+                   math.sqrt(2.0 * self.scan_decel * max(rest, 0.0)))
 
-    def _v_kappe(self):
-        """Obergrenze fuers Tempo in der aktuellen Phase, oder None."""
-        kappe = None
-        if not self._lok_ok() and self.state in ('DRIVE', 'TURN'):
-            kappe = self.v_lok_unsicher
-        vb = self._scan_brems_kappe()
+    def _v_cap(self):
+        """Upper limit for the speed in the current phase, or None."""
+        cap = None
+        if not self._loc_ok() and self.state in ('DRIVE', 'TURN'):
+            cap = self.v_loc_uncertain
+        vb = self._scan_brake_cap()
         if vb is not None:
-            kappe = vb if kappe is None else min(kappe, vb)
-        # Steiler Ausweichpfad (Pylone spaet gesehen): langsamer, sonst
-        # ueberschwingt er weit ueber die Pfadrichtung (parken_test_42: Pfad
-        # 1,22 quer je laengs = 51 grad, gefahren bis 82 grad neben der Geraden).
+            cap = vb if cap is None else min(cap, vb)
+        # Steep dodge path (pylon seen late): slower, otherwise it overshoots
+        # far beyond the path direction (parken_test_42: path 1.22 lat per
+        # long = 51 deg, driven up to 82 deg off the straight).
         if (self.state == 'DRIVE' and self.obs_path
-                and getattr(self, 'obs_max_slope', 0.0) > self.steiler_pfad_ab):
-            kappe = (self.v_steiler_pfad if kappe is None
-                     else min(kappe, self.v_steiler_pfad))
-        if self.v_ziel > 0.0:
-            letzte_kurve = (self.state == 'TURN'
-                            and self.corner_count + 1 >= self.n_corners)
-            if letzte_kurve or self._auf_zielgerade():
-                kappe = self.v_ziel if kappe is None else min(kappe, self.v_ziel)
-        return kappe
+                and getattr(self, 'obs_max_slope', 0.0) > self.steep_path_from):
+            cap = (self.v_steep_path if cap is None
+                   else min(cap, self.v_steep_path))
+        if self.v_finish > 0.0:
+            last_corner = (self.state == 'TURN'
+                           and self.corner_count + 1 >= self.n_corners)
+            if last_corner or self._on_finish_straight():
+                cap = self.v_finish if cap is None else min(cap, self.v_finish)
+        return cap
 
     def publish_cmd(self, v, omega):
-        # Langsamer fahren, aber mit GLEICHER Kruemmung: omega = v * kappa --
-        # nur v zu kappen hiesse enger zu lenken als geplant.
-        kappe = self._v_kappe()
-        if kappe is not None and abs(v) > kappe:
-            k = kappe / abs(v)
+        # Drive slower, but with the SAME curvature: omega = v * kappa --
+        # capping only v would mean steering tighter than planned.
+        cap = self._v_cap()
+        if cap is not None and abs(v) > cap:
+            k = cap / abs(v)
             v, omega = v * k, omega * k
         # Clamp by the STEERING ANGLE, not just the yaw rate: omega = v*tan(d)/L,
         # so a fixed yaw-rate limit allows physically impossible steering at low
@@ -3746,8 +3765,8 @@ class Round1Controller(Node):
         limit = min(self.max_yaw_rate, omega_steer_max)
         if abs(omega) > limit:
             self.get_logger().warn(
-                f"omega {omega:+.2f} auf {math.copysign(limit, omega):+.2f} begrenzt "
-                f"(Lenkwinkelgrenze {math.degrees(self.max_steer):.0f} deg bei v={v_eff:.2f}).",
+                f"omega {omega:+.2f} limited to {math.copysign(limit, omega):+.2f} "
+                f"(steer angle limit {math.degrees(self.max_steer):.0f} deg at v={v_eff:.2f}).",
                 throttle_duration_sec=1.0)
         omega = max(-limit, min(limit, omega))
         cmd = Twist()
@@ -3757,30 +3776,31 @@ class Round1Controller(Node):
         self.last_cmd = (float(v), float(omega))
         self.cmd_hist.append((self.now_s(), float(omega)))
 
-    def _pose_nach_totzeit(self, x, y, theta):
-        """Pose, die der Wagen hat, wenn der JETZT berechnete Befehl wirkt.
+    def _pose_after_dead_time(self, x, y, theta):
+        """Pose the car will have when the command computed NOW takes effect.
 
-        Die Befehle der letzten steer_dead_time Sekunden sind schon unterwegs:
-        sie bestimmen, wie er in dieser Zeit giert. Aufintegriert (mit der
-        gemessenen Lenkverstaerkung) ergibt das Kurs und Lage bei Wirkbeginn."""
-        # Lenkgesetz mit der geglaetteten Pose (Aufrufer uebergeben self.pose;
-        # beide stammen aus derselben /ekf/odom-Nachricht)
-        if self.pose_lenk is not None and self.pose is not None and (x, y, theta) == self.pose:
-            x, y, theta = self.pose_lenk
+        The commands of the last steer_dead_time seconds are already on their
+        way: they determine how it yaws during that time. Integrated (with the
+        measured steering gain) that gives heading and position at the moment
+        the command takes effect."""
+        # Steering law with the smoothed pose (callers pass self.pose; both
+        # come from the same /ekf/odom message)
+        if self.pose_steer is not None and self.pose is not None and (x, y, theta) == self.pose:
+            x, y, theta = self.pose_steer
         T = self.steer_dead_time
         if T <= 0.0 or not self.cmd_hist:
             return x, y, theta
-        jetzt = self.now_s()
-        t0 = jetzt - T
+        t_now = self.now_s()
+        t0 = t_now - T
         dth = 0.0
-        eintraege = [e for e in self.cmd_hist if e[0] >= t0 - 0.2]
-        for i, (t, om) in enumerate(eintraege):
-            ende = eintraege[i + 1][0] if i + 1 < len(eintraege) else jetzt
-            a, b = max(t, t0), min(ende, jetzt)
+        entries = [e for e in self.cmd_hist if e[0] >= t0 - 0.2]
+        for i, (t, om) in enumerate(entries):
+            end = entries[i + 1][0] if i + 1 < len(entries) else t_now
+            a, b = max(t, t0), min(end, t_now)
             if b > a:
                 dth += om * (b - a)
         dth *= self.steer_gain_pred
-        v = max(abs(self.v_ist), 0.0)
+        v = max(abs(self.v_act), 0.0)
         th_mid = theta + 0.5 * dth
         return (x + v * T * math.cos(th_mid),
                 y + v * T * math.sin(th_mid),
@@ -3860,13 +3880,13 @@ class Round1Controller(Node):
         # which is the "exit" (roughly perpendicular / ahead). Entry wall's normal
         # is perpendicular to travel; exit wall's normal opposes travel.
         if self.race_direction in ('CW', 'CCW'):
-            # Aus der Kartengeometrie, NICHT aus dem Ist-Kurs: nach einem steilen
-            # Ausweichschwenk stand er bei -172 statt -90 grad, die Neuplanung
-            # vertauschte Ein- und Ausfahrtswand und plante die falsche Ecke
-            # (parken_test_42: Scan-Halt bei "Frontwand -0.51 m", dann NOTSTOP).
+            # From the map geometry, NOT from the actual heading: after a steep
+            # dodge swing it stood at -172 instead of -90 deg, the replanning
+            # swapped entry and exit wall and planned the wrong corner
+            # (parken_test_42: scan hold at "front wall -0.51 m", then EMERGENCY STOP).
             A = self._inward(self.walls[self._entry_wall_idx(idx)], cx, cy)
             B = self._inward(self.walls[self._exit_wall_idx(idx)], cx, cy)
-            tx, ty = -B[0], -B[1]          # Fahrtrichtung = gegen die Normale der Frontwand
+            tx, ty = -B[0], -B[1]          # direction of travel = against the normal of the front wall
             theta = math.atan2(ty, tx)
         else:
             tx, ty = math.cos(theta), math.sin(theta)
@@ -3901,16 +3921,16 @@ class Round1Controller(Node):
                 R = max(R - 0.05, self.min_turn_radius)
             if R < self.corner_R(idx) - 1e-6:
                 self.get_logger().warn(
-                    f"Anlauf zu kurz fuer Ecke {idx}: Radius {self.corner_R(idx):.2f} "
-                    f"-> {R:.2f} m verkleinert, um den Einlenkpunkt erreichbar zu machen.")
+                    f"Run-up too short for corner {idx}: radius {self.corner_R(idx):.2f} "
+                    f"-> {R:.2f} m reduced to make the turn-in point reachable.")
 
-        R = self._radius_fuer_pylonen(idx, A, B, o_in, o_out, R, theta)
+        R = self._radius_for_pylons(idx, A, B, o_in, o_out, R, theta)
 
         LA = (A[0], A[1], A[2] + o_in)
         LB = (B[0], B[1], B[2] + o_out)
         P = line_intersect(LA, LB)
         if P is None:
-            self.get_logger().error("Eintritts-/Austrittslinie parallel -- kann Bogen nicht planen.")
+            self.get_logger().error("Entry/exit line parallel -- cannot plan the arc.")
             return False
 
         C = (P[0] + R * (A[0] + B[0]), P[1] + R * (A[1] + B[1]))
@@ -3939,10 +3959,10 @@ class Round1Controller(Node):
                         travel=travel, LA=LA, LB=LB, u_B=u_B, theta_target=theta_target)
         corner = self.corners[idx]
         self.get_logger().info(
-            f"DECIDE Ecke {self.corner_count+1}/{self.n_corners} (idx {idx}, {self.race_direction}): "
-            f"Eckpunkt=({corner[0]:.2f},{corner[1]:.2f}) o_in={o_in:.2f} o_out={o_out:.2f} R={R:.2f} "
-            f"[Gerade ein=w{self._entry_wall_idx(idx)} aus=w{self._exit_wall_idx(idx)}"
-            + (f", Breiten {self.lane_width[self._entry_wall_idx(idx)]:.2f}/"
+            f"DECIDE corner {self.corner_count+1}/{self.n_corners} (idx {idx}, {self.race_direction}): "
+            f"corner point=({corner[0]:.2f},{corner[1]:.2f}) o_in={o_in:.2f} o_out={o_out:.2f} R={R:.2f} "
+            f"[straight in=w{self._entry_wall_idx(idx)} out=w{self._exit_wall_idx(idx)}"
+            + (f", widths {self.lane_width[self._entry_wall_idx(idx)]:.2f}/"
                f"{self.lane_width[self._exit_wall_idx(idx)]:.2f}"
                if self.lane_width is not None else "") + "] "
             f"T_A=({T_A[0]:.2f},{T_A[1]:.2f}) T_B=({T_B[0]:.2f},{T_B[1]:.2f}) "
@@ -3957,9 +3977,9 @@ class Round1Controller(Node):
                 f"LB=({LB[0]:+.2f},{LB[1]:+.2f},{LB[2]:+.2f})")
         return True
 
-    def _bogen_posen(self, A, B, o_in, o_out, R, theta):
-        """Hinterachs-Posen entlang Einfahrt (letzte 0,15 m), Bogen und Ausfahrt
-        (erste 0,25 m) fuer den Radius R -- dieselbe Geometrie wie plan_arc."""
+    def _arc_poses(self, A, B, o_in, o_out, R, theta):
+        """Rear-axle poses along the entry (last 0.15 m), arc and exit (first
+        0.25 m) for the radius R -- the same geometry as plan_arc."""
         LA = (A[0], A[1], A[2] + o_in)
         LB = (B[0], B[1], B[2] + o_out)
         P = line_intersect(LA, LB)
@@ -3971,26 +3991,26 @@ class Round1Controller(Node):
         TB = (C[0] - R * B[0], C[1] - R * B[1])
         a0 = math.atan2(TA[1] - C[1], TA[0] - C[0])
         dphi = wrap(math.atan2(TB[1] - C[1], TB[0] - C[0]) - a0)
-        th_ein = a0 + s * math.pi / 2.0
-        posen = []
+        th_entry = a0 + s * math.pi / 2.0
+        poses = []
         for k in range(4):
             d = -0.15 + 0.05 * k
-            posen.append((TA[0] + d * math.cos(th_ein), TA[1] + d * math.sin(th_ein), th_ein))
+            poses.append((TA[0] + d * math.cos(th_entry), TA[1] + d * math.sin(th_entry), th_entry))
         n = max(4, int(abs(dphi) / math.radians(4.0)))
         for k in range(n + 1):
             phi = a0 + dphi * k / n
-            posen.append((C[0] + R * math.cos(phi), C[1] + R * math.sin(phi),
+            poses.append((C[0] + R * math.cos(phi), C[1] + R * math.sin(phi),
                           phi + s * math.pi / 2.0))
-        th_aus = a0 + dphi + s * math.pi / 2.0
+        th_exit = a0 + dphi + s * math.pi / 2.0
         for k in range(1, 6):
             d = 0.05 * k
-            posen.append((TB[0] + d * math.cos(th_aus), TB[1] + d * math.sin(th_aus), th_aus))
-        return posen, C
+            poses.append((TB[0] + d * math.cos(th_exit), TB[1] + d * math.sin(th_exit), th_exit))
+        return poses, C
 
-    def _arc_pylonen_abstand(self, a):
-        """Kleinster Abstand Fahrzeugkante -> Pylonenkante fuer einen fertigen
-        Bogen (plan_arc oder verankert): Einfahrt 0,15 m, Bogen, Ausfahrt 0,25 m.
-        (None, None) ohne Pylonen in der Naehe."""
+    def _arc_pylon_clearance(self, a):
+        """Smallest distance car edge -> pylon edge for a finished arc
+        (plan_arc or anchored): entry 0.15 m, arc, exit 0.25 m.
+        (None, None) without pylons nearby."""
         if not self.obstacles or a is None:
             return None, None
         C, R, sg = a['C'], a['R'], a['s']
@@ -4005,52 +4025,52 @@ class Round1Controller(Node):
             dphi += sg * 2.0 * math.pi
         th_e = a0 + sg * math.pi / 2.0
         th_a = a0 + dphi + sg * math.pi / 2.0
-        posen = [(TA[0] + d * math.cos(th_e), TA[1] + d * math.sin(th_e), th_e)
+        poses = [(TA[0] + d * math.cos(th_e), TA[1] + d * math.sin(th_e), th_e)
                  for d in (-0.15, -0.10, -0.05)]
         n = max(4, int(abs(dphi) / math.radians(4.0)))
         for k in range(n + 1):
             phi = a0 + dphi * k / n
-            posen.append((C[0] + R * math.cos(phi), C[1] + R * math.sin(phi),
+            poses.append((C[0] + R * math.cos(phi), C[1] + R * math.sin(phi),
                           phi + sg * math.pi / 2.0))
-        posen += [(TB[0] + d * math.cos(th_a), TB[1] + d * math.sin(th_a), th_a)
+        poses += [(TB[0] + d * math.cos(th_a), TB[1] + d * math.sin(th_a), th_a)
                   for d in (0.05, 0.10, 0.15, 0.20, 0.25)]
-        best, wer = float('inf'), None
+        best, which = float('inf'), None
         for o in pyl:
-            for p in posen:
-                dd = self._abstand_umriss(p, o['x'], o['y']) - BLOCK_HALB
+            for p in poses:
+                dd = self._outline_dist(p, o['x'], o['y']) - BLOCK_HALF
                 if dd < best:
-                    best, wer = dd, o
-        return best, wer
+                    best, which = dd, o
+        return best, which
 
     @staticmethod
-    def _abstand_umriss(pose, px, py):
-        """Abstand Pylonenmitte -> Fahrzeugrechteck (Hinterachse = Pose)."""
+    def _outline_dist(pose, px, py):
+        """Distance pylon centre -> car rectangle (rear axle = pose)."""
         x, y, th = pose
         c, sn = math.cos(th), math.sin(th)
         dx, dy = px - x, py - y
         lx, ly = c * dx + sn * dy, -sn * dx + c * dy
-        hb = 0.5 * FZ_BREITE
-        ax = max(FZ_HECK - lx, 0.0, lx - FZ_NASE)
+        hb = 0.5 * CAR_WIDTH
+        ax = max(CAR_REAR - lx, 0.0, lx - CAR_NOSE)
         ay = max(-hb - ly, 0.0, ly - hb)
         return math.hypot(ax, ay)
 
-    def _bogen_pylonen_abstand(self, A, B, o_in, o_out, R, theta, pylonen):
-        """Kleinster Abstand Fahrzeugkante -> Pylonenkante ueber den Bogen, und
-        die Pylone dazu. (None, None) ohne Geometrie."""
-        posen, _C = self._bogen_posen(A, B, o_in, o_out, R, theta)
-        if posen is None:
+    def _arc_pylon_clearance_for(self, A, B, o_in, o_out, R, theta, pylons):
+        """Smallest distance car edge -> pylon edge over the arc, and the
+        pylon that goes with it. (None, None) without geometry."""
+        poses, _C = self._arc_poses(A, B, o_in, o_out, R, theta)
+        if poses is None:
             return None, None
-        best, wer = float('inf'), None
-        for o in pylonen:
-            for p in posen:
-                d = self._abstand_umriss(p, o['x'], o['y']) - BLOCK_HALB
+        best, which = float('inf'), None
+        for o in pylons:
+            for p in poses:
+                d = self._outline_dist(p, o['x'], o['y']) - BLOCK_HALF
                 if d < best:
-                    best, wer = d, o
-        return best, wer
+                    best, which = d, o
+        return best, which
 
-    def _anlauf_reicht(self, A, B, o_in, o_out, R, theta):
-        """Wie die Schrumpfschleife in plan_arc: ist der Einlenkpunkt fuer
-        diesen Radius von der Ist-Pose aus noch sauber erreichbar?"""
+    def _runup_sufficient(self, A, B, o_in, o_out, R, theta):
+        """Like the shrink loop in plan_arc: is the turn-in point for this
+        radius still cleanly reachable from the actual pose?"""
         if self.pose is None:
             return True
         LA = (A[0], A[1], A[2] + o_in)
@@ -4066,111 +4086,111 @@ class Round1Controller(Node):
         lat_err = abs((A[0] * px + A[1] * py) - LA[2])
         return room > 0.01 and lat_err / room <= self.max_settle_slope
 
-    def _radius_fuer_pylonen(self, idx, A, B, o_in, o_out, R, theta):
-        """Radius so waehlen, dass der Bogen an Pylonen am Kurvenein- und
-        -ausgang mit bogen_pylonen_abstand vorbeikommt.
+    def _radius_for_pylons(self, idx, A, B, o_in, o_out, R, theta):
+        """Choose the radius so that the arc passes pylons at the corner
+        entry and exit with arc_pylon_clearance.
 
-        o_in/o_out legen nur fest, auf welcher Seite er VOR und NACH der Kurve
-        faehrt. Steht eine Pylone kurz hinter der Ecke, liegt sie mitten im
-        Bogen: in CCW eine rote (rechts = aussen vorbei) innerhalb des Kreises,
-        dann hilft ein KLEINERER Radius; in CW eine rote (rechts = innen)
-        ausserhalb, dann ein GROESSERER. Statt der Regel wird gerechnet:
-        Kandidaten von min_turn_radius bis bogen_pylonen_r_max, der naechste am
-        geplanten R mit genug Abstand gewinnt. Groessere Radien nur, wenn der
-        Einlenkpunkt noch sauber erreichbar ist."""
-        if not self.obstacles or self.bogen_pylonen_abstand <= 0.0:
+        o_in/o_out only fix on which side it drives BEFORE and AFTER the
+        corner. If a pylon stands shortly after the corner, it lies in the
+        middle of the arc: in CCW a red one (right = pass outside) inside the
+        circle, then a SMALLER radius helps; in CW a red one (right = inside)
+        outside, then a LARGER one. Instead of the rule it computes:
+        candidates from min_turn_radius to arc_pylon_r_max, the one closest to
+        the planned R with enough clearance wins. Larger radii only if the
+        turn-in point is still cleanly reachable."""
+        if not self.obstacles or self.arc_pylon_clearance <= 0.0:
             return R
-        posen, C = self._bogen_posen(A, B, o_in, o_out, R, theta)
-        if posen is None:
+        poses, C = self._arc_poses(A, B, o_in, o_out, R, theta)
+        if poses is None:
             return R
-        pylonen = [o for o in self.obstacles
-                   if math.hypot(o['x'] - C[0], o['y'] - C[1]) < R + 0.6]
-        if not pylonen:
+        pylons = [o for o in self.obstacles
+                  if math.hypot(o['x'] - C[0], o['y'] - C[1]) < R + 0.6]
+        if not pylons:
             return R
-        soll = self.bogen_pylonen_abstand
-        ab0, wer0 = self._bogen_pylonen_abstand(A, B, o_in, o_out, R, theta, pylonen)
-        if ab0 is None or ab0 >= soll:
+        setpoint = self.arc_pylon_clearance
+        clr0, which0 = self._arc_pylon_clearance_for(A, B, o_in, o_out, R, theta, pylons)
+        if clr0 is None or clr0 >= setpoint:
             return R
-        kand = {round(R, 3)}
+        candidates = {round(R, 3)}
         r = self.min_turn_radius
-        while r <= self.bogen_pylonen_r_max + 1e-6:
-            kand.add(round(r, 3))
+        while r <= self.arc_pylon_r_max + 1e-6:
+            candidates.add(round(r, 3))
             r += 0.05
-        beste = (ab0, R)
-        for r in sorted(kand, key=lambda v: (abs(v - R), v)):
-            if r > R + 1e-6 and not self._anlauf_reicht(A, B, o_in, o_out, r, theta):
+        best_clr = (clr0, R)
+        for r in sorted(candidates, key=lambda v: (abs(v - R), v)):
+            if r > R + 1e-6 and not self._runup_sufficient(A, B, o_in, o_out, r, theta):
                 continue
-            ab, _w = self._bogen_pylonen_abstand(A, B, o_in, o_out, r, theta, pylonen)
-            if ab is None:
+            clr, _w = self._arc_pylon_clearance_for(A, B, o_in, o_out, r, theta, pylons)
+            if clr is None:
                 continue
-            if ab >= soll:
-                beste = (ab, r)
+            if clr >= setpoint:
+                best_clr = (clr, r)
                 break
-            if ab > beste[0]:
-                beste = (ab, r)
-        ab, r = beste
-        farbe = {OBST_ROT: 'rot', OBST_GRUEN: 'gruen'}.get(wer0['color'], '?')
-        if ab >= soll:
+            if clr > best_clr[0]:
+                best_clr = (clr, r)
+        clr, r = best_clr
+        colour = {OBST_RED: 'red', OBST_GREEN: 'green'}.get(which0['color'], '?')
+        if clr >= setpoint:
             self.get_logger().warn(
-                f"Ecke {self.corner_count + 1}: Pylone #{wer0['id']} ({farbe}) im Bogen -- Radius "
-                f"{R:.2f} -> {r:.2f} m, Abstand {ab0*100:.1f} -> {ab*100:.1f} cm.")
+                f"Corner {self.corner_count + 1}: pylon #{which0['id']} ({colour}) in the arc -- radius "
+                f"{R:.2f} -> {r:.2f} m, clearance {clr0*100:.1f} -> {clr*100:.1f} cm.")
         else:
             self.get_logger().error(
-                f"Ecke {self.corner_count + 1}: Pylone #{wer0['id']} ({farbe}) im Bogen, kein Radius "
-                f"{self.min_turn_radius:.2f}-{self.bogen_pylonen_r_max:.2f} m haelt "
-                f"{soll*100:.0f} cm -- nehme {r:.2f} m mit {ab*100:.1f} cm "
-                f"(geplant {R:.2f} m: {ab0*100:.1f} cm).")
+                f"Corner {self.corner_count + 1}: pylon #{which0['id']} ({colour}) in the arc, no radius "
+                f"{self.min_turn_radius:.2f}-{self.arc_pylon_r_max:.2f} m keeps "
+                f"{setpoint*100:.0f} cm -- taking {r:.2f} m with {clr*100:.1f} cm "
+                f"(planned {R:.2f} m: {clr0*100:.1f} cm).")
         return r
 
-    def _bogen_an_pose_verankern(self, x, y, theta, r_max=None):
-        """Bogen so legen, dass er HIER tangential zum Ist-Kurs beginnt und
-        tangential auf der Austrittslinie endet.
+    def _anchor_arc_at_pose(self, x, y, theta, r_max=None):
+        """Lay the arc so that it starts HERE tangential to the actual heading
+        and ends tangential on the exit line.
 
-        plan_arc kennt kein 'hier': T_A und C kommen aus der Kastengeometrie.
-        Steht der Wagen schon hinter T_A, liegt der Kreis hinter ihm, und die
-        Schrumpfschleife bricht dann sofort ab (room <= 0). Hier dagegen:
-            C = P + R*s*n_links,   Abstand(C, LB) = R
-            ->  R = (B.P - LB) / (1 - s*(B.n_links))
-        Genau an T_A ergibt das den alten Radius, delta dahinter R - delta.
-        Unter min_turn_radius: mit dem kleinsten Radius fahren und dafuer
-        frueher, naeher an der Aussenbande, auf die naechste Gerade kommen.
-        Rueckgabe (fahrbar, Beschreibung).
+        plan_arc knows no 'here': T_A and C come from the box geometry. If the
+        car already stands past T_A, the circle lies behind it, and the shrink
+        loop then stops at once (room <= 0). Here instead:
+            C = P + R*s*n_left,   dist(C, LB) = R
+            ->  R = (B.P - LB) / (1 - s*(B.n_left))
+        Exactly at T_A that gives the old radius, delta past it R - delta.
+        Below min_turn_radius: drive with the smallest radius and come onto
+        the next straight earlier for that, closer to the outer wall.
+        Returns (drivable, description).
         """
         a = self.arc
         s = a['s']
         bx, by, lb = a['LB']
         nlx, nly = -math.sin(theta), math.cos(theta)
-        nenner = 1.0 - s * (bx * nlx + by * nly)
-        abst = (bx * x + by * y) - lb            # > 0: Austrittslinie noch voraus
-        if nenner < 0.2 or abst <= 0.0:
-            return False, ("Austrittslinie nicht mehr erreichbar (Abstand %.2f m, "
-                           "Kurs passt nicht)" % abst)
-        R = abst / nenner
+        denom = 1.0 - s * (bx * nlx + by * nly)
+        dist_line = (bx * x + by * y) - lb            # > 0: exit line still ahead
+        if denom < 0.2 or dist_line <= 0.0:
+            return False, ("exit line no longer reachable (distance %.2f m, "
+                           "heading does not fit)" % dist_line)
+        R = dist_line / denom
         if r_max is not None and R > r_max:
-            return False, ("verankerter Radius %.2f m > %.2f -- Kurs zeigt schon "
-                           "stark in die Kurve" % (R, r_max))
+            return False, ("anchored radius %.2f m > %.2f -- heading already points "
+                           "far into the corner" % (R, r_max))
         o_out = a.get('o_out')
-        verschub = 0.0
+        push_out = 0.0
         if R < self.min_turn_radius:
-            verschub = (self.min_turn_radius - R) * nenner
-            if o_out is not None and o_out - verschub < self.turn_anchor_min_out:
-                return False, ("selbst mit Radius %.2f m kaeme er %.2f m vor der "
-                               "Aussenbande heraus (Minimum %.2f)"
-                               % (self.min_turn_radius, o_out - verschub,
+            push_out = (self.min_turn_radius - R) * denom
+            if o_out is not None and o_out - push_out < self.turn_anchor_min_out:
+                return False, ("even with radius %.2f m it would come out %.2f m from "
+                               "the outer wall (minimum %.2f)"
+                               % (self.min_turn_radius, o_out - push_out,
                                   self.turn_anchor_min_out))
             R = self.min_turn_radius
         C = (x + R * s * nlx, y + R * s * nly)
-        lb_neu = lb - verschub
+        lb_new = lb - push_out
         a.update(C=C, R=R, T_A=(x, y),
                  T_B=(C[0] - R * bx, C[1] - R * by),
                  a0=math.atan2(y - C[1], x - C[0]),
-                 LB=(bx, by, lb_neu))
+                 LB=(bx, by, lb_new))
         if o_out is not None:
-            a['o_out'] = o_out - verschub
-        if verschub > 0.0:
-            return True, ("kleinster Radius %.2f m, Austritt bei %.2f statt %.2f m"
-                          % (R, o_out - verschub, o_out))
-        return True, "Radius %.2f m, Austritt wie geplant" % R
+            a['o_out'] = o_out - push_out
+        if push_out > 0.0:
+            return True, ("smallest radius %.2f m, exit at %.2f instead of %.2f m"
+                          % (R, o_out - push_out, o_out))
+        return True, "radius %.2f m, exit as planned" % R
 
     @staticmethod
     def _inward(wall, cx, cy):
@@ -4187,32 +4207,32 @@ class Round1Controller(Node):
             return
         x, y, theta = self.pose
 
-        # Vor allem anderen, und bewusst VOR der odom-Alterspruefung: die
-        # Ausparkzuege laufen auf dem ESP und brauchen keine frische Pose.
-        if self.state.startswith('AUSPARK'):
-            self._ausparken_schritt(x, y, theta)
+        # Before everything else, and deliberately BEFORE the odom age check:
+        # the unpark moves run on the ESP and need no fresh pose.
+        if self.state.startswith('UNPARK'):
+            self._unpark_step(x, y, theta)
             return
-        if self.state == 'PARK_HALT':
-            self._park_halt(x, y, theta)
+        if self.state == 'PARK_HOLD':
+            self._park_hold(x, y, theta)
             return
-        if self.state == 'PARK_NACHMESSEN':
-            self._park_nachmessen(x, y, theta)
+        if self.state == 'PARK_REMEASURE':
+            self._park_remeasure(x, y, theta)
             return
-        if self.state == 'PARK_RUECK':
-            self._park_rueck(x, y, theta)
+        if self.state == 'PARK_REVERSE':
+            self._park_reverse(x, y, theta)
             return
 
         if self.state == 'WAIT_INPUTS':
             if not self.inputs_ready():
                 return
-            if (self.einparken_test and self.park_start is None
-                    and not self._einpark_test_vorbereiten()):
+            if (self.park_test and self.park_start is None
+                    and not self._park_test_prepare()):
                 return
             self.state = 'WAIT_BUTTON' if self.require_button else 'DRIVE'
             if self.state == 'DRIVE':
                 self._enter_drive(x, y, theta)
-            self.get_logger().info("Eingaben da. " +
-                                   ("Warte auf Button..." if self.require_button else "Fahre los."))
+            self.get_logger().info("Inputs there. " +
+                                   ("Waiting for button..." if self.require_button else "Driving off."))
             return
 
         if self.state == 'WAIT_BUTTON':
@@ -4225,17 +4245,17 @@ class Round1Controller(Node):
             return
 
         if self.state == 'DONE':
-            # Nur kurz Stopp senden, dann still sein: ein vergessener Regler
-            # im Zustand DONE schickte sonst dauerhaft /cmd_vel = 0 (30 Hz),
-            # und die Bruecke stellte darueber die Lenkung des NAECHSTEN
-            # Laufs auf geradeaus (parken_test_36/37: Ausparken ohne Lenkung).
-            jetzt = self.now_s()
-            if getattr(self, '_done_seit', None) is None:
-                self._done_seit = jetzt
-            if jetzt - self._done_seit < 1.0:
+            # Send stop only briefly, then stay silent: a forgotten controller
+            # in state DONE otherwise kept sending /cmd_vel = 0 (30 Hz), and
+            # through that the bridge set the steering of the NEXT run to
+            # straight ahead (parken_test_36/37: unparking without steering).
+            t_now = self.now_s()
+            if getattr(self, '_done_since', None) is None:
+                self._done_since = t_now
+            if t_now - self._done_since < 1.0:
                 self.publish_stop()
             return
-        self._done_seit = None
+        self._done_since = None
 
         # --- odom-stale handling: hold last cmd through short gaps, stop on long ---
         if self.odom_is_stale():
@@ -4245,18 +4265,18 @@ class Round1Controller(Node):
                 self.publish_stop()
             return
 
-        if (self.state in ('DRIVE', 'TURN') and self.lok_state == 'lost'
-                and self.lok_lost_stopp_s > 0.0 and self.lok_lost_t0 is not None
-                and self.now_s() - self.lok_lost_t0 > self.lok_lost_stopp_s):
+        if (self.state in ('DRIVE', 'TURN') and self.loc_state == 'lost'
+                and self.loc_lost_stop_s > 0.0 and self.loc_lost_t0 is not None
+                and self.now_s() - self.loc_lost_t0 > self.loc_lost_stop_s):
             self.state = 'DONE'
             self.publish_stop()
             self.get_logger().error(
-                "NOTSTOP: Lokalisierung seit %.1f s 'lost' -- ueber ~0,35 m Fehler "
-                "faengt sie sich nicht mehr, Weiterfahren waere Blindflug."
-                % (self.now_s() - self.lok_lost_t0))
+                "EMERGENCY STOP: localisation 'lost' for %.1f s -- beyond ~0.35 m of error "
+                "it does not recover any more, driving on would be blind flight."
+                % (self.now_s() - self.loc_lost_t0))
             return
-        if self.state == 'PARK_FAHRT':
-            self._park_fahrt(x, y, theta)
+        if self.state == 'PARK_DRIVE':
+            self._park_drive(x, y, theta)
             return
         if self.state == 'DRIVE':
             self._drive(x, y, theta)
@@ -4276,10 +4296,10 @@ class Round1Controller(Node):
         the new T_A already lies behind us.
         """
         self.publish_stop()
-        left = self.scan_halt_dauer - (self.now_s() - self.scan_pause_t0)
-        if left > 0.0:
+        remaining = self.scan_hold_duration - (self.now_s() - self.scan_pause_t0)
+        if remaining > 0.0:
             self.get_logger().info(
-                f"SCAN-HALT ({left:.1f}s verbleibend) bei ({x:.2f},{y:.2f}).",
+                f"SCAN HOLD ({remaining:.1f}s remaining) at ({x:.2f},{y:.2f}).",
                 throttle_duration_sec=0.5)
             return
 
@@ -4294,10 +4314,10 @@ class Round1Controller(Node):
             shift = ((new_TA[0] - old_TA[0]) * tr[0] + (new_TA[1] - old_TA[1]) * tr[1])
             if abs(shift) > 0.02:
                 self.get_logger().info(
-                    f"Nach SCAN-HALT neu geplant: Einlenkpunkt um {shift:+.2f} m "
-                    f"verschoben (o_out={self.corner_o_out(self.corner_idx):.2f}).")
+                    f"Replanned after SCAN HOLD: turn-in point shifted by {shift:+.2f} m "
+                    f"(o_out={self.corner_o_out(self.corner_idx):.2f}).")
         self.state = 'DRIVE'
-        self.get_logger().info("SCAN-HALT fertig, Plan aktualisiert.")
+        self.get_logger().info("SCAN HOLD done, plan updated.")
 
     def now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -4308,76 +4328,76 @@ class Round1Controller(Node):
         just drive the start straight (see _drive_start) and plan later."""
         self.drive_start_xy = (x, y)
         self.ct_integral = 0.0
-        self._warnen_wenn_in_der_luecke()
+        self._warn_if_in_bay()
         if not self.geometry_ready():
             self.get_logger().info(
-                "Start ohne Kartengeometrie: fahre mittig geradeaus bis Richtung erkannt.")
+                "Start without map geometry: driving straight in the middle until the direction is detected.")
             return
         if self.corner_idx is None:
             self.corner_idx = self.pick_first_corner(x, y, theta)
             if self.corner_idx is None:
-                self.get_logger().warn("Keine Ecke voraus gefunden -- nehme idx 0.")
+                self.get_logger().warn("No corner found ahead -- taking idx 0.")
                 self.corner_idx = 0
-        if self.erste_ecke_pruefen and self.corner_count == 0:
-            self._erste_ecke_nach_ausparken(x, y, theta)
+        if self.first_corner_check and self.corner_count == 0:
+            self._first_corner_after_unpark(x, y, theta)
         if self.arc is None:
             self.plan_arc(theta)
         self.publish_lap_state()
 
-    def _erste_ecke_nach_ausparken(self, x, y, theta):
-        """Einmalig nach dem Ausparken: steht er schon vor Ecke 1?
+    def _first_corner_after_unpark(self, x, y, theta):
+        """Once after unparking: is it already standing before corner 1?
 
-        Dann hat er gerade im Stand gescannt -- genau dort, wo sonst der
-        Scan-Stopp waere. Ein zweiter Halt 27 cm weiter bringt nichts, und der
-        Weg dazwischen reichte nicht, um den Querversatz zur Spurmitte
-        abzubauen (CCW-Test: 31 cm auf 45 cm Anlauf, Ecke 1 unruhig).
+        Then it has just scanned at standstill -- exactly where the scan stop
+        would otherwise be. A second hold 27 cm further on brings nothing, and
+        the way in between was not enough to reduce the lateral offset to the
+        lane centre (CCW test: 31 cm over 45 cm of run-up, corner 1 unsteady).
         """
-        self.erste_ecke_pruefen = False
+        self.first_corner_check = False
         c = self.corners[self.corner_idx]
-        vorn = (c[0] - x) * math.cos(theta) + (c[1] - y) * math.sin(theta)
-        # Im Halt schon entschieden? Dann dabei bleiben (er hat sich seitdem
-        # nicht bewegt). Sonst (Geometrie kam erst beim Fahren) jetzt pruefen.
-        hier = (self.ausp_scan_hier if self.ausp_scan_hier is not None
-                else vorn < self.ausparken_scan_ersetzt_bis)
-        if not hier:
+        front_d = (c[0] - x) * math.cos(theta) + (c[1] - y) * math.sin(theta)
+        # Already decided during the hold? Then stick with it (it has not
+        # moved since). Otherwise (geometry only came while driving) check now.
+        here = (self.unpark_scan_here if self.unpark_scan_here is not None
+                else front_d < self.unpark_scan_replaces_until)
+        if not here:
             return
         self.scan_done_this_straight = True
-        self.vorhalt_done_this_straight = True
+        self.lookahead_halt_done_this_straight = True
         w = self._entry_wall_idx(self.corner_idx)
         nx, ny, dw = self.walls[w]
         q = (nx * x + ny * y) - dw
-        breite = (self.lane_width[w] if self.lane_width is not None
+        lane_w = (self.lane_width[w] if self.lane_width is not None
                   and w < len(self.lane_width) else 1.0)
-        if 0.15 <= q <= breite - 0.10:
-            self.erste_ecke_idx = self.corner_idx
-            self.erste_ecke_q = q
+        if 0.15 <= q <= lane_w - 0.10:
+            self.first_corner_idx = self.corner_idx
+            self.first_corner_q = q
         self.get_logger().info(
-            "Nach dem Ausparken %.2f m vor Ecke 1: Halt am Ausparkende ersetzt "
-            "den Scan-Stopp%s."
-            % (vorn, ", Ecke 1 aus der jetzigen Lage (q=%.2f) geplant" % q
-               if self.erste_ecke_q is not None else ""))
+            "After unparking %.2f m before corner 1: the hold at the end of unparking "
+            "replaces the scan stop%s."
+            % (front_d, ", corner 1 planned from the current pose (q=%.2f)" % q
+               if self.first_corner_q is not None else ""))
 
-    def _warnen_wenn_in_der_luecke(self):
-        """Steht er beim Losfahren noch in der Parkluecke?
+    def _warn_if_in_bay(self):
+        """Is it still standing in the parking bay when it drives off?
 
-        Die bestehende Plausibilitaetspruefung (start_lane_min/max) sieht nur
-        die SUMME der beiden Wandabstaende. In der Luecke sind das 0.15 + 0.83
-        = 0.98 -- mitten im erlaubten Band. Die Aufteilung verraet es: in einer
-        Spur steht er ungefaehr mittig, in der Luecke klebt er an der Wand.
+        The existing plausibility check (start_lane_min/max) only sees the SUM
+        of the two wall distances. In the bay that is 0.15 + 0.83 = 0.98 --
+        right inside the allowed band. The split gives it away: in a lane it
+        stands roughly centred, in the bay it sticks to the wall.
         """
-        if self.ausparken or not self.wall_dist:
+        if self.unpark or not self.wall_dist:
             return
-        links, rechts = self.wall_dist
-        if not (math.isfinite(links) and math.isfinite(rechts)):
+        left, right = self.wall_dist
+        if not (math.isfinite(left) and math.isfinite(right)):
             return
-        if min(links, rechts) >= self.start_wand_warn:
+        if min(left, right) >= self.start_wall_warn:
             return
         self.get_logger().warn(
-            "Eine Seite ist nur %.2f m entfernt, die andere %.2f m -- in einer "
-            "Spur stuende er mittig. Sieht nach der Parkluecke aus, und "
-            "ausparken ist AUS. Falls ja: mit -p ausparken:=true starten, "
-            "sonst faehrt er in die Magenta-Wand."
-            % (min(links, rechts), max(links, rechts)))
+            "One side is only %.2f m away, the other %.2f m -- in a "
+            "lane it would stand centred. Looks like the parking bay, and "
+            "unpark is OFF. If so: start with -p unpark:=true, "
+            "otherwise it drives into the magenta wall."
+            % (min(left, right), max(left, right)))
 
     def _drive_start(self, x, y, theta):
         """Drive the start straight before the direction/geometry are latched.
@@ -4395,8 +4415,8 @@ class Round1Controller(Node):
         if front_dist <= self.start_stop_gap:
             self.publish_stop()
             self.get_logger().warn(
-                f"Startgerade: {front_dist:.2f} m vor Frontwand, aber keine Fahrtrichtung "
-                f"erkannt. Stoppe.", throttle_duration_sec=2.0)
+                f"Start straight: {front_dist:.2f} m from the front wall, but no direction "
+                f"of travel detected. Stopping.", throttle_duration_sec=2.0)
             return
 
         if self.start_center_y is None:
@@ -4406,29 +4426,29 @@ class Round1Controller(Node):
 
         # virtual line: through the lane centre, along the start heading (theta~0).
         cx, cy = self.start_center_y
-        # Steht eine Pylone davor, wird die Ziellinie zur Seite geschoben --
-        # gleiche Regel und gleicher Abstand wie spaeter im Hindernispfad.
+        # If a pylon stands ahead, the target line is shifted sideways --
+        # same rule and same clearance as later in the obstacle path.
         dl, dr = self.wall_dist if self.wall_dist else (float('nan'), float('nan'))
-        breite = dl + dr if self.wall_dist else 1.0
-        ziel_y, info = self._start_ausweich_y(cy, breite)
-        if info is not None and self.start_dodge_aktiv is None:
+        lane_w = dl + dr if self.wall_dist else 1.0
+        target_y, info = self._start_dodge_y(cy, lane_w)
+        if info is not None and self.start_dodge_active is None:
             self.get_logger().info(
-                f"Startgerade: Hindernis {info[3]} vorbei "
-                f"({'gruen' if info[2] == OBST_GRUEN else 'rot' if info[2] == OBST_ROT else 'Farbe unklar'}, "
-                f"{info[0]:.2f} m voraus, {info[5]} Sichtungen) -- "
-                f"Ziellinie {cy:+.3f} -> {ziel_y:+.3f} m.")
-        self.start_dodge_aktiv = info
+                f"Start straight: passing {info[3]} of obstacle "
+                f"({'green' if info[2] == OBST_GREEN else 'red' if info[2] == OBST_RED else 'colour unknown'}, "
+                f"{info[0]:.2f} m ahead, {info[5]} sightings) -- "
+                f"target line {cy:+.3f} -> {target_y:+.3f} m.")
+        self.start_dodge_active = info
 
         ux, uy = math.cos(0.0), math.sin(0.0)     # start straight = map +x by definition
         nx, ny = -uy, ux                           # left normal
-        d = nx * cx + ny * ziel_y
+        d = nx * cx + ny * target_y
         omega = self._stanley_steer(x, y, theta, (nx, ny, d), (ux, uy))
 
         if self.debug:
-            aus = f" AUSWEICH->{ziel_y:+.3f}" if info is not None else ""
+            out = f" DODGE->{target_y:+.3f}" if info is not None else ""
             self.get_logger().info(
                 f"[START] pos=({x:+.2f},{y:+.2f}) th={math.degrees(theta):+.1f} "
-                f"links={dl:.2f} rechts={dr:.2f} mitte_y={cy:+.3f}{aus} "
+                f"left={dl:.2f} right={dr:.2f} centre_y={cy:+.3f}{out} "
                 f"front={front_dist:.2f} om={omega:+.2f}",
                 throttle_duration_sec=0.3)
 
@@ -4470,9 +4490,9 @@ class Round1Controller(Node):
         tA = self.arc['T_A']
         # hold the entry line of THIS straight (LA); Stanley keeps us centred
         # follow the planned obstacle path if there is one, else the plain line
-        # Lenkgesetz mit der Pose bei Wirkbeginn (Totzeit), die Ausloeser
-        # (T_A, Haltepunkt) weiter mit der echten Pose.
-        px_, py_, pth_ = self._pose_nach_totzeit(x, y, theta)
+        # Steering law with the pose at the moment the command takes effect
+        # (dead time), the triggers (T_A, halt point) still with the real pose.
+        px_, py_, pth_ = self._pose_after_dead_time(x, y, theta)
         omega = None
         if self.obs_path:
             omega = self._stanley_follow_path(px_, py_, pth_, self.obs_path)
@@ -4495,36 +4515,36 @@ class Round1Controller(Node):
             if self.debug:
                 self.get_logger().info(
                     f"[FINISH] pos=({x:+.2f},{y:+.2f}) th={math.degrees(theta):+.1f} "
-                    f"front_dist={front_dist:+.2f} (Ziel {self._ziel_abstand():.2f}) om={omega:+.2f}",
+                    f"front_dist={front_dist:+.2f} (finish {self._finish_dist():.2f}) om={omega:+.2f}",
                     throttle_duration_sec=0.2)
             # remaining distance to the STOP point, compensated for the reaction
             # lead (a tick + motor/vehicle latency): stop when the robot will be
             # AT the target after it coasts through the lead, not when it first
             # crosses the line -- otherwise it overshoots, worse at higher speed.
-            if self._park_aktiv() and self.einparken_halt_s <= 0.0:
-                # Kein Pflichthalt: durchfahren und ohne Anhalten uebergehen.
-                if front_dist <= self.seiten_frei_ab:
-                    self._park_uebergang(x, y, theta)
+            if self._park_active() and self.park_hold_s <= 0.0:
+                # No mandatory hold: drive through and hand over without stopping.
+                if front_dist <= self.sides_clear_from:
+                    self._park_transition(x, y, theta)
                     return
-                self.publish_cmd(min(self.v_drive, max(self.v_park_anfahrt,
+                self.publish_cmd(min(self.v_drive, max(self.v_park_approach,
                                                        self.v_finish_min)), omega)
                 return
-            v_now = max(abs(self.v_ist), 0.0)
+            v_now = max(abs(self.v_act), 0.0)
             lead = v_now * self.finish_lead_time
-            remain = front_dist - self._ziel_abstand() - lead
+            remain = front_dist - self._finish_dist() - lead
 
             if remain <= self.finish_tol:
                 self.publish_stop()
                 self.get_logger().info(
-                    f"ZIEL ({self.corner_count} Ecken, {front_dist:.2f} m vor Frontwand, "
+                    f"FINISH ({self.corner_count} corners, {front_dist:.2f} m from the front wall, "
                     f"v={v_now:.2f}). STOP.")
-                if self._park_aktiv():
-                    self.state = 'PARK_HALT'
+                if self._park_active():
+                    self.state = 'PARK_HOLD'
                     self.park_t0 = self.now_s()
-                    self.park_mittel = []
+                    self.park_avg_poses = []
                     self.get_logger().info(
-                        "Einparken: %.1f s Pflichtstillstand, dann einparken."
-                        % self.einparken_halt_s)
+                        "Parking: %.1f s mandatory standstill, then park."
+                        % self.park_hold_s)
                 else:
                     self.state = 'DONE'
                 return
@@ -4555,152 +4575,152 @@ class Round1Controller(Node):
         if scan_pending:
             corner = self.corners[self.corner_idx]
             front_dist = (corner[0] - x) * tr[0] + (corner[1] - y) * tr[1]
-            if self.scan_brems_a > 0.0:
-                v_n = abs(self.v_ist)
-                nachlauf = (v_n * self.scan_nachlauf_t
-                            + v_n * v_n / (2.0 * self.scan_brems_a))
+            if self.scan_brake_decel > 0.0:
+                v_n = abs(self.v_act)
+                coast = (v_n * self.scan_coast_t
+                         + v_n * v_n / (2.0 * self.scan_brake_decel))
             else:
-                nachlauf = self.scan_nachlauf
-            if (not self.vorhalt_done_this_straight and self.scan_vorhalt_front > 0.0
-                    and front_dist <= self.scan_vorhalt_front + nachlauf):
-                self.vorhalt_done_this_straight = True
-                # Nur, wenn danach noch Platz fuer den Scan-Halt bleibt -- kommt
-                # er schon naeher aus der Kurve, entfaellt der Vorhalt.
-                if front_dist - nachlauf >= self.scan_front_dist + 0.25:
-                    self.scan_halt_dauer = self.scan_vorhalt_s
+                coast = self.scan_coast
+            if (not self.lookahead_halt_done_this_straight and self.scan_lookahead_halt_front > 0.0
+                    and front_dist <= self.scan_lookahead_halt_front + coast):
+                self.lookahead_halt_done_this_straight = True
+                # Only if there is still room for the scan hold afterwards -- if
+                # it already comes out of the corner closer, the look-ahead halt is dropped.
+                if front_dist - coast >= self.scan_front_dist + 0.25:
+                    self.scan_hold_duration = self.scan_lookahead_halt_s
                     self.scan_pause_t0 = self.now_s()
                     self.state = 'SCAN_PAUSE'
                     self.publish_stop()
                     self.get_logger().info(
-                        f"VORHALT (Runde {self.corner_count // 4 + 1}): "
-                        f"{self.scan_vorhalt_s:.1f}s, Frontwand {front_dist:.2f} m "
-                        f"(Soll {self.scan_vorhalt_front:.2f}, Nachlauf "
-                        f"{nachlauf*100:.0f} cm) -- letzte Pylone der Geraden im Stand ansehen.")
+                        f"LOOK-AHEAD HALT (lap {self.corner_count // 4 + 1}): "
+                        f"{self.scan_lookahead_halt_s:.1f}s, front wall {front_dist:.2f} m "
+                        f"(target {self.scan_lookahead_halt_front:.2f}, coast "
+                        f"{coast*100:.0f} cm) -- look at the last pylon of the straight at standstill.")
                     return
-            if front_dist <= self.scan_front_dist + nachlauf:
+            if front_dist <= self.scan_front_dist + coast:
                 self.scan_done_this_straight = True
-                self.vorhalt_done_this_straight = True
-                self.scan_halt_dauer = self.scan_pause_s
+                self.lookahead_halt_done_this_straight = True
+                self.scan_hold_duration = self.scan_pause_s
                 self.scan_pause_t0 = self.now_s()
                 self.state = 'SCAN_PAUSE'
                 self.publish_stop()
                 self.get_logger().info(
-                    f"SCAN-HALT Start (Runde {self.corner_count // 4 + 1}): "
-                    f"{self.scan_pause_s:.1f}s, Frontwand {front_dist:.2f} m "
-                    f"(Soll {self.scan_front_dist:.2f}, Nachlauf {nachlauf*100:.0f} cm "
-                    f"bei {abs(self.v_ist):.2f} m/s), to_TA {to_TA:+.2f} m.")
+                    f"SCAN HOLD start (lap {self.corner_count // 4 + 1}): "
+                    f"{self.scan_pause_s:.1f}s, front wall {front_dist:.2f} m "
+                    f"(target {self.scan_front_dist:.2f}, coast {coast*100:.0f} cm "
+                    f"at {abs(self.v_act):.2f} m/s), to_TA {to_TA:+.2f} m.")
                 return
 
         # --- turn-in when pose crosses T_A (never before the scan pause) ---
-        vorhalt = 0.0
-        if self.einlenk_vorhalt and self.turn_praediktion:
-            vorhalt = max(self.v_ist, 0.0) * self.steer_dead_time
-        if to_TA - vorhalt <= 0.0 and not scan_pending:
-            # ab hier mit der Pose bei Wirkbeginn: an ihr beginnt der Bogen
-            to_TA -= vorhalt
-            vx_, vy_, vth_ = (self._pose_nach_totzeit(x, y, theta) if vorhalt > 0.0
+        early = 0.0
+        if self.turn_in_lead and self.turn_prediction:
+            early = max(self.v_act, 0.0) * self.steer_dead_time
+        if to_TA - early <= 0.0 and not scan_pending:
+            # from here on with the pose at the moment the command takes effect: the arc starts there
+            to_TA -= early
+            vx_, vy_, vth_ = (self._pose_after_dead_time(x, y, theta) if early > 0.0
                               else (x, y, theta))
             if lateral > 0.6:
                 self.state = 'DONE'
                 self.publish_stop()
                 self.get_logger().error(
-                    f"NOTSTOP: Einlenkpunkt seitlich verfehlt (lat={lateral:.2f}). "
-                    f"Falsche Ecke? idx {self.corner_idx}.")
+                    f"EMERGENCY STOP: turn-in point missed laterally (lat={lateral:.2f}). "
+                    f"Wrong corner? idx {self.corner_idx}.")
                 return
 
-            # NIE ueber T_A hinaus warten. Der Bogen ist an T_A verankert; jeder
-            # Zentimeter dahinter macht den Kreis unerreichbar, und Neuplanen
-            # hilft nicht (der neue Bogen beginnt dann hinter dem Wagen). Genau
-            # das trug die erste Kurve in Lauf 21 geradeaus in die Wand -- und
-            # im CCW-Einparktest bis auf 4 cm an die Frontwand. Beruhigt wird
-            # VOR T_A durch Langsamerwerden (siehe unten).
+            # NEVER wait past T_A. The arc is anchored at T_A; every
+            # centimetre past it makes the circle unreachable, and replanning
+            # does not help (the new arc then starts behind the car). Exactly
+            # that carried the first corner in run 21 straight into the wall --
+            # and in the CCW park test to within 4 cm of the front wall.
+            # Settling happens BEFORE T_A by slowing down (see below).
             if -to_TA > self.turn_in_past_max:
-                # nur noch Plausibilitaet -- so weit hinter T_A stimmt etwas
-                # Grundsaetzliches nicht (falsche Ecke?)
+                # only plausibility now -- this far past T_A something
+                # fundamental is wrong (wrong corner?)
                 self.state = 'DONE'
                 self.publish_stop()
                 self.get_logger().error(
-                    f"NOTSTOP: Einlenkpunkt {-to_TA:.2f} m hinter uns "
-                    f"(> {self.turn_in_past_max:.2f}). Falsche Ecke?")
+                    f"EMERGENCY STOP: turn-in point {-to_TA:.2f} m behind us "
+                    f"(> {self.turn_in_past_max:.2f}). Wrong corner?")
                 return
             if -to_TA > 0.02:
-                # hinter T_A: den Bogen an der Ist-Pose verankern, statt einem
-                # Kreis nachzufahren, der hinter dem Wagen liegt
-                ok, text = self._bogen_an_pose_verankern(vx_, vy_, vth_)
-                if not ok and self._rangieren(
-                        -to_TA + self.rangier_weg,
-                        f"{-to_TA:.2f} m hinter T_A, Bogen nicht fahrbar ({text})"):
+                # past T_A: anchor the arc at the actual pose instead of
+                # chasing a circle that lies behind the car
+                ok, text = self._anchor_arc_at_pose(vx_, vy_, vth_)
+                if not ok and self._manoeuvre(
+                        -to_TA + self.manoeuvre_travel,
+                        f"{-to_TA:.2f} m past T_A, arc not drivable ({text})"):
                     return
                 if not ok:
                     self.state = 'DONE'
                     self.publish_stop()
                     self.get_logger().error(
-                        f"NOTSTOP: {-to_TA:.2f} m hinter T_A, Bogen nicht fahrbar: {text}.")
+                        f"EMERGENCY STOP: {-to_TA:.2f} m past T_A, arc not drivable: {text}.")
                     return
                 self.get_logger().warn(
-                    f"Einlenkpunkt {-to_TA:.2f} m hinter uns -- Bogen an der "
-                    f"Ist-Pose verankert: {text}.")
-            elif self.turn_anchor_puenktlich:
-                # Puenktlich, aber gestoert eingefahren (Kurs oder quer neben dem
-                # Kreis): den Kreis so legen, dass er HIER tangential zum Ist-
-                # Kurs beginnt. Der Standardbogen verlangt sofort Kreis und
-                # Tangente -- bei 20 grad Kursfehler springt der Befehl in die
-                # Begrenzung, und der Bogenfehler waechst bis 14 cm (Ecke idx1,
-                # 61 Prozent der Kurve in der Begrenzung). Verankert simuliert:
-                # 3,5-4,2 cm bei jeder Einfahrt. Scheitert es, bleibt der
-                # Standardbogen -- hier kein Nothalt.
-                kurs_fehler = abs(wrap(vth_ - math.atan2(tr[1], tr[0])))
-                if (kurs_fehler > self.turn_anchor_kurs
-                        or lateral > self.turn_anchor_quer):
+                    f"Turn-in point {-to_TA:.2f} m behind us -- arc anchored at the "
+                    f"actual pose: {text}.")
+            elif self.turn_anchor_on_time:
+                # On time, but entered disturbed (heading or lateral off the
+                # circle): lay the circle so that it starts HERE tangential to
+                # the actual heading. The standard arc demands circle and
+                # tangent at once -- with 20 deg heading error the command
+                # jumps into the limit, and the arc error grows to 14 cm
+                # (corner idx1, 61 percent of the corner in the limit). Anchored,
+                # simulated: 3.5-4.2 cm on every entry. If it fails, the
+                # standard arc stays -- no emergency halt here.
+                heading_err = abs(wrap(vth_ - math.atan2(tr[1], tr[0])))
+                if (heading_err > self.turn_anchor_heading
+                        or lateral > self.turn_anchor_lat):
                     r0 = self.arc['R']
-                    sicherung = dict(self.arc)
-                    ok, text = self._bogen_an_pose_verankern(
+                    saved_arc = dict(self.arc)
+                    ok, text = self._anchor_arc_at_pose(
                         vx_, vy_, vth_, r_max=1.5 * r0)
                     if ok:
-                        # Pylonen: der verankerte Radius ist nicht mehr frei
-                        # gewaehlt. Kommt er einer Pylone naeher als der
-                        # geplante Bogen und unter den Mindestabstand, lieber
-                        # den geplanten (pylonengeprueften) Standardbogen.
-                        ab_neu, wer = self._arc_pylonen_abstand(self.arc)
-                        ab_alt, _w = self._arc_pylonen_abstand(sicherung)
-                        if (ab_neu is not None and ab_neu < self.bogen_pylonen_abstand
-                                and (ab_alt is None or ab_neu < ab_alt)):
+                        # Pylons: the anchored radius is no longer freely
+                        # chosen. If it comes closer to a pylon than the
+                        # planned arc and below the minimum clearance, rather
+                        # take the planned (pylon-checked) standard arc.
+                        clr_new, which = self._arc_pylon_clearance(self.arc)
+                        clr_old, _w = self._arc_pylon_clearance(saved_arc)
+                        if (clr_new is not None and clr_new < self.arc_pylon_clearance
+                                and (clr_old is None or clr_new < clr_old)):
                             ok, text = False, (
-                                "Pylone #%d nur %.1f cm am verankerten Bogen, geplant %.1f cm"
-                                % (wer['id'], ab_neu * 100,
-                                   (ab_alt if ab_alt is not None else float('nan')) * 100))
+                                "pylon #%d only %.1f cm from the anchored arc, planned %.1f cm"
+                                % (which['id'], clr_new * 100,
+                                   (clr_old if clr_old is not None else float('nan')) * 100))
                     if ok:
                         self.get_logger().info(
-                            f"Einfahrt gestoert (Kurs {math.degrees(kurs_fehler):.1f} "
-                            f"grad, quer {lateral:.3f} m) -- Bogen verankert: {text}.")
+                            f"Entry disturbed (heading {math.degrees(heading_err):.1f} "
+                            f"deg, lat {lateral:.3f} m) -- arc anchored: {text}.")
                     else:
-                        self.arc = sicherung
+                        self.arc = saved_arc
                         self.get_logger().info(
-                            f"Einfahrt gestoert, Verankerung verworfen ({text}) "
-                            f"-- Standardbogen.")
+                            f"Entry disturbed, anchoring discarded ({text}) "
+                            f"-- standard arc.")
             om_last = abs(self.last_cmd[1])
             if lateral > self.turn_in_lat_gate or om_last > self.turn_in_om_gate:
                 self.get_logger().warn(
-                    f"Einlenken unruhig: lat={lateral:.3f} om={om_last:.2f} "
-                    f"-- trotzdem an T_A eingelenkt (Geometrie darf nicht weglaufen).")
+                    f"Turn-in unsteady: lat={lateral:.3f} om={om_last:.2f} "
+                    f"-- turned in at T_A anyway (the geometry must not run away).")
             self.state = 'TURN'
             if lateral > self.turn_in_lat_warn:
                 self.get_logger().warn(
-                    f"Einlenken mit Querfehler {lateral:.2f} m (> {self.turn_in_lat_warn:.2f}) "
-                    f"-- dieser Fehler wandert durch die ganze Kurve.")
+                    f"Turn-in with lateral error {lateral:.2f} m (> {self.turn_in_lat_warn:.2f}) "
+                    f"-- this error travels through the whole corner.")
             self.get_logger().info(
-                f"TURN: Einlenken bei ({x:.2f},{y:.2f}, {math.degrees(theta):.1f}).")
+                f"TURN: turning in at ({x:.2f},{y:.2f}, {math.degrees(theta):.1f}).")
             return
 
         v = self._speed_profile(to_TA, dsc)
-        # Vor der Ecke beruhigen: laeuft er unruhig auf T_A zu, langsamer werden.
-        # Stanley bekommt so mehr Zeit pro Meter, ohne die Geometrie zu verschieben.
+        # Settle before the corner: if it runs unsteadily towards T_A, slow down.
+        # That gives Stanley more time per metre without shifting the geometry.
         if (to_TA < self.turn_in_settle_window
                 and (lateral > self.turn_in_lat_gate
                      or abs(self.last_cmd[1]) > self.turn_in_om_gate)):
             v = min(v, self.v_settle)
             self.get_logger().info(
-                f"Beruhigen vor Ecke: to_TA={to_TA:.2f} lat={lateral:.3f} "
+                f"Settling before the corner: to_TA={to_TA:.2f} lat={lateral:.3f} "
                 f"om={abs(self.last_cmd[1]):.2f} -> v={v:.2f}.",
                 throttle_duration_sec=0.5)
         if self.obs_path:
@@ -4713,11 +4733,11 @@ class Round1Controller(Node):
 
     def _turn(self, x, y, theta):
         C = self.arc['C']; s = self.arc['s']; R = self.arc['R']
-        # Mit der Pose rechnen, die der Wagen hat, wenn der Befehl wirkt (260 ms
-        # Totzeit) -- wie auf der Geraden. Auch das Kurvenende haengt daran: am
-        # ist-Kurs beendet, drehte er waehrend der Totzeit noch 13-34 grad weiter.
-        if self.turn_praediktion:
-            xp, yp, thp = self._pose_nach_totzeit(x, y, theta)
+        # Compute with the pose the car will have when the command takes effect
+        # (260 ms dead time) -- as on the straight. The end of the corner depends
+        # on it too: ended on the actual heading, it kept turning 13-34 deg during the dead time.
+        if self.turn_prediction:
+            xp, yp, thp = self._pose_after_dead_time(x, y, theta)
         else:
             xp, yp, thp = x, y, theta
         rx, ry = xp - C[0], yp - C[1]
@@ -4729,20 +4749,20 @@ class Round1Controller(Node):
         theta_err = wrap(self.arc['theta_target'] - thp)
 
         blend = max(0.0, min(1.0, abs(theta_err) / self.ff_blend)) if self.ff_blend > 1e-6 else 1.0
-        if self.turn_kruemmung:
-            # Erst die gewuenschte KRUEMMUNG, dann omega mit genau der
-            # Geschwindigkeit, durch die die Bruecke wieder teilt
-            # (delta = atan(L*omega/v_ist), v_ist >= 0,05). So hebt sich v heraus
-            # -- wie bei Stanley auf der Geraden. Vorher ging beim Anfahren aus
-            # dem Stand v_turn in die Vorsteuerung: omega 0,85 / 0,05 -> 58 grad,
-            # Volleinschlag in Ecke 1 und 3. Bei 0,35 m/s kommt dasselbe heraus
-            # wie vorher (Korrekturverstaerkungen sind auf v_turn bezogen).
-            v_b = max(abs(self.v_ist), 0.05)
+        if self.turn_curvature:
+            # First the desired CURVATURE, then omega with exactly the speed
+            # the bridge divides by again (delta = atan(L*omega/v_act),
+            # v_act >= 0.05). That way v cancels out -- as with Stanley on the
+            # straight. Before, when starting from standstill, v_turn went into
+            # the feedforward: omega 0.85 / 0.05 -> 58 deg, full lock in
+            # corners 1 and 3. At 0.35 m/s the same comes out as before
+            # (the correction gains refer to v_turn).
+            v_b = max(abs(self.v_act), 0.05)
             kappa = (s * blend / R
                      + (s * self.k_ct * e_ct + self.k_th * e_th) / max(self.v_turn, 0.05))
             omega = v_b * kappa
         else:
-            v_meas = abs(self.v_ist) if abs(self.v_ist) > 0.05 else self.v_turn
+            v_meas = abs(self.v_act) if abs(self.v_act) > 0.05 else self.v_turn
             omega = s * (v_meas / R) * blend + s * self.k_ct * e_ct + self.k_th * e_th
 
         # debug: arc cross-track on the SAME topic as the straight -> continuous plot.
@@ -4752,18 +4772,18 @@ class Round1Controller(Node):
         self.pub_arc_dist.publish(Float64(data=float(dist)))
         self.pub_arc_R.publish(Float64(data=float(R)))
         self.pub_e_th.publish(Float64(data=float(math.degrees(e_th))))
-        delta_cmd = math.atan(self.wheelbase * omega / max(abs(self.v_ist), 0.05))
+        delta_cmd = math.atan(self.wheelbase * omega / max(abs(self.v_act), 0.05))
         self.pub_delta.publish(Float64(data=float(math.degrees(delta_cmd))))
 
         if s * theta_err <= self.sweep_tol:
             # corner done: advance index, plan next arc, back to DRIVE (no stop)
             self.corner_count += 1
             self.get_logger().info(
-                f"TURN fertig Ecke {self.corner_count} (theta={math.degrees(theta):.1f}, "
-                f"ziel={math.degrees(self.arc['theta_target']):.1f}).")
-            self.rangier_versuche = 0
+                f"TURN done corner {self.corner_count} (theta={math.degrees(theta):.1f}, "
+                f"target={math.degrees(self.arc['theta_target']):.1f}).")
+            self.manoeuvre_attempts = 0
             if self.corner_count % 4 == 0:
-                self._tempo_anwenden()        # neue Runde: ggf. anderes Profil
+                self._apply_pace()        # new lap: possibly a different profile
             self.corner_idx = (self.corner_idx + self.dir_step()) % 4
             self.publish_lap_state()
             self.arc = None
@@ -4771,11 +4791,11 @@ class Round1Controller(Node):
             self.ct_integral = 0.0        # fresh cross-track integrator for the new straight
             self.obs_path = None          # new straight -> plan its obstacle path below
             self.scan_done_this_straight = False
-            self.vorhalt_done_this_straight = False
+            self.lookahead_halt_done_this_straight = False
             self.plan_arc(theta)
             self.plan_obstacle_path()     # obstacles of the NEW straight
             if not self.obs_path:
-                self._rueckfuehr_pfad()       # sanft aus der Kurve auf die Spurlinie
+                self._return_path()       # gently out of the corner onto the lane line
             self.state = 'DRIVE'
             return
         if self.debug:
@@ -4824,41 +4844,41 @@ class Round1Controller(Node):
         ux, uy = dx / L, dy / L
         nx, ny = -uy, ux                      # left normal of the segment
         d = nx * ax + ny * ay
-        if self.pfad_vorsteuerung <= 0.0:
+        if self.path_feedforward <= 0.0:
             return self._stanley_steer(x, y, theta, (nx, ny, d), (ux, uy))
-        # Stufenlose Tangente: an den Pfadpunkten der Mittelwert der beiden
-        # angrenzenden Segmente, dazwischen linear. Sonst springt e_theta an
-        # jedem Punkt (alle 5 cm) um den Knick -- beim Spurwechsel mehrere grad.
+        # Continuous tangent: at the path points the mean of the two adjacent
+        # segments, linear in between. Otherwise e_theta jumps at every point
+        # (every 5 cm) by the kink -- several degrees during a lane change.
         t = ((x - ax) * dx + (y - ay) * dy) / (L * L)
         t = max(0.0, min(1.0, t))
         h = math.atan2(uy, ux)
-        h_vor = self._pfad_richtung(path_xy, best_i - 1, h)
-        h_nach = self._pfad_richtung(path_xy, best_i + 1, h)
-        h_a = h + 0.5 * wrap(h_vor - h)       # am Punkt best_i
-        h_b = h + 0.5 * wrap(h_nach - h)      # am Punkt best_i + 1
+        h_prev = self._path_direction(path_xy, best_i - 1, h)
+        h_next = self._path_direction(path_xy, best_i + 1, h)
+        h_a = h + 0.5 * wrap(h_prev - h)       # at point best_i
+        h_b = h + 0.5 * wrap(h_next - h)      # at point best_i + 1
         h_t = h_a + t * wrap(h_b - h_a)
-        # Kruemmung an den beiden Punkten, dazwischen linear
-        k_a = self._pfad_kruemmung(path_xy, best_i)
-        k_b = self._pfad_kruemmung(path_xy, best_i + 1)
+        # curvature at the two points, linear in between
+        k_a = self._path_curvature(path_xy, best_i)
+        k_b = self._path_curvature(path_xy, best_i + 1)
         kappa = k_a + t * (k_b - k_a)
-        delta_ff = self.pfad_vorsteuerung * math.atan(self.wheelbase * kappa)
+        delta_ff = self.path_feedforward * math.atan(self.wheelbase * kappa)
         return self._stanley_steer(x, y, theta, (nx, ny, d),
                                    (math.cos(h_t), math.sin(h_t)), delta_ff=delta_ff)
 
     @staticmethod
-    def _pfad_richtung(path_xy, i, sonst):
-        """Richtung von Segment i (Punkt i -> i+1); ausserhalb: sonst."""
+    def _path_direction(path_xy, i, otherwise):
+        """Direction of segment i (point i -> i+1); outside: otherwise."""
         if i < 0 or i + 1 >= len(path_xy):
-            return sonst
+            return otherwise
         (ax, ay), (bx, by) = path_xy[i], path_xy[i + 1]
         if abs(bx - ax) + abs(by - ay) < 1e-9:
-            return sonst
+            return otherwise
         return math.atan2(by - ay, bx - ax)
 
     @staticmethod
-    def _pfad_kruemmung(path_xy, i):
-        """Kruemmung am Pfadpunkt i (Richtungsaenderung / halbe Segmentlaengen),
-        + = Linkskurve. 0 an den Enden."""
+    def _path_curvature(path_xy, i):
+        """Curvature at path point i (change of direction / half segment
+        lengths), + = left turn. 0 at the ends."""
         if i <= 0 or i + 1 >= len(path_xy):
             return 0.0
         (ax, ay), (bx, by), (cx, cy) = path_xy[i - 1], path_xy[i], path_xy[i + 1]
@@ -4906,7 +4926,7 @@ class Round1Controller(Node):
         self.ct_integral = max(-self.i_ct_limit, min(self.i_ct_limit, self.ct_integral))
 
         # speed used everywhere: clamped against EKF spikes/dropouts
-        v = min(max(abs(self.v_ist), 0.2), 1.2)
+        v = min(max(abs(self.v_act), 0.2), 1.2)
 
         # cross-track: real v in the denominator keeps the closed loop
         # speed-independent (e_ct decays with time constant 1/k_stanley).
@@ -4930,63 +4950,63 @@ class Round1Controller(Node):
         return omega
 
 
-def _einpark_test_scan_args(argv):
-    """Einpark-Test: der scan_processor muss statt aus der Bucht von der
-    Startgeraden starten. Aus der Kommandozeile gelesen, weil der Neustart vor
-    dem Anlegen des Knotens (also vor den Parametern) passiert."""
-    werte = {}
+def _park_test_scan_args(argv):
+    """Park test: the scan_processor has to start from the start straight
+    instead of from the bay. Read from the command line, because the restart
+    happens before the node is created (i.e. before the parameters)."""
+    vals = {}
     for a in argv:
         if ':=' in a:
             k, v = a.split(':=', 1)
-            werte[k.strip()] = v.strip()
-    if werte.get('einparken_test', '').lower() not in ('true', '1', '1.0'):
+            vals[k.strip()] = v.strip()
+    if vals.get('park_test', '').lower() not in ('true', '1', '1.0'):
         return ''
-    richtung = werte.get('test_richtung', 'CCW').upper()
-    if richtung not in ('CW', 'CCW'):
-        richtung = 'CCW'
-    args = '-p start_from_bay:=false -p start_gerade:=%s' % richtung
-    for k in ('test_bucht_front', 'test_bucht_q'):
-        if k in werte:
+    direction = vals.get('test_direction', 'CCW').upper()
+    if direction not in ('CW', 'CCW'):
+        direction = 'CCW'
+    args = '-p start_from_bay:=false -p start_straight:=%s' % direction
+    for k in ('test_bay_front', 'test_bay_lat'):
+        if k in vals:
             try:
-                args += ' -p %s:=%.4f' % (k, float(werte[k]))
+                args += ' -p %s:=%.4f' % (k, float(vals[k]))
             except ValueError:
                 pass
     return args
 
 
-def _zweiter_regler_laeuft(warte_s=1.5):
-    """Laeuft schon ein round1_controller? Dann faehrt dieser hier nicht los.
-    Zwei Regler senden beide /cmd_vel und Lenkung; der alte meldet dazu seine
-    Runden (lap_state) an den neuen scan_processor, der die Hinderniskarte
-    dann sofort einfriert (parken_test_36/37)."""
-    pruefer = rclpy.create_node('round1_controller_pruefer')
+def _second_controller_running(wait_s=1.5):
+    """Is a round1_controller already running? Then this one does not drive off.
+    Two controllers both send /cmd_vel and steering; on top of that the old
+    one reports its laps (lap_state) to the new scan_processor, which then
+    freezes the obstacle map at once (parken_test_36/37)."""
+    checker = rclpy.create_node('round1_controller_probe')
     try:
-        ende = time.monotonic() + warte_s
+        end = time.monotonic() + wait_s
         n = 0
-        while time.monotonic() < ende:
-            rclpy.spin_once(pruefer, timeout_sec=0.1)
-            n = pruefer.count_publishers('/round1_controller/lap_state')
+        while time.monotonic() < end:
+            rclpy.spin_once(checker, timeout_sec=0.1)
+            n = checker.count_publishers('/round1_controller/lap_state')
             if n > 0:
                 break
         return n
     finally:
-        pruefer.destroy_node()
+        checker.destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    n = _zweiter_regler_laeuft()
+    n = _second_controller_running()
     if n > 0:
         rclpy.logging.get_logger('round1_controller').fatal(
-            'Es laeuft schon ein round1_controller (%d Sender auf '
-            '/round1_controller/lap_state) -- den erst beenden (Strg+C in seinem '
-            'Fenster), sonst kaempfen zwei Regler um Lenkung und Motor. '
-            'Starte NICHT.' % n)
+            'A round1_controller is already running (%d publishers on '
+            '/round1_controller/lap_state) -- stop that one first (Ctrl+C in its '
+            'window), otherwise two controllers fight over steering and motor. '
+            'NOT starting.' % n)
         rclpy.try_shutdown()
         sys.exit(1)
-    # EKF und scan_processor frisch starten, bevor die eigenen gelatchten Abos
-    # entstehen -- die Karte haengt an der Startpose (ekf/schaetzung_neustart.py).
-    neu_starten('round1_controller', scan_args=_einpark_test_scan_args(sys.argv))
+    # Restart EKF and scan_processor fresh before our own latched subscriptions
+    # come into being -- the map hangs on the start pose (ekf/estimation_restart.py).
+    restart_estimation('round1_controller', scan_args=_park_test_scan_args(sys.argv))
     node = Round1Controller()
     try:
         rclpy.spin(node)
