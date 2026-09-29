@@ -171,8 +171,11 @@ Stanley is unstable backwards.
 The bridge converts the commanded yaw rate into a steering angle with a
 **measured steering table** per speed (0.35 / 0.50 / 0.75 m/s), because the
 servo-to-wheel-angle curve is not linear and differs between left and right
-by up to 4° at full lock. Speed is controlled on the Jetson (PI with
-feed-forward) using the EKF speed.
+by up to 4° at full lock. The driving speed is controlled on the Jetson (PI
+with feed-forward, 50 Hz) using the EKF speed. The position moves for
+unparking and parking run on the ESP32 with its own PID directly on the
+encoder: there the controller sits at the source and has no round trip
+through the serial link, so it reacts faster and stops more precisely.
 
 ![Measured steering characteristic at three speeds.](../figures/steer_lut.svg)
 
@@ -183,15 +186,14 @@ feed-forward) using the EKF speed.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> UNPARK_BUTTON: start in the bay
-  [*] --> WAIT_INPUTS: open challenge
+  [*] --> UNPARK_BUTTON: power on, start in the bay
+  [*] --> WAIT_BUTTON: power on, open challenge
   UNPARK_BUTTON --> UNPARK_DIRECTION: button
+  WAIT_BUTTON --> WAIT_INPUTS: button
   UNPARK_DIRECTION --> UNPARK_DRIVE: open side found
   UNPARK_DRIVE --> UNPARK_SCAN: move sequence done
   UNPARK_SCAN --> WAIT_INPUTS
-  WAIT_INPUTS --> WAIT_BUTTON: map, direction, pose ok
-  WAIT_BUTTON --> DRIVE: button
-  WAIT_INPUTS --> DRIVE: after unparking
+  WAIT_INPUTS --> DRIVE: position, direction, pose known
   DRIVE --> SCAN_PAUSE: lap 1, 1.10 m before the wall
   SCAN_PAUSE --> DRIVE
   DRIVE --> TURN: turn-in point reached
@@ -207,16 +209,25 @@ stateDiagram-v2
   DRIVE --> DONE: localisation lost > 2 s
 ```
 
-<!-- CHECK the transitions above against round1_controller (drawn from the
-state list, not from every branch).
-TODO rationale in the team's words: why separate states for scan halt,
-turn and parking; what each state is allowed to do; which checks lead to DONE.
-Mention the emergency manoeuvre (back up and re-plan, max. 2 per corner). -->
+After power-on the robot only waits for the start button (rules 9.11 and
+9.14): nothing is measured before it. Direction, start position, lane width
+and the position in the bay are all determined after the button.
+
+<!-- CHECK before the deadline: the code on the branch does not do this yet.
+(1) open challenge: round1_controller goes WAIT_INPUTS -> WAIT_BUTTON, i.e.
+the start detection runs before the button; the order has to be WAIT_BUTTON
+-> WAIT_INPUTS. (2) scan_processor runs its start/bay detection from node
+start, and estimation_restart waits for "bay detected" before the run; it has
+to be gated by the button as well. (3) require_button defaults to False and
+start_robot.sh does not set it (the autostart on the Jetson does).
+TODO rationale in the team's words: why separate states for scan halt, turn
+and parking; what each state may do; which checks lead to DONE; the emergency
+manoeuvre (back up and re-plan, max. 2 per corner). -->
 
 ## Open challenge
 
-The inner walls are unknown at the start. The robot measures its start
-position and the lane width at standstill and uses a reduced map of the three
+The inner walls are unknown at the start. After the button the robot measures
+its start position and the lane width at standstill and uses a reduced map of the three
 walls it sees. While driving it measures the width of every straight (sum of
 both side distances, accepted within ±0.15 m of 0.60 or 1.00 m) and, as soon
 as all four are known, reconstructs the inner band from the median widths and

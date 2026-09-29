@@ -28,7 +28,7 @@ and a paragraph per interface. Examples that already exist:
 | Colour only trusted up to 1.60 m | votes from further away count as "something there" only |
 | Six CPU cores shared by fusion, estimation and control | CPU load reduced from ~92 % to ~53 % (commit a14524e) |
 | The field is fourfold symmetric | global scan matching finds poses rotated by 90°; the start pose must come from start detection |
-| Start procedure: one button to start | container and controller start from the autostart (boot 85–90 s), the controller waits for the button |
+| Start procedure (rules 9.10–9.14): one switch, one start button, nothing measured before it | container and controller start from the autostart (boot 85–90 s) and wait for the button; direction, position and bay are detected after it |
 
 ## Decisions and trade-offs
 
