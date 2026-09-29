@@ -1,26 +1,26 @@
-"""EKF und scan_processor frisch starten, bevor ein Fahrknoten loslegt.
+"""Restart the EKF and scan_processor fresh before a driving node gets going.
 
-Die Karte haengt an der Pose, bei der ekf_node startet, und der scan_processor
-misst Richtung und Lage in der Bucht nur beim Start (start_from_bay). Nach dem
-Wieder-Hinstellen in die Luecke gehoeren also beide neu gestartet -- vor jedem
-Lauf und vor jedem Ausparkversuch. Das passiert hier automatisch, sobald
-round1_controller oder ausparken_varianten_node mit ros2 run starten.
+The map depends on the pose at which ekf_node starts, and the scan_processor
+measures direction and position in the bay only at start-up (start_from_bay). After
+putting the robot back into the bay both need a restart -- before every
+run and before every unpark attempt. That happens here automatically as soon as
+round1_controller or unpark_variants_node start with ros2 run.
 
-Die beiden Knoten laufen in den tmux-Fenstern 8 und 9 auf dem Jetson, und an
-tmux kommt man aus dem Container nicht heran. Deshalb geht der Neustart ueber
-einen Waechter auf dem Jetson (Fenster 11, src/schaetzung_waechter.sh):
+The two nodes run in tmux windows 8 and 9 on the Jetson, and tmux cannot be
+reached from the container. So the restart goes through
+a watchdog on the Jetson (window 11, src/estimation_watchdog.sh):
 
-  1. Dieser Knoten legt eine Anfrage mit einer Kennung in den gemeinsamen
-     Workspace (/workspace = ~/ros2_ws).
-  2. Der Waechter startet 8 und 9 ueber schaetzung_neustart.sh neu -- die Logs
-     bleiben in ihren Fenstern -- und antwortet mit derselben Kennung.
-  3. Hier wird gewartet, bis Gyro ok, Bucht erkannt und Lokalisierung ok sind.
-     Klappt das nicht, startet der Fahrknoten gar nicht.
+  1. This node puts a request with an id into the shared
+     workspace (/workspace = ~/ros2_ws).
+  2. The watchdog restarts 8 and 9 via estimation_restart.sh -- the logs
+     stay in their windows -- and replies with the same id.
+  3. Here we wait until gyro ok, bay detected and localisation ok.
+     If that does not work out, the driving node does not start at all.
 
-Aufrufen VOR dem Anlegen des eigenen Knotens: dessen gelatchte Abos
-(/corner_geometry, ...) bekaemen sonst noch die Werte des alten scan_processor.
+Call BEFORE creating your own node: its latched subscriptions
+(/corner_geometry, ...) would otherwise still get the values of the old scan_processor.
 
-Abschalten fuer einen einzelnen Start: --ros-args -p schaetzung_neustart:=false
+To switch off for a single start: --ros-args -p estimation_restart:=false
 """
 import os
 import sys
@@ -35,101 +35,101 @@ from std_msgs.msg import Bool, String
 from robot_msgs.msg import CornerGeometry
 
 WORKSPACE = os.environ.get('ROBOT_WORKSPACE', '/workspace')
-ANFRAGE = os.path.join(WORKSPACE, '.schaetzung_neustart_anfrage')
-ANTWORT = os.path.join(WORKSPACE, '.schaetzung_neustart_antwort')
+REQUEST_FILE = os.path.join(WORKSPACE, '.estimation_restart_request')
+REPLY_FILE = os.path.join(WORKSPACE, '.estimation_restart_reply')
 
-ANTWORT_TIMEOUT = 25.0     # Waechter: Knoten beenden (bis ~8 s) und neu starten
-BEREIT_TIMEOUT = 40.0      # danach: Gyro, Bucht, Lokalisierung
+REPLY_TIMEOUT = 25.0     # watchdog: stop the nodes (up to ~8 s) and start them again
+READY_TIMEOUT = 40.0     # after that: gyro, bay, localisation
 
 
-def _abgeschaltet(argv):
+def _disabled(argv):
     for a in argv:
         k = a.replace(' ', '').lower()
-        if k in ('schaetzung_neustart:=false', 'schaetzung_neustart:=0'):
+        if k in ('estimation_restart:=false', 'estimation_restart:=0'):
             return True
     return False
 
 
-def _entfernen(pfad):
+def _remove(file_path):
     try:
-        os.remove(pfad)
+        os.remove(file_path)
     except FileNotFoundError:
         pass
 
 
-def neu_starten(knoten, argv=None, scan_args=''):
-    """Neustart anstossen und warten, bis beide bereit sind.
+def restart_estimation(node_name, argv=None, scan_args=''):
+    """Trigger the restart and wait until both are ready.
 
-    Beendet den Prozess (SystemExit 1), wenn der Waechter nicht antwortet oder
-    Gyro/Bucht nicht rechtzeitig stehen -- dann soll der Fahrknoten nicht los.
+    Ends the process (SystemExit 1) if the watchdog does not reply or
+    gyro/bay are not in place in time -- then the driving node should not go.
 
-    scan_args: zusaetzliche ROS-Argumente fuer den scan_processor (z. B.
-    '-p start_from_bay:=false -p start_gerade:=CCW' fuer den Einpark-Test).
-    Der Waechter laesst nur harmlose Zeichen durch.
+    scan_args: additional ROS arguments for the scan_processor (e.g.
+    '-p start_from_bay:=false -p start_straight:=CCW' for the park test).
+    The watchdog only lets harmless characters through.
     """
     argv = sys.argv if argv is None else argv
-    log = rclpy.logging.get_logger(knoten)
-    if _abgeschaltet(argv):
-        log.warn('schaetzung_neustart:=false -- EKF und scan_processor laufen '
-                 'weiter wie sie sind (Karte vom letzten Start!).')
+    log = rclpy.logging.get_logger(node_name)
+    if _disabled(argv):
+        log.warn('estimation_restart:=false -- EKF and scan_processor keep running '
+                 'as they are (map from the last start!).')
         return
 
-    kennung = uuid.uuid4().hex[:8]
-    _entfernen(ANTWORT)
-    with open(ANFRAGE + '.tmp', 'w') as f:
-        f.write(kennung + '\n' + scan_args.replace('\n', ' ') + '\n')
-    os.replace(ANFRAGE + '.tmp', ANFRAGE)
-    log.info('EKF und scan_processor werden neu gestartet (Fenster 8/9) ...')
+    req_id = uuid.uuid4().hex[:8]
+    _remove(REPLY_FILE)
+    with open(REQUEST_FILE + '.tmp', 'w') as f:
+        f.write(req_id + '\n' + scan_args.replace('\n', ' ') + '\n')
+    os.replace(REQUEST_FILE + '.tmp', REQUEST_FILE)
+    log.info('EKF and scan_processor are being restarted (windows 8/9) ...')
 
     t0 = time.monotonic()
-    antwort = None
-    while time.monotonic() - t0 < ANTWORT_TIMEOUT:
+    reply = None
+    while time.monotonic() - t0 < REPLY_TIMEOUT:
         try:
-            with open(ANTWORT) as f:
-                teile = f.read().split()
+            with open(REPLY_FILE) as f:
+                parts = f.read().split()
         except FileNotFoundError:
-            teile = []
-        if len(teile) >= 2 and teile[1] == kennung:
-            antwort = teile[0]
+            parts = []
+        if len(parts) >= 2 and parts[1] == req_id:
+            reply = parts[0]
             break
         time.sleep(0.1)
-    _entfernen(ANTWORT)
-    if antwort is None:
-        _entfernen(ANFRAGE)
-        log.fatal('Der Neustart-Waechter antwortet nicht (tmux-Fenster 11 '
-                  '"neustart", src/schaetzung_waechter.sh). Nicht gestartet. '
-                  'Ohne Neustart: -p schaetzung_neustart:=false')
+    _remove(REPLY_FILE)
+    if reply is None:
+        _remove(REQUEST_FILE)
+        log.fatal('The restart watchdog does not reply (tmux window 11 '
+                  '"restart", src/estimation_watchdog.sh). Not started. '
+                  'Without restart: -p estimation_restart:=false')
         raise SystemExit(1)
-    if antwort != 'ok':
-        log.fatal('Neustart von EKF/scan_processor fehlgeschlagen -- siehe '
-                  'Fenster 11. Nicht gestartet.')
+    if reply != 'ok':
+        log.fatal('Restart of EKF/scan_processor failed -- see '
+                  'window 11. Not started.')
         raise SystemExit(1)
 
-    # Erst JETZT abonnieren: die alten Knoten sind beendet, ihre gelatchten
-    # Nachrichten mit ihnen verschwunden.
-    n = rclpy.create_node(knoten + '_neustart_warten')
+    # Subscribe only NOW: the old nodes have ended, and their latched
+    # messages have gone with them.
+    n = rclpy.create_node(node_name + '_restart_wait')
     q = QoSProfile(depth=1)
     q.durability = DurabilityPolicy.TRANSIENT_LOCAL
-    st = {'gyro': None, 'karte': False, 'lok': None}
+    st = {'gyro': None, 'map': False, 'loc': None}
     n.create_subscription(Bool, '/ekf/gyro_ok', lambda m: st.update(gyro=m.data), q)
     n.create_subscription(CornerGeometry, '/corner_geometry',
-                          lambda m: st.update(karte=True), q)
+                          lambda m: st.update(map=True), q)
     n.create_subscription(String, '/localization_state',
-                          lambda m: st.update(lok=m.data), q)
+                          lambda m: st.update(loc=m.data), q)
     try:
         t0 = time.monotonic()
-        while time.monotonic() - t0 < BEREIT_TIMEOUT:
+        while time.monotonic() - t0 < READY_TIMEOUT:
             rclpy.spin_once(n, timeout_sec=0.2)
-            if st['gyro'] and st['karte'] and st['lok'] == 'ok':
-                log.info('Bereit nach %.0f s: Gyro ok, Bucht erkannt, Lokalisierung ok.'
+            if st['gyro'] and st['map'] and st['loc'] == 'ok':
+                log.info('Ready after %.0f s: gyro ok, bay detected, localisation ok.'
                          % (time.monotonic() - t0))
                 return
-        log.fatal('NICHT bereit nach %.0f s: Gyro %s, Karte %s, Lokalisierung %s. '
-                  'Nicht gestartet.'
-                  % (BEREIT_TIMEOUT,
-                     {None: 'keine Meldung', True: 'ok', False: 'AUSGEFALLEN'}[st['gyro']],
-                     'da' if st['karte'] else 'fehlt (steht er in der Luecke?)',
-                     st['lok'] or '-'))
+        log.fatal('NOT ready after %.0f s: gyro %s, map %s, localisation %s. '
+                  'Not started.'
+                  % (READY_TIMEOUT,
+                     {None: 'no message', True: 'ok', False: 'FAILED'}[st['gyro']],
+                     'present' if st['map'] else 'missing (is it standing in the bay?)',
+                     st['loc'] or '-'))
         raise SystemExit(1)
     finally:
         n.destroy_node()
