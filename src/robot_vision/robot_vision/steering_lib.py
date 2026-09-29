@@ -29,22 +29,22 @@ class SteeringController:
                     calib_data = json.load(f)
                 
                 self.poly_coeffs = np.array(calib_data["poly_coeffs"])
-                self.log_info("Kalibrierungsdaten aus JSON geladen.")
+                self.log_info("Calibration data loaded from JSON.")
             except Exception as e:
-                self.log_error(f"JSON fehlerhaft. Nutze Standardwerte. Fehler: {e}")
+                self.log_error(f"JSON broken. Using default values. Error: {e}")
         else:
-            self.log_error("Keine Kalibrierungsdatei gefunden! Nutze Standardwerte.")
+            self.log_error("No calibration file found! Using default values.")
 
-    def get_steering_for_radius(self, target_radius, fahrtrichtung_ist_links):
+    def get_steering_for_radius(self, target_radius, turning_left):
         """
-        Gibt das benötigte PWM/Servo-Signal u zurück.
+        Returns the required PWM/servo signal u.
         """
         if abs(target_radius) < 0.001:
             kappa_target = 0.0
         else:
             kappa_target = 1.0 / target_radius
 
-        if not fahrtrichtung_ist_links:
+        if not turning_left:
             kappa_target = -kappa_target
 
         u_base = np.polyval(self.poly_coeffs, kappa_target)

@@ -4,21 +4,21 @@ import os
 
 class TrackAnalyzer:
     def __init__(self, logger=None, visualizer_cb=None, calib_file="camera_calib.json"):
-        # 1. ZUERST die Abhängigkeiten zuweisen
+        # 1. FIRST assign the dependencies
         self.logger = logger
         self.visualizer_cb = visualizer_cb
         self.camera_coeffs = []
         
         # ==========================================
-        # DER FIX: Absoluten Pfad zur JSON-Datei erzwingen!
+        # THE FIX: force an absolute path to the JSON file!
         # ==========================================
         script_dir = os.path.dirname(os.path.abspath(__file__))
         absolute_calib_path = os.path.join(script_dir, calib_file)
         
-        # 2. DANN die Kalibrierung mit dem ECHTEN Pfad laden
+        # 2. THEN load the calibration with the REAL path
         self._load_camera_calibration(absolute_calib_path)
 
-    # Diese Methoden MÜSSEN existieren, damit self.log_warn funktioniert
+    # These methods MUST exist so that self.log_warn works
     def log_info(self, msg):
         if self.logger:
             self.logger.info(msg)
@@ -36,24 +36,24 @@ class TrackAnalyzer:
             try:
                 with open(filepath, 'r') as f:
                     data = json.load(f)
-                    # HIER IST DER FIX: Suche nach "inverse_coeffs"!
+                    # HERE IS THE FIX: look for "inverse_coeffs"!
                     self.camera_coeffs = data.get("inverse_coeffs", []) 
-                    self.log_info(f"Kamera-Kalibrierung (Inverses Modell) geladen! Koeffizienten: {self.camera_coeffs}")
+                    self.log_info(f"Camera calibration (inverse model) loaded! Coefficients: {self.camera_coeffs}")
             except Exception as e:
-                self.log_warn(f"Fehler beim Laden der Kamera-Config: {e}")
+                self.log_warn(f"Error loading the camera config: {e}")
         else:
-            # NEU: Diese Warnung rettet dir beim nächsten Mal das Leben!
-            self.log_warn(f"KRITISCH: Kamera-Config nicht gefunden unter: {filepath}")
+            # NEW: this warning will save your life next time!
+            self.log_warn(f"CRITICAL: camera config not found at: {filepath}")
 
     def get_distance_from_bbox(self, y_max):
         if not self.camera_coeffs or len(self.camera_coeffs) != 3:
-            self.log_warn("Keine Kamera-Koeffizienten geladen! Gebe 0.0 zurück.")
+            self.log_warn("No camera coefficients loaded! Returning 0.0.")
             return 0.0
             
-        # 1. Den Kehrwert des abgelesenen Pixels bilden
+        # 1. Take the reciprocal of the pixel read off
         u = 1.0 / float(y_max)
         
-        # 2. Das Polynom mit dem Kehrwert füttern
+        # 2. Feed the reciprocal into the polynomial
         distance_m = np.polyval(self.camera_coeffs, u)
         
         return max(0.0, float(distance_m))

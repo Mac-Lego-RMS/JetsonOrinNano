@@ -32,9 +32,9 @@ def generate_launch_description():
     )
 
     # 4. BNO055 IMU
-    # Hinweis: In Launch-Dateien sind absolute Pfade für Parameter-Dateien sicherer.
-    # Wenn die Datei im Workspace-Root liegt (/workspace), funktioniert dies.
-    # Andernfalls nutze os.path.join(get_package_share_directory('paketname'), 'config', 'bno055_params.yaml')
+    # In launch files, absolute paths for parameter files are safer.
+    # This works if the file is in the workspace root (/workspace).
+    # Otherwise use os.path.join(get_package_share_directory('package_name'), 'config', 'bno055_params.yaml')
     bno055_node = Node(
         package='bno055',
         executable='bno055',
@@ -43,8 +43,8 @@ def generate_launch_description():
         output='screen'
     )
 
-    # 5. LDLidar Launch-Datei einbinden
-    # Nimmt an, dass die Datei im 'launch' Verzeichnis des 'ldlidar_node' Pakets liegt
+    # 5. Include the LDLidar launch file
+    # Assumes the file is in the 'launch' directory of the 'ldlidar_node' package
     ldlidar_launch_dir = get_package_share_directory('ldlidar_node')
     ldlidar_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -52,7 +52,7 @@ def generate_launch_description():
         )
     )
 
-    # Rückgabe des Launch-Graphen
+    # Return the launch graph
     return LaunchDescription([
         foxglove_node,
         camera_node,

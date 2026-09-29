@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Legacy vision package of the national-final robot (YOLO obstacle detection and wall follower)',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',
