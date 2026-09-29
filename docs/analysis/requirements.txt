@@ -1,0 +1,7 @@
+# Offline rosbag analysis toolkit (docs/analysis). No ROS installation needed.
+numpy>=1.23
+pandas>=1.5
+matplotlib>=3.6
+rosbags>=0.10          # pure-Python rosbag2 reader/writer (typestore API)
+# only for running the tests (tests/test_toolkit.py also runs without it):
+# pytest>=7
