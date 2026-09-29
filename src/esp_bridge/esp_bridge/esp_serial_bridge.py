@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""ROS-2-Bridge zum ESP32-S3-Controller.
+"""ROS 2 bridge to the ESP32-S3 controller.
 
-Setzt das UART-Protokoll aus docs/JETSON_BRIDGE.md vollstaendig auf ROS 2 um -
-jede Funktion des ESP ist ueber ein Topic oder einen Service erreichbar - und
-versieht jede Meldung des ESP mit dem Zeitpunkt, zu dem sie *abgeschickt*
-wurde, nicht mit dem, zu dem der Jetson sie zufaellig gelesen hat. Der
-Uhrenabgleich dafuer steckt in ``timesync_jetson.py`` (Abschnitt 5 der Spec).
+Maps the UART protocol from docs/JETSON_BRIDGE.md completely onto ROS 2 -
+every function of the ESP is reachable through a topic or a service - and
+stamps every ESP message with the time it was *sent*, not the time the
+Jetson happened to read it. The clock sync for this lives in
+``timesync_jetson.py`` (section 5 of the spec).
 
-Aufbau
-------
-``EspLink``        Protokoll, Timesync, Heartbeat, Lese-Thread. Kennt kein ROS
-                   und laeuft ohne rclpy - damit ohne Roboter testbar.
-``EspBridgeNode``  rclpy-Node. Nur Verdrahtung: Topics und Services auf die
-                   Methoden von ``EspLink``, Pakete des ESP auf Publisher.
+Structure
+---------
+``EspLink``        Protocol, timesync, heartbeat, reader thread. Knows no ROS
+                   and runs without rclpy - so it can be tested without the robot.
+``EspBridgeNode``  rclpy node. Only wiring: topics and services onto the
+                   methods of ``EspLink``, ESP packets onto publishers.
 
 Start
 -----
-    ros2 run <paket> esp_serial_bridge --ros-args -p port:=/dev/ttyTHS1
-    python3 esp_serial_bridge.py --selftest      # ohne ROS, ohne Hardware
+    ros2 run <package> esp_serial_bridge --ros-args -p port:=/dev/ttyTHS1
+    python3 esp_serial_bridge.py --selftest      # without ROS, without hardware
 """
 
 from __future__ import annotations
@@ -36,16 +36,16 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 from nav_msgs.msg import Odometry
 
 # ==========================================================================
-# timesync_jetson.py einbinden
+# Pull in timesync_jetson.py
 # ==========================================================================
-# Im Repo liegt die Datei unter docs/, in einem ROS-Paket gehoert sie neben
-# diese hier. Beide Faelle abdecken, statt den Anwender an PYTHONPATH
-# scheitern zu lassen.
+# In the repo the file lives under docs/, in a ROS package it belongs next to
+# this one. Cover both cases instead of letting the user fail on
+# PYTHONPATH.
 
-#: Was aus timesync_jetson gebraucht wird. Wird nach jedem Importversuch
-#: geprueft - ein leerer Platzhalter oder eine fremde Datei gleichen Namens
-#: soll nicht durchrutschen und erst zehn Zeilen spaeter als nichtssagender
-#: AttributeError auffallen.
+#: What is needed from timesync_jetson. Checked after every import
+#: attempt - an empty placeholder or an unrelated file of the same name must
+#: not slip through and only show up ten lines later as a meaningless
+#: AttributeError.
 _TIMESYNC_NAMES = ("Frame", "FrameParser", "EspClock", "TimeSync",
                    "monotonic", "START_BYTE")
 
@@ -57,16 +57,16 @@ def _timesync_missing(module) -> List[str]:
 def _load_timesync():
     tried: List[str] = []
 
-    def accept(module, quelle: str):
+    def accept(module, source: str):
         missing = _timesync_missing(module)
         if not missing:
             return module
-        tried.append(f"{quelle}: unvollstaendig, es fehlen {', '.join(missing)}"
-                     f" (Datei: {getattr(module, '__file__', '?')})")
+        tried.append(f"{source}: incomplete, missing {', '.join(missing)}"
+                     f" (file: {getattr(module, '__file__', '?')})")
         return None
 
-    # 1. Als Teil desselben Pakets - der Normalfall in einem ROS-Paket, wo
-    #    beide Dateien nebeneinander installiert sind.
+    # 1. As part of the same package - the normal case in a ROS package, where
+    #    both files are installed side by side.
     if __package__:
         name = f"{__package__}.timesync_jetson"
         try:
@@ -76,7 +76,7 @@ def _load_timesync():
         except ImportError as exc:
             tried.append(f"{name}: {exc}")
 
-    # 2. Irgendwo auf dem Suchpfad.
+    # 2. Anywhere on the search path.
     try:
         import timesync_jetson as module
         found = accept(module, "timesync_jetson (sys.path)")
@@ -85,22 +85,22 @@ def _load_timesync():
     except ImportError as exc:
         tried.append(f"timesync_jetson (sys.path): {exc}")
 
-    # 3. Direkt als Datei laden.
+    # 3. Load directly as a file.
     here = Path(__file__).resolve().parent
     for path in (here / "timesync_jetson.py",
                  here.parent / "timesync_jetson.py",
                  here.parent / "docs" / "timesync_jetson.py",
                  here / "docs" / "timesync_jetson.py"):
         if not path.exists():
-            tried.append(f"{path}: nicht vorhanden")
+            tried.append(f"{path}: not present")
             continue
         try:
             spec = importlib.util.spec_from_file_location("timesync_jetson", path)
             module = importlib.util.module_from_spec(spec)
-            # Muss vor exec_module stehen: @dataclass schlaegt die Globals
-            # ihrer Klasse ueber sys.modules[cls.__module__] nach und
-            # scheitert sonst mit "'NoneType' object has no attribute
-            # '__dict__'". So steht es auch in der Import-Doku.
+            # Must come before exec_module: @dataclass looks up the globals
+            # of its class through sys.modules[cls.__module__] and
+            # otherwise fails with "'NoneType' object has no attribute
+            # '__dict__'". The import docs say the same.
             sys.modules["timesync_jetson"] = module
             spec.loader.exec_module(module)
         except Exception as exc:
@@ -110,15 +110,15 @@ def _load_timesync():
         found = accept(module, str(path))
         if found:
             return found
-        # Kaputtes Modul den Namen nicht belegen lassen.
+        # Do not let a broken module occupy the name.
         sys.modules.pop("timesync_jetson", None)
 
     raise ImportError(
-        "timesync_jetson.py fehlt oder ist unvollstaendig.\n"
-        "Die Datei gehoert neben diese hier - in einem ROS-Paket also in\n"
-        "denselben Ordner wie esp_serial_bridge.py, danach neu bauen.\n"
-        "Steht dort eine leere Platzhalterdatei, ueberschreibt sie den\n"
-        "richtigen Fund.\nVersucht wurde:\n  " + "\n  ".join(tried))
+        "timesync_jetson.py is missing or incomplete.\n"
+        "The file belongs next to this one - in a ROS package that is\n"
+        "the same folder as esp_serial_bridge.py, then rebuild.\n"
+        "If an empty placeholder file sits there, it overrides the\n"
+        "real one.\nTried:\n  " + "\n  ".join(tried))
 
 
 _ts = _load_timesync()
@@ -133,14 +133,14 @@ BITS_PER_BYTE = _ts.BITS_PER_BYTE
 read_available = _ts.read_available
 
 # ==========================================================================
-# Protokoll
+# Protocol
 # ==========================================================================
 
 # --- Jetson -> ESP ---
 CMD_MOTOR = 0x10
 CMD_SERVO = 0x20
 CMD_LED = 0x30
-CMD_CALIBRATE = 0x40        # identisch zu CMD_CAL mit Aktion "start"
+CMD_CALIBRATE = 0x40        # identical to CMD_CAL with action "start"
 CMD_CAL = 0x41
 CMD_TORQUE = 0x50
 CMD_TRIM = 0x60
@@ -151,7 +151,7 @@ CMD_MOVE = 0x90
 CMD_MOVE_ABORT = 0x91
 CMD_PROGRESS = 0x92
 CMD_BATTERY = 0xA0
-CMD_TIME_SYNC = 0xB0        # wird in timesync_jetson.py gesendet
+CMD_TIME_SYNC = 0xB0        # sent in timesync_jetson.py
 CMD_STAMP_MODE = 0xB2
 CMD_TELEM_RATE = 0xC0
 CMD_EMERGENCY = 0xFF
@@ -165,7 +165,7 @@ CMD_MOVE_DONE = 0x93
 CMD_PROGRESS_RSP = 0x94
 CMD_BATTERY_RSP = 0xA1
 CMD_BATTERY_WARN = 0xA2
-CMD_TIME_RSP = 0xB1         # wird in timesync_jetson.py ausgewertet
+CMD_TIME_RSP = 0xB1         # evaluated in timesync_jetson.py
 CMD_STAMP_RSP = 0xB3
 CMD_TELEMETRY = 0xC1
 
@@ -173,14 +173,14 @@ DUTY_MAX = 1023
 TELEMETRY_MS_MIN = 10
 
 MOVE_OK, MOVE_TIMEOUT, MOVE_ABORTED = 0x00, 0x01, 0x02
-MOVE_STATUS_TEXT = {MOVE_OK: "ok", MOVE_TIMEOUT: "timeout", MOVE_ABORTED: "abgebrochen"}
+MOVE_STATUS_TEXT = {MOVE_OK: "ok", MOVE_TIMEOUT: "timeout", MOVE_ABORTED: "aborted"}
 
-# PID-Parameter: Index auf der Leitung -> Name. Alle Werte gehen als
-# int32 x 1000 raus, auch die ganzzahligen (haeufigste Fehlerquelle, s. Spec).
+# PID parameters: index on the wire -> name. All values go out as
+# int32 x 1000, the integer ones too (most common mistake, see spec).
 PID_PARAMS = ["kp", "ki", "kd", "ilimit", "maxduty", "tol_deg", "settle_ms",
               "timeout_ms", "minduty"]
 
-# Kalibrier-Aktionen in CMD_CAL
+# Calibration actions in CMD_CAL
 CAL_ACTIONS = {
     "start": 0x00, "minus": 0x01, "plus": 0x02, "center": 0x03,
     "left": 0x04, "right": 0x05, "save": 0x06, "abort": 0x07,
@@ -188,7 +188,7 @@ CAL_ACTIONS = {
     "status": 0x0C,
 }
 
-# Der ESP rechnet Wege in 1/10 Grad der Ausgangswelle, ROS in Radiant.
+# The ESP counts travel in 1/10 degree of the output shaft, ROS in radians.
 DEG_TO_RAD = math.pi / 180.0
 
 
@@ -197,7 +197,7 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 
 # ==========================================================================
-# Ergebnis-Datentypen
+# Result data types
 # ==========================================================================
 
 @dataclass
@@ -205,7 +205,7 @@ class MoveDone:
     move_id: int
     status: int
     position_deg: float
-    stamp: Optional[float]        # Sendezeitpunkt (Jetson-Uhr), falls gestempelt
+    stamp: Optional[float]        # send time (Jetson clock), if stamped
 
     @property
     def ok(self) -> bool:
@@ -223,16 +223,16 @@ class Progress:
 
 @dataclass
 class Telemetry:
-    """Fahrzustand, den der ESP im eingestellten Takt von sich aus schickt."""
+    """Drive state that the ESP sends on its own at the configured rate."""
 
-    #: Stellung der Ausgangswelle, absolut seit ESP-Boot. Vorzeichenbehaftet.
+    #: Position of the output shaft, absolute since ESP boot. Signed.
     position_deg: float
-    #: Drehgeschwindigkeit. **Vorzeichenbehaftet**, negativ = rueckwaerts.
+    #: Rotational speed. **Signed**, negative = reverse.
     speed_deg_s: float
-    #: Was an der Bruecke anliegt, -1023..+1023. Vorzeichenbehaftet.
+    #: What is applied to the H-bridge, -1023..+1023. Signed.
     duty: int
-    #: Motorstrom - **immer positiv**. Der VNH5019 meldet nur den Betrag, die
-    #: Richtung steht in ``duty``.
+    #: Motor current - **always positive**. The VNH5019 only reports the
+    #: magnitude, the direction is in ``duty``.
     current_a: float
 
     @property
@@ -262,33 +262,32 @@ class CalState:
 
 
 CAL_STATUS_TEXT = {
-    0x00: "ausgefuehrt", 0x01: "gespeichert", 0x02: "abgelehnt",
-    0x03: "servo antwortet nicht", 0x04: "erst 0x40 senden",
-    0x05: "bereichsende erreicht",
+    0x00: "done", 0x01: "saved", 0x02: "rejected",
+    0x03: "servo not responding", 0x04: "send 0x40 first",
+    0x05: "end of range reached",
 }
 
 
 # ==========================================================================
-# EspLink - Protokoll ohne ROS
+# EspLink - protocol without ROS
 # ==========================================================================
 
 class EspLink:
-    """Serielle Verbindung zum ESP: senden, empfangen, Uhren abgleichen.
+    """Serial link to the ESP: send, receive, sync the clocks.
 
-    Der Lese-Thread nimmt alles entgegen, was der ESP von sich aus schickt,
-    fuettert den Zeitabgleich und ruft die angemeldeten Callbacks. Fuer
-    Antworten, auf die jemand wartet (PID, Kalibrierung), gibt es zusaetzlich
-    ``wait_for``.
+    The reader thread takes everything the ESP sends on its own, feeds the
+    clock sync and calls the registered callbacks. For replies that someone
+    is waiting for (PID, calibration) there is also ``wait_for``.
 
-    **Der Heartbeat ist Pflicht.** Der ESP laesst den Motor auslaufen, wenn
-    5 s lang kein Befehl kommt. ``tick()`` schickt deshalb den letzten
-    Motorbefehl zyklisch nach - waehrend einer Positionsfahrt bewusst nicht,
-    die darf laenger laufen.
+    **The heartbeat is mandatory.** The ESP lets the motor coast when no
+    command arrives for 5 s. ``tick()`` therefore resends the last motor
+    command periodically - on purpose not during a position move, that one
+    may run longer.
     """
 
     def __init__(self, port: str, baud: int = 115200, servo_id: int = 1,
                  log: Optional[Callable[[str], None]] = None) -> None:
-        import serial          # nur hier, damit der Selbsttest ohne auskommt
+        import serial          # only here, so the self-test works without it
 
         self._ser = serial.Serial(port, baud, timeout=0.05)
         self._log = log or (lambda msg: None)
@@ -303,7 +302,7 @@ class EspLink:
         self._waiters: Dict[int, List[threading.Event]] = {}
         self._last_payload: Dict[int, bytes] = {}
 
-        # Motor-Heartbeat
+        # Motor heartbeat
         self._motor_frame: Optional[bytes] = None
         self._last_motor_tx = 0.0
         self._move_active = False
@@ -318,13 +317,13 @@ class EspLink:
         self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                         name="esp-rx")
 
-    # --- Lebenszyklus ----------------------------------------------------
+    # --- Life cycle ------------------------------------------------------
 
     def start(self, sync_rounds: int = 12, stamp: bool = True) -> None:
-        """Lese-Thread starten, Uhren abgleichen, Stempel einschalten.
+        """Start the reader thread, sync the clocks, switch stamping on.
 
-        Reihenfolge ist wichtig: ohne Uhrenversatz ist ein Zeitstempel wertlos,
-        also erst messen, dann stempeln lassen.
+        The order matters: without the clock offset a timestamp is worthless,
+        so measure first, then turn on stamping.
         """
         self._reader.start()
 
@@ -334,11 +333,11 @@ class EspLink:
         time.sleep(0.05)
 
         if self.clock.valid:
-            self._log(f"Uhren abgeglichen: Versatz {self.clock.offset * 1e3:+.3f} ms, "
-                      f"Umlauf {self.clock.best_rtt * 1e3:.3f} ms, "
+            self._log(f"Clocks synced: offset {self.clock.offset * 1e3:+.3f} ms, "
+                      f"round trip {self.clock.best_rtt * 1e3:.3f} ms, "
                       f"Drift {self.clock.drift_ppm:+.1f} ppm")
         else:
-            self._log("WARNUNG: keine Antwort auf TIME_SYNC - Zeitstempel bleiben leer")
+            self._log("WARNING: no reply to TIME_SYNC - timestamps stay empty")
 
         if stamp:
             self.set_stamp_mode(True)
@@ -353,20 +352,19 @@ class EspLink:
             pass
         self._ser.close()
 
-    # --- Senden ----------------------------------------------------------
+    # --- Sending ---------------------------------------------------------
 
     def _send_timed(self, frame: bytes) -> float:
-        """Rahmen rausschicken und zurueckgeben, wann das letzte Byte draussen
-        war.
+        """Send a frame and return when its last byte was out.
 
-        Der Zeitpunkt wird **gerechnet, nicht gemessen**: Uhr vor dem Schreiben
-        plus Uebertragungsdauer (10 Bit je Byte). ``flush()`` danach abzufragen
-        waere naheliegend, taugt aber nicht - ``tcdrain()`` kehrt auf dem
-        Tegra-UART des Jetson deutlich spaeter zurueck als das letzte Byte
-        rausgeht, und dann wird der gemessene Umlauf negativ.
+        The time is **computed, not measured**: clock before the write plus
+        transfer time (10 bits per byte). Calling ``flush()`` afterwards
+        would be the obvious way, but it does not work - ``tcdrain()`` returns
+        on the Jetson's Tegra UART much later than the last byte goes out,
+        and then the measured round trip turns negative.
 
-        Das ``flush()`` davor bleibt: es raeumt den Puffer, damit unser Rahmen
-        sofort losgeht und die Rechnung stimmt.
+        The ``flush()`` before it stays: it empties the buffer so our frame
+        goes out at once and the calculation holds.
         """
         with self._write_lock:
             self._ser.flush()
@@ -376,16 +374,16 @@ class EspLink:
         return started + len(frame) * BITS_PER_BYTE / self._ser.baudrate
 
     def send(self, cmd: int, payload: bytes = b"") -> None:
-        """Ein Paket abschicken. Immer in einem einzigen ``write()`` - der
-        ESP verwirft ein Paket, wenn zwischen zwei Byte >100 ms liegen."""
+        """Send one packet. Always in a single ``write()`` - the ESP
+        drops a packet if more than 100 ms pass between two bytes."""
         self._send_timed(bytes([START_BYTE, cmd]) + payload)
 
-    # --- Fahrbefehle -----------------------------------------------------
+    # --- Drive commands --------------------------------------------------
 
     def motor(self, duty: int) -> None:
-        """Offene Motorsteuerung, -1023..+1023. 0 = auslaufen lassen.
+        """Open-loop motor control, -1023..+1023. 0 = let it coast.
 
-        Aktives Bremsen gibt es nur ueber ``emergency()``.
+        Active braking only through ``emergency()``.
         """
         duty = int(_clamp(duty, -DUTY_MAX, DUTY_MAX))
         reverse = 1 if duty < 0 else 0
@@ -394,20 +392,20 @@ class EspLink:
             struct.pack(">H", speed)
         self._send_timed(self._motor_frame)
         self._last_motor_tx = monotonic()
-        # Jeder Motorbefehl loest eine laufende Positionsfahrt ab - auch
-        # duty 0. Der ESP quittiert die alte Fahrt dann mit "abgebrochen".
+        # Every motor command replaces a running position move - duty 0
+        # too. The ESP then acks the old move with "aborted".
         self._move_active = False
 
     def motor_coast(self) -> None:
         self.motor(0)
 
     def steer(self, percent: float) -> None:
-        """Lenkung, -100 (rechts) .. +100 (links). 0 = geradeaus."""
+        """Steering, -100 (right) .. +100 (left). 0 = straight ahead."""
         pct = int(round(_clamp(percent, -100, 100)))
         self.send(CMD_SERVO, bytes([self.servo_id]) + struct.pack(">h", pct))
 
     def emergency(self) -> None:
-        """Nothalt mit aktiver Bremse. Bricht auch eine Positionsfahrt ab."""
+        """Emergency halt with active braking. Also aborts a position move."""
         self._motor_frame = None
         self._move_active = False
         self.send(CMD_EMERGENCY)
@@ -416,30 +414,30 @@ class EspLink:
         self.send(CMD_LED, bytes([1 if on else 0]))
 
     def trim(self, action: int) -> None:
-        """0 = Mitte nach links, 1 = nach rechts, 2 = speichern."""
+        """0 = centre to the left, 1 = to the right, 2 = save."""
         self.send(CMD_TRIM, bytes([action & 0xFF]))
 
     def torque_report(self) -> None:
-        """Servolast auf die USB-Konsole des ESP ausgeben. Ohne UART-Antwort."""
+        """Print the servo load on the ESP's USB console. No UART reply."""
         self.send(CMD_TORQUE)
 
-    # --- Positionsfahrt --------------------------------------------------
+    # --- Position move ---------------------------------------------------
 
     def move(self, degrees: float) -> int:
-        """Um ``degrees`` weiterdrehen (relativ!). Gibt die move_id zurueck.
+        """Turn on by ``degrees`` (relative!). Returns the move_id.
 
-        Es laeuft immer nur eine Fahrt; eine neue loest die alte ab, und die
-        alte quittiert mit Status "abgebrochen".
+        Only one move runs at a time; a new one replaces the old one, and the
+        old one acks with status "aborted".
         """
         move_id = self._next_move_id
-        self._next_move_id = self._next_move_id % 255 + 1   # 0 vermeiden
+        self._next_move_id = self._next_move_id % 255 + 1   # avoid 0
         deg10 = int(round(degrees * 10.0))
-        # VOR dem Senden setzen. Der Knoten laeuft mit ReentrantCallbackGroup
-        # in einem MultiThreadedExecutor; stuende die Zeile danach, saehe der
-        # Geschwindigkeitsregler im anderen Thread noch "keine Fahrt", schickte
-        # duty 0 hinterher und der ESP quittierte die eben erst gestartete
-        # Fahrt sofort als abgebrochen. Genau das war am Roboter zu sehen:
-        # 14 ms zwischen CMD_MOVE und MOVE_ABORTED.
+        # Set BEFORE sending. The node runs with a ReentrantCallbackGroup
+        # in a MultiThreadedExecutor; if this line came after, the speed
+        # controller in the other thread would still see "no move", send
+        # duty 0 right after, and the ESP would ack the move it had just
+        # started as aborted. Exactly that was seen on the robot:
+        # 14 ms between CMD_MOVE and MOVE_ABORTED.
         self._move_active = True
         self.send(CMD_MOVE, bytes([move_id]) + struct.pack(">i", deg10))
         return move_id
@@ -453,8 +451,8 @@ class EspLink:
     # --- PID -------------------------------------------------------------
 
     def pid_set(self, param: int | str, value: float) -> None:
-        """Einen Regelparameter setzen. Nur fluechtig - ``pid_save()`` schreibt
-        den ganzen Satz ins NVS."""
+        """Set one controller parameter. Volatile only - ``pid_save()`` writes
+        the whole set to NVS."""
         index = PID_PARAMS.index(param) if isinstance(param, str) else int(param)
         raw = int(round(value * 1000.0))
         self.send(CMD_PID_SET, bytes([index]) + struct.pack(">i", raw))
@@ -470,21 +468,21 @@ class EspLink:
         payload = self.request(CMD_PID_SAVE, CMD_PID_SAVED, timeout)
         return None if payload is None else payload[0] == 0x00
 
-    # --- Lenkungs-Kalibrierung -------------------------------------------
+    # --- Steering calibration --------------------------------------------
 
     def calibrate(self, action: int | str = "start", arg: int = 0,
                   timeout: float = 1.5) -> Optional[CalState]:
-        """Eine Kalibrieraktion ausfuehren. Jede wird mit CAL_RSP beantwortet.
+        """Run one calibration action. Each one is answered with CAL_RSP.
 
-        Der Servo kann sein Drehmoment nicht begrenzen - es gibt deshalb
-        bewusst keine Aktion, die selbsttaetig bis zum Anschlag faehrt.
+        The servo cannot limit its torque - so on purpose there is no
+        action that drives to the end stop on its own.
         """
         code = CAL_ACTIONS[action] if isinstance(action, str) else int(action)
         payload = self.request(CMD_CAL, CMD_CAL_RSP, timeout,
                                bytes([code, arg & 0xFF]))
         return None if payload is None else parse_cal_state(payload)
 
-    # --- Batterie und Zeit -----------------------------------------------
+    # --- Battery and time ------------------------------------------------
 
     def request_battery(self) -> None:
         self.send(CMD_BATTERY)
@@ -498,11 +496,11 @@ class EspLink:
         return None
 
     def set_telemetry_rate(self, period_s: float) -> float:
-        """Takt der Fahrtelemetrie setzen. 0 schaltet sie ab.
+        """Set the rate of the drive telemetry. 0 switches it off.
 
-        Gibt den tatsaechlich gesetzten Takt in Sekunden zurueck - der ESP
-        nimmt nichts unter 20 ms an, weil er die Geschwindigkeit ohnehin nur
-        alle 100 ms neu bildet. Die Position ist bei jedem Paket frisch.
+        Returns the period actually set, in seconds - the ESP accepts
+        nothing below 20 ms, because it only updates the speed every
+        100 ms anyway. The position is fresh in every packet.
         """
         ms = 0 if period_s <= 0 else max(TELEMETRY_MS_MIN,
                                          min(60000, int(round(period_s * 1000))))
@@ -510,32 +508,32 @@ class EspLink:
         return ms / 1000.0
 
     def resync(self) -> None:
-        """Eine Runde Uhrenabgleich. Muss regelmaessig passieren, sonst laeuft
-        der Quarzdrift weg (~0,1 ms pro Sekunde)."""
+        """One round of clock sync. Must happen regularly, otherwise the
+        crystal drift runs away (~0.1 ms per second)."""
         self.sync.request()
 
     # --- Heartbeat -------------------------------------------------------
 
     def tick(self, heartbeat_period: float = 0.2) -> None:
-        """Regelmaessig aufrufen. Schickt den letzten Motorbefehl nach, damit
-        der 5-s-Watchdog des ESP nicht zuschlaegt."""
+        """Call regularly. Resends the last motor command so that the
+        ESP's 5 s watchdog does not trip."""
         if self._motor_frame is None or self._move_active:
             return
         if monotonic() - self._last_motor_tx >= heartbeat_period:
             self._send_timed(self._motor_frame)
             self._last_motor_tx = monotonic()
 
-    # --- Empfang ---------------------------------------------------------
+    # --- Receiving -------------------------------------------------------
 
     def on(self, cmd: int, callback: Callable[[Frame], None]) -> None:
-        """Callback fuer einen Pakettyp anmelden. Laeuft im Lese-Thread."""
+        """Register a callback for a packet type. Runs in the reader thread."""
         self._callbacks.setdefault(cmd, []).append(callback)
 
     def request(self, cmd: int, answer: int, timeout: float,
                 payload: bytes = b"") -> Optional[bytes]:
-        """Befehl senden und auf die passende Antwort warten.
+        """Send a command and wait for the matching reply.
 
-        Antworten kommen im Lese-Thread an, der Aufrufer darf also blockieren.
+        Replies arrive in the reader thread, so the caller may block.
         """
         event = threading.Event()
         self._waiters.setdefault(answer, []).append(event)
@@ -544,19 +542,19 @@ class EspLink:
             try:
                 self._waiters[answer].remove(event)
             except (KeyError, ValueError):
-                pass          # der Lese-Thread war schneller
-            self._log(f"Timeout: keine Antwort 0x{answer:02X} auf 0x{cmd:02X}")
+                pass          # the reader thread was faster
+            self._log(f"Timeout: no reply 0x{answer:02X} to 0x{cmd:02X}")
             return None
         return self._last_payload.get(answer)
 
     def _read_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                # Nicht read(64): das wartet, bis 64 Byte beisammen sind, und
-                # dann tragen alle Pakete darin denselben Empfangszeitpunkt.
+                # Not read(64): that waits until 64 bytes are together, and
+                # then all packets in it carry the same receive time.
                 data = read_available(self._ser)
-            except Exception as exc:            # Port weg (USB gezogen o.ae.)
-                self._log(f"Lesefehler: {exc}")
+            except Exception as exc:            # port gone (USB unplugged or similar)
+                self._log(f"Read error: {exc}")
                 break
             if not data:
                 continue
@@ -572,7 +570,7 @@ class EspLink:
     def _dispatch(self, frame: Frame) -> None:
         self.rx_frames += 1
 
-        # Zeitabgleich zuerst: die Antwort darf nirgends warten.
+        # Clock sync first: its reply must not wait anywhere.
         if self.sync.handle(frame) is not None:
             return
 
@@ -582,7 +580,7 @@ class EspLink:
             elif frame.payload[1] == 0:
                 self._move_active = False
 
-        # Wartende Aufrufer wecken
+        # Wake up waiting callers
         waiters = self._waiters.pop(frame.cmd, None)
         if waiters:
             self._last_payload[frame.cmd] = frame.payload
@@ -593,33 +591,33 @@ class EspLink:
             try:
                 callback(frame)
             except Exception as exc:
-                self._log(f"Callback fuer 0x{frame.cmd:02X} fehlgeschlagen: {exc}")
+                self._log(f"Callback for 0x{frame.cmd:02X} failed: {exc}")
 
-    # --- Zustand ---------------------------------------------------------
+    # --- State -----------------------------------------------------------
 
     @property
     def move_active(self) -> bool:
-        """Laeuft gerade eine Positionsfahrt? Solange sie laeuft, pausiert der
-        Heartbeat - Fahrten duerfen laenger als die 5-s-Grenze dauern."""
+        """Is a position move running? While it runs, the heartbeat
+        pauses - moves may take longer than the 5 s limit."""
         return self._move_active
 
     @property
     def parser(self) -> FrameParser:
         return self._parser
 
-    # --- Zeitstempel -----------------------------------------------------
+    # --- Timestamps ------------------------------------------------------
 
     def sent_at(self, frame: Frame) -> Optional[float]:
-        """Wann das Paket abgeschickt wurde, in der Jetson-Uhr."""
+        """When the packet was sent, in the Jetson clock."""
         return self.clock.frame_time(frame)
 
     def latency(self, frame: Frame) -> Optional[float]:
-        """Wie lange es von "abgeschickt" bis "gelesen" gebraucht hat."""
+        """How long it took from "sent" to "read"."""
         return self.clock.latency(frame)
 
 
 # ==========================================================================
-# Nutzlast auspacken
+# Unpacking payloads
 # ==========================================================================
 
 def parse_move_done(payload: bytes, stamp: Optional[float] = None) -> MoveDone:
@@ -656,12 +654,12 @@ def parse_cal_state(payload: bytes) -> CalState:
 
 
 # ==========================================================================
-# ROS-2-Node
+# ROS 2 node
 # ==========================================================================
 
 def _build_node_class():
-    """Node-Klasse erst bauen, wenn rclpy da ist - so laeuft der Selbsttest
-    auch auf einem Rechner ohne ROS."""
+    """Build the node class only once rclpy is there - so the self-test
+    also runs on a machine without ROS."""
 
     import rclpy
     from rclpy.callback_groups import ReentrantCallbackGroup
@@ -681,19 +679,19 @@ def _build_node_class():
     from esp_bridge.steer_lut import SteerLUT
 
     class EspBridgeNode(Node):
-        """Alle Funktionen des ESP als Topics und Services.
+        """All functions of the ESP as topics and services.
 
-        Aufteilung: was einen Strom bildet (Fahrbefehle, Telemetrie) ist ein
-        Topic, was eine Quittung hat (PID speichern, kalibrieren) ist ein
-        Service. Alle Nachrichten mit Header tragen als ``stamp`` den
-        **Sendezeitpunkt des ESP**, umgerechnet in die ROS-Uhr.
+        Split: what forms a stream (drive commands, telemetry) is a
+        topic, what has an ack (save PID, calibrate) is a service. All
+        messages with a header carry the **ESP's send time** as ``stamp``,
+        converted into the ROS clock.
         """
 
         def __init__(self) -> None:
             super().__init__("esp_serial_bridge")
             group = ReentrantCallbackGroup()
 
-            # --- Parameter ---
+            # --- Parameters ---
             self.declare_parameter("port", "/dev/ttyTHS1")
             self.declare_parameter("baud", 115200)
             self.declare_parameter("servo_id", 1)
@@ -704,62 +702,62 @@ def _build_node_class():
             self.declare_parameter("cmd_vel_timeout", 0.5)
             self.declare_parameter("battery_period", 5.0)
             self.declare_parameter("progress_period", 0.2)
-            # Takt, in dem der ESP Position und Geschwindigkeit von sich aus
-            # schickt. Zur Laufzeit aenderbar:
+            # Rate at which the ESP sends position and speed on its own.
+            # Can be changed at runtime:
             #   ros2 param set /esp_serial_bridge telemetry_period 0.1
-            self.declare_parameter("telemetry_period", 0.01)  # 0 = aus
-            # cmd_vel ist offene Steuerung: der ESP regelt die Drehzahl nicht.
-            # Diese beiden Werte sind die Umrechnung und muessen am Fahrzeug
-            # ausgemessen werden.
-            self.declare_parameter("v_max", 1.648)         # m/s bei PWM 1.0
-            self.declare_parameter("pwm_deadband", 0.076)  # PWM-Fraktion, ab der er losbricht
-            self.declare_parameter("v_eps", 0.01)          # darunter gilt: Stillstand
-            self.declare_parameter("max_angular", 1.0)     # rad/s bei Vollausschlag
+            self.declare_parameter("telemetry_period", 0.01)  # 0 = off
+            # cmd_vel is open-loop: the ESP does not control the speed.
+            # These two values are the conversion and have to be measured
+            # on the car.
+            self.declare_parameter("v_max", 1.648)         # m/s at PWM 1.0
+            self.declare_parameter("pwm_deadband", 0.076)  # PWM fraction at which it breaks away
+            self.declare_parameter("v_eps", 0.01)          # below this: standstill
+            self.declare_parameter("max_angular", 1.0)     # rad/s at full lock
             self.declare_parameter("vel_accel", 0.8)
 
-            # Ackermann-Lenkung: angular.z (rad/s) -> Lenkwinkel -> Servo-Prozent.
-            # delta = atan(L*omega/v); Kennlinie servo = (delta - b)/a, seitengetrennt.
+            # Ackermann steering: angular.z (rad/s) -> steering angle -> servo percent.
+            # delta = atan(L*omega/v); curve servo = (delta - b)/a, per side.
             self.declare_parameter("wheelbase", 0.10)         # L [m]
-            self.declare_parameter("steer_a_left", 0.3643)    # rad pro servo-Einheit (CCW)
+            self.declare_parameter("steer_a_left", 0.3643)    # rad per servo unit (CCW)
             self.declare_parameter("steer_b_left", -0.01985)   # rad Offset (CCW)
-            self.declare_parameter("steer_a_right", 0.2962)   # rad pro servo-Einheit (CW)
+            self.declare_parameter("steer_a_right", 0.2962)   # rad per servo unit (CW)
             self.declare_parameter("steer_b_right", 0.00377)  # rad Offset (CW)
             self.declare_parameter('steer_calib_path', '/workspace/src/esp_bridge/esp_bridge/steer_calib.json')
-            self.declare_parameter("steer_v_min", 0.05)       # darunter: delta bei v_min clampen
+            self.declare_parameter("steer_v_min", 0.05)       # below: clamp delta at v_min
             self.declare_parameter("steer_raw_bypass", False)
 
-            self.declare_parameter("vel_kp", 200.0)      # duty pro (m/s) Fehler
-            self.declare_parameter("vel_ki", 800.0)      # duty pro (m/s * s)
-            self.declare_parameter("vel_i_limit", 600.0) # Anti-Windup-Grenze (duty)
+            self.declare_parameter("vel_kp", 200.0)      # duty per (m/s) error
+            self.declare_parameter("vel_ki", 800.0)      # duty per (m/s * s)
+            self.declare_parameter("vel_i_limit", 600.0) # anti-windup limit (duty)
             self.declare_parameter("vel_control_rate", 50.0)
-            self.declare_parameter("odom_stale_s", 0.15) # danach: nur Feedforward
-            self.declare_parameter("odom_stop_s", 0.50)  # danach: Motor stoppen
+            self.declare_parameter("odom_stale_s", 0.15) # after that: feedforward only
+            self.declare_parameter("odom_stop_s", 0.50)  # after that: stop the motor
 
             self.declare_parameter("steer_center_servo", -0.04)
 
             self._p = lambda name: self.get_parameter(name).value
             self._cmd_vel_timeout = float(self._p("cmd_vel_timeout"))
             self._last_cmd_vel = 0.0
-            self._v_soll = 0.0
-            self._v_ist = 0.0
+            self._v_target = 0.0
+            self._v_actual = 0.0
             self._v_ramp = 0.0
             self._last_odom = 0.0
-            # Serialisiert alles, was den Motorbefehl schreibt. Ohne das
-            # reicht die Sperre auf move_active nicht: zwischen Pruefung und
-            # Senden kann der andere Thread die Fahrt starten.
+            # Serialises everything that writes the motor command. Without it
+            # the lock on move_active is not enough: between the check and
+            # the send the other thread can start the move.
             self._motor_lock = threading.Lock()
             self._vel_integral = 0.0
             self._ctrl_dt = 1.0 / (float(self._p("vel_control_rate")) or 50.0)
 
-            # --- Verbindung ---
+            # --- Connection ---
             port = self._p("port")
-            self.get_logger().info(f"oeffne {port} @ {self._p('baud')} Baud")
+            self.get_logger().info(f"opening {port} @ {self._p('baud')} baud")
             self.link = EspLink(port, int(self._p("baud")),
                                 int(self._p("servo_id")),
                                 log=self.get_logger().info)
 
-            # Pakete des ESP kommen im Lese-Thread an; von dort nur in eine
-            # Queue, veroeffentlicht wird auf dem Executor-Thread.
+            # ESP packets arrive in the reader thread; from there only into a
+            # queue, publishing happens on the executor thread.
             self._inbox: Deque[Tuple[Frame, Time]] = deque(maxlen=500)
             for cmd in (CMD_BUTTON, CMD_MOVE_DONE, CMD_PROGRESS_RSP,
                         CMD_BATTERY_RSP, CMD_BATTERY_WARN, CMD_CAL_RSP,
@@ -777,8 +775,8 @@ def _build_node_class():
                 self.get_parameter('steer_calib_path').value,
                 logger=self.get_logger())
 
-            # Erst nach dem Uhrenabgleich einschalten - sonst kaemen die ersten
-            # Telemetriepakete ohne brauchbaren Zeitstempel an.
+            # Switch on only after the clock sync - otherwise the first
+            # telemetry packets would arrive without a usable timestamp.
             self._apply_telemetry_period(float(self._p("telemetry_period")))
             self.add_on_set_parameters_callback(self._on_set_parameters)
 
@@ -796,13 +794,13 @@ def _build_node_class():
             self.create_timer(1.0, self._publish_link_status, callback_group=group)
             self.create_timer(self._ctrl_dt, self._velocity_control, callback_group=group)
 
-            self.get_logger().info("Bridge bereit")
+            self.get_logger().info("Bridge ready")
 
-        # --- Aufbau ------------------------------------------------------
+        # --- Setup -------------------------------------------------------
 
         def _make_publishers(self) -> None:
-            # Warnungen und Zustaende sollen auch ein spaet gestarteter
-            # Abonnent noch sehen.
+            # Warnings and states should still reach a subscriber that
+            # starts late.
             latched = QoSProfile(depth=1,
                                  reliability=ReliabilityPolicy.RELIABLE,
                                  durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -821,12 +819,12 @@ def _build_node_class():
             self.pub_console = self.create_publisher(String, "~/console", 20)
             self.pub_status = self.create_publisher(DiagnosticArray, "/diagnostics", 10)
 
-            # Zahlen statt Text - damit Foxglove sie plotten kann.
-            # /diagnostics traegt dieselben Werte, aber als String.
+            # Numbers instead of text - so Foxglove can plot them.
+            # /diagnostics carries the same values, but as strings.
             self.pub_latency = self.create_publisher(Float32, "~/latency_ms", 50)
             self.pub_rtt = self.create_publisher(Float32, "~/rtt_ms", 10)
-            # Der Versatz ist mehrere Millionen ms gross - float32 hat dort
-            # nur noch 1-ms-Schritte und der Drift waere unsichtbar.
+            # The offset is several million ms - float32 only has 1 ms
+            # steps there and the drift would be invisible.
             self.pub_offset = self.create_publisher(Float64, "~/offset_ms", 10)
             self.pub_drift = self.create_publisher(Float32, "~/drift_ppm", 10)
 
@@ -864,24 +862,24 @@ def _build_node_class():
             srv(SetBool, "~/set_stamp_mode", self._srv_stamp)
             srv(SetBool, "~/servo_torque_free", self._srv_torque_free)
 
-        # --- Zeitstempel --------------------------------------------------
+        # --- Timestamps --------------------------------------------------
 
         def _enqueue(self, frame: Frame) -> None:
-            """Laeuft im Lese-Thread. Hier nur die ROS-Zeit des Lesens
-            festhalten, alles Weitere macht ``_drain``."""
+            """Runs in the reader thread. Only record the ROS time of the
+            read here, ``_drain`` does the rest."""
             self._inbox.append((frame, self.get_clock().now()))
 
         def _stamp(self, frame: Frame, read_at: Time) -> TimeMsg:
-            """Sendezeitpunkt des Pakets als ROS-Zeit.
+            """Send time of the packet as ROS time.
 
-            Die Laufzeit wird in der monotonen Uhr gemessen (dort steckt der
-            Abgleich mit dem ESP) und von der ROS-Zeit des Lesens abgezogen.
-            So bleibt der Stempel richtig, egal ob ROS auf Systemzeit oder
-            Simulationszeit laeuft.
+            The latency is measured in the monotonic clock (that is where the
+            sync with the ESP lives) and subtracted from the ROS time of the
+            read. So the stamp stays right, whether ROS runs on system time or
+            on simulation time.
             """
             latency = self.link.latency(frame)
             if latency is None or not 0.0 <= latency < 1.0:
-                return read_at.to_msg()      # ungestempelt oder unplausibel
+                return read_at.to_msg()      # unstamped or implausible
             self.pub_latency.publish(Float32(data=latency * 1e3))
             return Time(nanoseconds=read_at.nanoseconds - int(latency * 1e9)).to_msg()
 
@@ -891,7 +889,7 @@ def _build_node_class():
             header.frame_id = frame_id
             return header
 
-        # --- Eingehende Pakete --------------------------------------------
+        # --- Incoming packets --------------------------------------------
 
         def _drain(self) -> None:
             while self._inbox:
@@ -900,7 +898,7 @@ def _build_node_class():
                     self._publish(frame, read_at)
                 except Exception as exc:
                     self.get_logger().error(
-                        f"Paket 0x{frame.cmd:02X} nicht verarbeitet: {exc}")
+                        f"Packet 0x{frame.cmd:02X} not processed: {exc}")
 
             while self.link.console_lines:
                 self.pub_console.publish(String(data=self.link.console_lines.popleft()))
@@ -918,8 +916,8 @@ def _build_node_class():
                           int(round(result.position_deg * 10))]))
                 self._publish_joint(result.position_deg, frame, read_at)
                 self.get_logger().info(
-                    f"Fahrt {result.move_id}: {MOVE_STATUS_TEXT.get(result.status, '?')} "
-                    f"bei {result.position_deg:+.1f} grad")
+                    f"Move {result.move_id}: {MOVE_STATUS_TEXT.get(result.status, '?')} "
+                    f"at {result.position_deg:+.1f} deg")
 
             elif cmd == CMD_PROGRESS_RSP:
                 progress = parse_progress(payload)
@@ -952,17 +950,16 @@ def _build_node_class():
 
             elif cmd == CMD_STAMP_RSP:
                 self.get_logger().info(
-                    f"Sendezeitstempel {'an' if payload[0] else 'aus'}")
+                    f"Send timestamps {'on' if payload[0] else 'off'}")
 
         def _publish_joint(self, position_deg: float, frame: Frame,
                            read_at: Time,
                            velocity: Optional[float] = None) -> None:
-            """Stellung der Ausgangswelle, optional mit Geschwindigkeit.
+            """Position of the output shaft, optionally with speed.
 
-            MOVE_DONE und PROGRESS_RSP kennen nur die Position; die
-            Geschwindigkeit steht ausschliesslich in CMD_TELEMETRY. Ein leeres
-            ``velocity`` heisst in ROS "nicht gemessen" - besser als eine
-            hingeschriebene Null.
+            MOVE_DONE and PROGRESS_RSP only know the position; the speed is
+            only in CMD_TELEMETRY. An empty ``velocity`` means "not measured"
+            in ROS - better than a zero written down.
             """
             msg = JointState()
             msg.header = self._header(frame, read_at)
@@ -979,8 +976,8 @@ def _build_node_class():
             msg.voltage = battery.pack_v
             msg.cell_voltage = [battery.cell_v] * 4
             msg.present = True
-            # Grobe Schaetzung ueber die Zellspannung. Ohne Strommessung und
-            # Ruhespannung geht es nicht genauer - unter Last sackt der Wert ab.
+            # Rough estimate from the cell voltage. Without current measurement
+            # and resting voltage it cannot be more exact - under load it sags.
             msg.percentage = float(_clamp((battery.cell_v - 3.3) / (4.2 - 3.3), 0.0, 1.0))
             msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
             msg.power_supply_health = (
@@ -990,10 +987,10 @@ def _build_node_class():
             self.pub_battery_low.publish(Bool(data=battery.warning))
             if battery.warning:
                 self.get_logger().warn(
-                    f"Unterspannung: {battery.cell_v:.3f} V/Zelle "
-                    f"({battery.pack_v:.2f} V) - der ESP schaltet NICHT ab")
+                    f"Undervoltage: {battery.cell_v:.3f} V/cell "
+                    f"({battery.pack_v:.2f} V) - the ESP does NOT switch off")
 
-        # --- Ausgehende Befehle -------------------------------------------
+        # --- Outgoing commands -------------------------------------------
 
         def _drive(self, duty: int) -> None:
             self.link.motor(int(duty))
@@ -1002,20 +999,20 @@ def _build_node_class():
         @staticmethod
         def _speed_to_duty(v: float, v_max: float, pwm_deadband: float,
                            v_eps: float) -> int:
-            """m/s -> signierter duty, mit Deadband-Sprung ueber die
-            Losbrech-Schwelle. Stillstand bleibt Stillstand."""
+            """m/s -> signed duty, with a deadband jump over the
+            breakaway threshold. Standstill stays standstill."""
             if abs(v) < v_eps:
                 return 0
-            frac = min(abs(v) / v_max, 1.0)                      # 0..1 der nutzbaren Spanne
+            frac = min(abs(v) / v_max, 1.0)                      # 0..1 of the usable range
             pwm_frac = pwm_deadband + frac * (1.0 - pwm_deadband)
             duty = int(round(pwm_frac * DUTY_MAX))
             return duty if v > 0 else -duty
 
         def _on_cmd_vel(self, msg: Twist) -> None:
-            """Twist zwischenspeichern. Der Motor wird vom Regel-Timer gesetzt;
-            hier nur Soll-Geschwindigkeit cachen und die Lenkung direkt senden
-            (die ist ungeregelt, offene Steuerung)."""
-            self._v_soll = float(msg.linear.x)
+            """Buffer the Twist. The motor is set by the control timer;
+            here only cache the target speed and send the steering directly
+            (that one is not closed-loop, open-loop control)."""
+            self._v_target = float(msg.linear.x)
             steer = self._omega_to_servo(float(msg.angular.z))
             self.link.steer(steer)
             self._last_cmd_vel = monotonic()
@@ -1023,41 +1020,41 @@ def _build_node_class():
         def _omega_to_servo(self, omega: float) -> float:
             if bool(self._p("steer_raw_bypass")):
                 return float(_clamp(omega, -1.0, 1.0) * 100.0)
-            return float(self.steer_lut.servo_for(omega, self._v_ist) * 100.0)
+            return float(self.steer_lut.servo_for(omega, self._v_actual) * 100.0)
 
         def _odom_cb(self, msg) -> None:
-            """Ist-Geschwindigkeit (skalar, vorwaerts) aus dem EKF."""
-            self._v_ist = float(msg.twist.twist.linear.x)
+            """Actual speed (scalar, forward) from the EKF."""
+            self._v_actual = float(msg.twist.twist.linear.x)
             self._last_odom = monotonic()
 
         def _velocity_control(self) -> None:
-            """Fester Takt: Feedforward + PI auf v_soll - v_ist -> duty.
-            Alleiniger Schreiber des Motorbefehls."""
+            """Fixed rate: feedforward + PI on v_target - v_actual -> duty.
+            Sole writer of the motor command."""
             now = monotonic()
             if not self._motor_lock.acquire(blocking=False):
-                return                      # jemand startet gerade eine Fahrt
+                return                      # someone is starting a move right now
             try:
-                self._velocity_control_gesperrt(now)
+                self._velocity_control_locked(now)
             finally:
                 self._motor_lock.release()
 
-        def _velocity_control_gesperrt(self, now: float) -> None:
-            # Eine laufende Positionsfahrt gehoert dem ESP. JEDER Motorbefehl
-            # von hier loest sie ab -- auch die duty 0 aus dem Timeout-Zweig
-            # gleich darunter, denn EspLink.motor() setzt _move_active
-            # zurueck. Ohne diese Sperre ist ~/move nach spaetestens
-            # cmd_vel_timeout (0,5 s) tot, egal wie lang die Fahrt ist.
+        def _velocity_control_locked(self, now: float) -> None:
+            # A running position move belongs to the ESP. EVERY motor command
+            # from here replaces it -- also the duty 0 from the timeout branch
+            # right below, because EspLink.motor() resets _move_active.
+            # Without this lock ~/move is dead after cmd_vel_timeout
+            # (0.5 s) at the latest, no matter how long the move is.
             if self.link.move_active:
                 self._vel_integral = 0.0
                 self._v_ramp = 0.0
                 return
 
-            # kein aktuelles /cmd_vel -> anhalten, Integrator UND Rampe
-            # zuruecksetzen. Ohne die Rampe blieb nach einem mitten in der
-            # Fahrt beendeten Lauf v_ramp auf ~0,35 m/s stehen; das erste
-            # /cmd_vel des naechsten Laufs (v = 0) rampte dann erst von 0,35
-            # herunter und fuhr ihn dabei 7-13 cm vor -- aus der Parkluecke,
-            # vor dem ersten Ausparkzug (parken_test_21, 22, 25).
+            # no current /cmd_vel -> stop, reset the integrator AND the
+            # ramp. Without the ramp, after a run that ended mid-drive
+            # v_ramp stayed at ~0.35 m/s; the first /cmd_vel of the next
+            # run (v = 0) then first ramped down from 0.35 and drove the
+            # car 7-13 cm forward doing so -- out of the parking bay, before
+            # the first unpark move (runs parken_test_21, 22, 25).
             if (self._cmd_vel_timeout > 0 and
                     (self._last_cmd_vel == 0.0 or
                      now - self._last_cmd_vel > self._cmd_vel_timeout)):
@@ -1066,41 +1063,41 @@ def _build_node_class():
                 self.link.motor(0)
                 return
 
-            a_max = float(self._p("vel_accel"))          # m/s^2, neuer Parameter
+            a_max = float(self._p("vel_accel"))          # m/s^2, new parameter
             dv = a_max * self._ctrl_dt
-            target = self._v_soll
+            target = self._v_target
             if target > self._v_ramp:
                 self._v_ramp = min(target, self._v_ramp + dv)
             else:
                 self._v_ramp = max(target, self._v_ramp - dv)
-            v_soll = self._v_ramp
+            v_target = self._v_ramp
 
-            # Stillstand: Integrator halten, duty 0 (nicht gegen Rauschen regeln)
-            if abs(v_soll) < float(self._p("v_eps")):
+            # Standstill: hold the integrator, duty 0 (do not fight the noise)
+            if abs(v_target) < float(self._p("v_eps")):
                 self.link.motor(0)
                 return
 
             v_max = float(self._p("v_max")) or 1.0
             pwm_deadband = float(self._p("pwm_deadband"))
             v_eps = float(self._p("v_eps"))
-            duty_ff = self._speed_to_duty(v_soll, v_max, pwm_deadband, v_eps)
+            duty_ff = self._speed_to_duty(v_target, v_max, pwm_deadband, v_eps)
 
             odom_age = now - self._last_odom if self._last_odom else 1e9
 
-            # kein Feedback zu lange -> stoppen
+            # no feedback for too long -> stop
             if odom_age > float(self._p("odom_stop_s")):
                 self._vel_integral = 0.0
                 self.link.motor(0)
                 self.get_logger().warn(
-                    "kein /ekf/odom - Geschwindigkeitsregler stoppt",
+                    "no /ekf/odom - speed controller stops",
                     throttle_duration_sec=2.0)
                 return
 
-            # Feedback kurz weg -> nur Feedforward, Integrator einfrieren
+            # feedback briefly gone -> feedforward only, freeze the integrator
             if odom_age > float(self._p("odom_stale_s")):
                 duty = duty_ff + self._vel_integral
             else:
-                error = v_soll - self._v_ist
+                error = v_target - self._v_actual
                 self._vel_integral += float(self._p("vel_ki")) * error * self._ctrl_dt
                 i_limit = float(self._p("vel_i_limit"))
                 self._vel_integral = _clamp(self._vel_integral, -i_limit, i_limit)
@@ -1111,14 +1108,14 @@ def _build_node_class():
         def _on_move(self, msg: Float32) -> None:
             with self._motor_lock:
                 move_id = self.link.move(float(msg.data))
-            self.get_logger().info(f"Fahrt {move_id}: {msg.data:+.1f} grad (relativ)")
+            self.get_logger().info(f"Move {move_id}: {msg.data:+.1f} deg (relative)")
 
         def _on_emergency(self) -> None:
             self.link.emergency()
-            self.get_logger().warn("NOTHALT")
+            self.get_logger().warn("EMERGENCY HALT")
 
         def _on_pid_set(self, msg: Float32MultiArray) -> None:
-            """[paramId, wert] oder gleich der ganze Satz [kp, ki, kd, ...]."""
+            """[paramId, value] or the whole set at once [kp, ki, kd, ...]."""
             data = list(msg.data)
             if len(data) == 2:
                 self.link.pid_set(int(data[0]), data[1])
@@ -1127,45 +1124,45 @@ def _build_node_class():
                     self.link.pid_set(index, value)
             else:
                 self.get_logger().error(
-                    f"pid_set: erwarte 2 oder {len(PID_PARAMS)} Werte, "
-                    f"bekam {len(data)}")
+                    f"pid_set: expected 2 or {len(PID_PARAMS)} values, "
+                    f"got {len(data)}")
                 return
-            self.get_logger().info("PID gesetzt (fluechtig - ~/pid_save zum Sichern)")
+            self.get_logger().info("PID set (volatile - ~/pid_save to keep it)")
 
         def _on_cal_action(self, msg: String) -> None:
-            """Kalibrieren im Klartext, z.B. "plus", "left", "save".
+            """Calibrate in plain text, e.g. "plus", "left", "save".
 
-            Fuer die Handkalibrierung an der Kommandozeile gedacht:
+            Meant for manual calibration on the command line:
                 ros2 topic pub --once <node>/cal_action std_msgs/String "data: plus"
             """
             name = msg.data.strip().lower()
             if name not in CAL_ACTIONS:
                 self.get_logger().error(
-                    f"unbekannte Aktion '{name}'. Moeglich: "
+                    f"unknown action '{name}'. Possible: "
                     + ", ".join(sorted(CAL_ACTIONS)))
                 return
             self._run_cal(CAL_ACTIONS[name], 0)
 
         def _on_cal(self, msg: Int32MultiArray) -> None:
-            """[aktion, arg] - Aktionscodes siehe CAL_ACTIONS."""
+            """[action, arg] - action codes see CAL_ACTIONS."""
             data = list(msg.data) + [0, 0]
             self._run_cal(int(data[0]), int(data[1]))
 
         def _run_cal(self, action: int, arg: int) -> None:
             state = self.link.calibrate(action, arg)
             if state is None:
-                self.get_logger().error("Kalibrierung: keine Antwort vom ESP")
+                self.get_logger().error("Calibration: no reply from ESP")
                 return
             if state.status != 0x00:
                 self.get_logger().warn(
-                    f"Kalibrierung: {CAL_STATUS_TEXT.get(state.status, '?')}")
+                    f"Calibration: {CAL_STATUS_TEXT.get(state.status, '?')}")
             self.get_logger().info(
-                f"cal: pos={state.pos} mitte={state.center} links={state.left} "
-                f"rechts={state.right} "
-                f"gesetzt={'M' if state.have_center else '-'}"
+                f"cal: pos={state.pos} centre={state.center} left={state.left} "
+                f"right={state.right} "
+                f"set={'C' if state.have_center else '-'}"
                 f"{'L' if state.have_left else '-'}"
                 f"{'R' if state.have_right else '-'}"
-                f"{' frei' if state.torque_free else ''}")
+                f"{' free' if state.torque_free else ''}")
 
         # --- Services -----------------------------------------------------
 
@@ -1177,101 +1174,101 @@ def _build_node_class():
 
         def _srv_emergency(self, _req, res):
             self.link.emergency()
-            return self._reply(res, True, "Nothalt ausgeloest")
+            return self._reply(res, True, "Emergency halt triggered")
 
         def _srv_move_abort(self, _req, res):
             self.link.move_abort()
-            return self._reply(res, True, "Fahrt abgebrochen")
+            return self._reply(res, True, "Move aborted")
 
         def _srv_pid_get(self, _req, res):
             values = self.link.pid_get()
             if values is None:
-                return self._reply(res, False, "keine Antwort vom ESP")
+                return self._reply(res, False, "no reply from ESP")
             return self._reply(res, True,
                                "kp={:.3f} ki={:.3f} kd={:.3f}".format(*values))
 
         def _srv_pid_save(self, _req, res):
             ok = self.link.pid_save()
             if ok is None:
-                return self._reply(res, False, "keine Antwort vom ESP")
+                return self._reply(res, False, "no reply from ESP")
             return self._reply(res, ok,
-                               "ins NVS geschrieben" if ok else "NVS-Fehler")
+                               "written to NVS" if ok else "NVS error")
 
         def _srv_cal_start(self, _req, res):
             state = self.link.calibrate("start")
             if state is None:
-                return self._reply(res, False, "keine Antwort vom ESP")
+                return self._reply(res, False, "no reply from ESP")
             return self._reply(res, True,
-                               "Kalibriermodus laeuft - jetzt ~/cal benutzen")
+                               "calibration mode running - now use ~/cal")
 
         def _srv_cal_save(self, _req, res):
             state = self.link.calibrate("save")
             if state is None:
-                return self._reply(res, False, "keine Antwort vom ESP")
+                return self._reply(res, False, "no reply from ESP")
             ok = state.status == 0x01
             return self._reply(res, ok, CAL_STATUS_TEXT.get(state.status, "?"))
 
         def _srv_trim_save(self, _req, res):
             self.link.trim(2)
-            return self._reply(res, True, "Trim-Offset gespeichert")
+            return self._reply(res, True, "Trim offset saved")
 
         def _srv_torque(self, _req, res):
             self.link.torque_report()
-            return self._reply(res, True, "Ausgabe auf der USB-Konsole des ESP")
+            return self._reply(res, True, "Output on the ESP's USB console")
 
         def _srv_resync(self, _req, res):
             self.link.resync()
             time.sleep(0.1)
             if not self.link.clock.valid:
-                return self._reply(res, False, "keine Antwort auf TIME_SYNC")
+                return self._reply(res, False, "no reply to TIME_SYNC")
             return self._reply(res, True,
-                               f"Versatz {self.link.clock.offset * 1e3:+.3f} ms, "
+                               f"Offset {self.link.clock.offset * 1e3:+.3f} ms, "
                                f"Drift {self.link.clock.drift_ppm:+.1f} ppm")
 
         def _srv_led(self, req, res):
             self.link.led(req.data)
-            return self._reply(res, True, "LED " + ("an" if req.data else "aus"))
+            return self._reply(res, True, "LED " + ("on" if req.data else "off"))
 
         def _srv_stamp(self, req, res):
             state = self.link.set_stamp_mode(req.data)
             if state is None:
-                return self._reply(res, False, "keine Antwort vom ESP")
+                return self._reply(res, False, "no reply from ESP")
             return self._reply(res, True,
-                               "Zeitstempel " + ("an" if state else "aus"))
+                               "Timestamps " + ("on" if state else "off"))
 
         def _srv_torque_free(self, req, res):
-            """Servo stromlos stellen, um die Lenkung von Hand zu bewegen.
+            """Switch the servo torque off to move the steering by hand.
 
-            Geht nur bei laufender Kalibrierung - ausserhalb lehnt der ESP mit
-            Status 0x04 ab. Erst ~/calibrate_start aufrufen.
+            Only works while calibration is running - outside of it the ESP
+            rejects with status 0x04. Call ~/calibrate_start first.
             """
             state = self.link.calibrate("free" if req.data else "hold")
             if state is None:
-                return self._reply(res, False, "keine Antwort vom ESP")
+                return self._reply(res, False, "no reply from ESP")
             if state.status == 0x04:
                 return self._reply(res, False,
-                                   "nur im Kalibriermodus - erst ~/calibrate_start")
+                                   "only in calibration mode - ~/calibrate_start first")
             return self._reply(res, True,
-                               "Servo " + ("frei" if req.data else "haelt"))
+                               "Servo " + ("released" if req.data else "holding"))
 
-        # --- Telemetrietakt -----------------------------------------------
+        # --- Telemetry rate ----------------------------------------------
 
         def _apply_telemetry_period(self, period: float) -> None:
             actual = self.link.set_telemetry_rate(period)
             if actual <= 0:
-                self.get_logger().info("Fahrtelemetrie aus")
+                self.get_logger().info("Drive telemetry off")
                 return
             if abs(actual - period) > 1e-6:
                 self.get_logger().warn(
-                    f"Telemetrietakt auf {actual * 1e3:.0f} ms begrenzt "
-                    f"(angefragt {period * 1e3:.0f} ms, Minimum "
+                    f"Telemetry period limited to {actual * 1e3:.0f} ms "
+                    f"(requested {period * 1e3:.0f} ms, minimum "
                     f"{TELEMETRY_MS_MIN} ms)")
             self.get_logger().info(
-                f"Fahrtelemetrie alle {actual * 1e3:.0f} ms "
-                f"({1.0 / actual:.1f} Hz) - Tempo bildet der ESP mit 10 Hz")
+                f"Drive telemetry every {actual * 1e3:.0f} ms "
+                f"({1.0 / actual:.1f} Hz) - the ESP updates the speed at 10 Hz")
 
         def _on_set_parameters(self, params):
-            """ros2 param set ... telemetry_period 0.1 durchreichen."""
+            """Pass on ros2 param set ... telemetry_period 0.1."""
             from rcl_interfaces.msg import SetParametersResult
 
             for param in params:
@@ -1286,12 +1283,12 @@ def _build_node_class():
         # --- Timer --------------------------------------------------------
 
         def _heartbeat(self) -> None:
-            """Motor am Leben halten und bei ausbleibendem /cmd_vel stoppen.
+            """Keep the motor alive and stop it when /cmd_vel stays away.
 
-            Waehrend einer Positionsfahrt wird NICHT gestoppt: tick() haelt
-            den Motorbefehl dort ohnehin zurueck, weil der ESP die Fahrt
-            selbst zu Ende regelt -- ein motor_coast() von hier wuerde sie
-            abbrechen."""
+            During a position move it does NOT stop: tick() holds back the
+            motor command there anyway, because the ESP controls the move
+            to the end itself -- a motor_coast() from here would abort
+            it."""
             with self._motor_lock:
                 if (self._cmd_vel_timeout > 0 and self._last_cmd_vel
                         and not self.link.move_active
@@ -1299,10 +1296,10 @@ def _build_node_class():
                     self._last_cmd_vel = 0.0
                     self.link.motor_coast()
                     self.get_logger().warn(
-                        f"kein /cmd_vel seit {self._cmd_vel_timeout:.1f} s - Motor aus")
-                # tick() schickt den letzten Motorbefehl nach und pruefen dabei
-                # selbst auf move_active -- dieselbe Pruefung-dann-Senden-Luecke,
-                # also gehoert sie unter dasselbe Schloss.
+                        f"no /cmd_vel for {self._cmd_vel_timeout:.1f} s - motor off")
+                # tick() resends the last motor command and checks move_active
+                # itself while doing so -- the same check-then-send gap,
+                # so it belongs under the same lock.
                 self.link.tick(float(self._p("heartbeat_period")))
 
         def _resync(self) -> None:
@@ -1320,33 +1317,33 @@ def _build_node_class():
 
             if not clock.valid:
                 status.level = DiagnosticStatus.WARN
-                status.message = "Uhren nicht abgeglichen"
+                status.message = "Clocks not synced"
             elif clock.rejected:
                 status.level = DiagnosticStatus.WARN
-                status.message = (f"{clock.rejected} von {len(clock.samples)} "
-                                  "Messrunden unbrauchbar")
+                status.message = (f"{clock.rejected} of {len(clock.samples)} "
+                                  "sync rounds unusable")
             elif clock.best_rtt > 0.05:
                 status.level = DiagnosticStatus.WARN
-                status.message = f"Umlauf {clock.best_rtt * 1e3:.1f} ms - Link traege"
+                status.message = f"Round trip {clock.best_rtt * 1e3:.1f} ms - link slow"
             else:
                 status.level = DiagnosticStatus.OK
-                status.message = "in Ordnung"
+                status.message = "all good"
 
             def kv(key, value):
                 return KeyValue(key=key, value=str(value))
 
             status.values = [
-                kv("versatz_ms", f"{clock.offset * 1e3:+.3f}" if clock.valid else "-"),
+                kv("offset_ms", f"{clock.offset * 1e3:+.3f}" if clock.valid else "-"),
                 kv("drift_ppm", f"{clock.drift_ppm:+.1f}" if clock.valid else "-"),
-                kv("umlauf_ms", f"{clock.best_rtt * 1e3:.3f}" if clock.valid else "-"),
-                kv("zeitstempel", "an" if self.link.stamp_mode else "aus"),
-                kv("telemetrie_ms", int(float(self._p("telemetry_period")) * 1000)),
-                kv("esp_neustarts", clock.boot_count),
-                kv("pakete_rx", self.link.rx_frames),
-                kv("pakete_tx", self.link.tx_frames),
-                kv("sync_verloren", self.link.sync.lost),
-                kv("sync_verworfen", clock.rejected),
-                kv("unbekannte_pakete", self.link.parser.unknown),
+                kv("rtt_ms", f"{clock.best_rtt * 1e3:.3f}" if clock.valid else "-"),
+                kv("timestamps", "on" if self.link.stamp_mode else "off"),
+                kv("telemetry_ms", int(float(self._p("telemetry_period")) * 1000)),
+                kv("esp_reboots", clock.boot_count),
+                kv("packets_rx", self.link.rx_frames),
+                kv("packets_tx", self.link.tx_frames),
+                kv("sync_lost", self.link.sync.lost),
+                kv("sync_rejected", clock.rejected),
+                kv("unknown_packets", self.link.parser.unknown),
             ]
 
             msg = DiagnosticArray()
@@ -1359,7 +1356,7 @@ def _build_node_class():
                 self.pub_offset.publish(Float64(data=clock.offset * 1e3))
                 self.pub_drift.publish(Float32(data=float(clock.drift_ppm)))
 
-        # --- Ende ---------------------------------------------------------
+        # --- Shutdown -----------------------------------------------------
 
         def destroy_node(self) -> bool:
             try:
@@ -1389,7 +1386,7 @@ def main(args=None) -> None:
 
 
 # ==========================================================================
-# Selbsttest - Protokoll ohne ROS und ohne Hardware
+# Self-test - protocol without ROS and without hardware
 # ==========================================================================
 
 def _selftest() -> int:
@@ -1402,7 +1399,7 @@ def _selftest() -> int:
             failures += 1
 
     class _FakeLink(EspLink):
-        """EspLink ohne seriellen Port - schreibt in eine Liste."""
+        """EspLink without a serial port - writes into a list."""
 
         def __init__(self):
             self.sent: List[bytes] = []
@@ -1423,51 +1420,51 @@ def _selftest() -> int:
             self.tx_frames += 1
             return monotonic()
 
-    print("Befehle kodieren")
+    print("Encoding commands")
     link = _FakeLink()
 
     link.motor(700)
-    check("Motor vorwaerts", link.sent[-1] == bytes([0xA5, 0x10, 0x00, 0x02, 0xBC]),
+    check("Motor forward", link.sent[-1] == bytes([0xA5, 0x10, 0x00, 0x02, 0xBC]),
           link.sent[-1].hex(" "))
     link.motor(-700)
-    check("Motor rueckwaerts", link.sent[-1] == bytes([0xA5, 0x10, 0x01, 0x02, 0xBC]))
+    check("Motor reverse", link.sent[-1] == bytes([0xA5, 0x10, 0x01, 0x02, 0xBC]))
     link.motor(9999)
-    check("Motor begrenzt", link.sent[-1] == bytes([0xA5, 0x10, 0x00, 0x03, 0xFF]))
+    check("Motor clamped", link.sent[-1] == bytes([0xA5, 0x10, 0x00, 0x03, 0xFF]))
 
     link.steer(-100)
-    check("Lenkung rechts", link.sent[-1] == bytes([0xA5, 0x20, 0x01, 0xFF, 0x9C]),
+    check("Steering right", link.sent[-1] == bytes([0xA5, 0x20, 0x01, 0xFF, 0x9C]),
           link.sent[-1].hex(" "))
     link.steer(250)
-    check("Lenkung begrenzt", link.sent[-1] == bytes([0xA5, 0x20, 0x01, 0x00, 0x64]))
+    check("Steering clamped", link.sent[-1] == bytes([0xA5, 0x20, 0x01, 0x00, 0x64]))
 
     move_id = link.move(90.0)
-    check("Fahrt 90 grad",
+    check("Move 90 deg",
           link.sent[-1] == bytes([0xA5, 0x90, move_id, 0x00, 0x00, 0x03, 0x84]),
           link.sent[-1].hex(" "))
     link.move(-45.0)
-    check("Fahrt negativ",
+    check("Move negative",
           link.sent[-1][3:] == struct.pack(">i", -450), link.sent[-1].hex(" "))
-    check("move_id zaehlt", link.sent[-1][2] == move_id % 255 + 1)
+    check("move_id counts up", link.sent[-1][2] == move_id % 255 + 1)
 
-    # Reihenfolge in move(): die Sperre muss stehen, BEVOR der Rahmen rausgeht.
-    # Andersherum sieht der Geschwindigkeitsregler im anderen Thread noch
-    # "keine Fahrt" und schickt duty 0 hinterher -- der ESP quittiert die eben
-    # gestartete Fahrt dann als abgebrochen. Am Roboter gemessen: 14 ms.
-    gesehen = {}
-    echtes_send = link.send
+    # Order in move(): the lock must be set BEFORE the frame goes out.
+    # The other way round, the speed controller in the other thread still
+    # sees "no move" and sends duty 0 right after -- the ESP then acks the
+    # move it just started as aborted. Measured on the robot: 14 ms.
+    seen = {}
+    real_send = link.send
 
-    def _spion(cmd, payload=b""):
-        gesehen[cmd] = link.move_active
-        return echtes_send(cmd, payload)
+    def _spy(cmd, payload=b""):
+        seen[cmd] = link.move_active
+        return real_send(cmd, payload)
 
-    link.send = _spion
+    link.send = _spy
     link._move_active = False
     link.move(90.0)
-    link.send = echtes_send
-    check("Sperre steht schon beim Senden", gesehen.get(CMD_MOVE) is True)
+    link.send = real_send
+    check("Lock already set while sending", seen.get(CMD_MOVE) is True)
 
-    # Der haeufigste Fehler laut Spec: die x1000-Kodierung gilt auch fuer die
-    # ganzzahligen Parameter. maxDuty=700 muss als 700000 rausgehen.
+    # The most common mistake according to the spec: the x1000 encoding also
+    # applies to the integer parameters. maxDuty=700 must go out as 700000.
     link.pid_set("maxduty", 700)
     check("PID maxDuty x1000",
           link.sent[-1] == bytes([0xA5, 0x80, 0x04]) + struct.pack(">i", 700000),
@@ -1477,26 +1474,26 @@ def _selftest() -> int:
           link.sent[-1] == bytes([0xA5, 0x80, 0x00]) + struct.pack(">i", 4250))
 
     link.emergency()
-    check("Nothalt", link.sent[-1] == bytes([0xA5, 0xFF]))
+    check("Emergency halt", link.sent[-1] == bytes([0xA5, 0xFF]))
     link.led(True)
     check("LED", link.sent[-1] == bytes([0xA5, 0x30, 0x01]))
     link.trim(2)
-    check("Trim speichern", link.sent[-1] == bytes([0xA5, 0x60, 0x02]))
+    check("Trim save", link.sent[-1] == bytes([0xA5, 0x60, 0x02]))
 
     actual = link.set_telemetry_rate(0.05)
-    check("Telemetrietakt 50 ms",
+    check("Telemetry period 50 ms",
           link.sent[-1] == bytes([0xA5, 0xC0, 0x00, 0x32]) and actual == 0.05,
           link.sent[-1].hex(" "))
     actual = link.set_telemetry_rate(0.001)
-    check("Takt auf Minimum begrenzt",
+    check("Period clamped to minimum",
           link.sent[-1] == bytes([0xA5, 0xC0, 0x00, TELEMETRY_MS_MIN])
           and actual == TELEMETRY_MS_MIN / 1000.0,
           f"{actual * 1e3:.0f} ms")
     actual = link.set_telemetry_rate(0)
-    check("Telemetrie abschaltbar",
+    check("Telemetry can be switched off",
           link.sent[-1] == bytes([0xA5, 0xC0, 0x00, 0x00]) and actual == 0.0)
 
-    print("Antworten auspacken")
+    print("Unpacking replies")
     done = parse_move_done(bytes([3, 0]) + struct.pack(">i", 905))
     check("MOVE_DONE", (done.move_id, done.ok, done.position_deg) == (3, True, 90.5),
           f"{done}")
@@ -1510,22 +1507,22 @@ def _selftest() -> int:
     check("TELEMETRY in rad/s", abs(telemetry.speed_rad_s - math.pi) < 1e-9,
           f"{telemetry.speed_rad_s:.6f}")
 
-    # Rueckwaertsfahrt. Die Bytes sind von Hand aus dem Zweierkomplement
-    # gerechnet, nicht mit struct.pack erzeugt - sonst wuerde der Test nur
-    # pruefen, dass Python zu sich selbst passt, und ein Vorzeichenfehler auf
-    # der ESP-Seite bliebe unentdeckt.
+    # Reverse drive. The bytes are worked out by hand from the two's
+    # complement, not made with struct.pack - otherwise the test would only
+    # check that Python agrees with itself, and a sign error on the ESP
+    # side would go unnoticed.
     #   -905 = 0xFFFFFC77   -1800 = 0xFFFFF8F8   -700 = 0xFD44
-    rueckwaerts = bytes([0xFF, 0xFF, 0xFC, 0x77,
+    backwards = bytes([0xFF, 0xFF, 0xFC, 0x77,
                          0xFF, 0xFF, 0xF8, 0xF8,
                          0xFD, 0x44,
                          0x09, 0xC4])
-    back = parse_telemetry(rueckwaerts)
-    check("TELEMETRY negativ",
+    back = parse_telemetry(backwards)
+    check("TELEMETRY negative",
           (back.position_deg, back.speed_deg_s, back.duty, back.current_a)
           == (-90.5, -180.0, -700, 2.5), f"{back}")
-    check("TELEMETRY negativ in rad/s", abs(back.speed_rad_s + math.pi) < 1e-9,
+    check("TELEMETRY negative in rad/s", abs(back.speed_rad_s + math.pi) < 1e-9,
           f"{back.speed_rad_s:.6f}")
-    check("Strom bleibt positiv", back.current_a > 0)
+    check("Current stays positive", back.current_a > 0)
 
     batt = parse_battery(struct.pack(">i", 15200) + struct.pack(">h", 3800), True)
     check("BATTERY", (batt.pack_v, batt.cell_v, batt.warning) == (15.2, 3.8, True))
@@ -1538,27 +1535,27 @@ def _selftest() -> int:
     link.motor(500)
     link._last_motor_tx = monotonic() - 1.0
     link.tick(0.2)
-    check("schickt nach", len(link.sent) == 2)
+    check("resends", len(link.sent) == 2)
     link.tick(0.2)
-    check("nicht zu oft", len(link.sent) == 2)
+    check("not too often", len(link.sent) == 2)
     link._move_active = True
     link._last_motor_tx = monotonic() - 1.0
     link.tick(0.2)
-    check("pausiert waehrend der Fahrt", len(link.sent) == 2)
+    check("pauses during the move", len(link.sent) == 2)
 
-    print("Empfang und Zeitstempel")
+    print("Receiving and timestamps")
     link._move_active = True
     got: List[Frame] = []
     link.on(CMD_MOVE_DONE, got.append)
     link._dispatch(Frame(cmd=CMD_MOVE_DONE,
                          payload=bytes([1, 0]) + struct.pack(">i", 900),
                          esp_tx_raw=None, rx_mono=monotonic()))
-    check("Callback gerufen", len(got) == 1)
-    check("Fahrt beendet", link._move_active is False)
-    check("ohne Abgleich kein Stempel", link.sent_at(got[0]) is None)
+    check("Callback called", len(got) == 1)
+    check("Move finished", link._move_active is False)
+    check("no stamp without sync", link.sent_at(got[0]) is None)
 
     print()
-    print("Selbsttest fehlgeschlagen" if failures else "Selbsttest bestanden")
+    print("Self-test failed" if failures else "Self-test passed")
     return 1 if failures else 0
 
 
@@ -1566,7 +1563,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--selftest", action="store_true",
-                        help="Protokoll ohne ROS und ohne Hardware pruefen")
+                        help="check the protocol without ROS and without hardware")
     known, rest = parser.parse_known_args()
     if known.selftest:
         raise SystemExit(_selftest())
