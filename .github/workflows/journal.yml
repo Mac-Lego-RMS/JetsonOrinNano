@@ -1,0 +1,44 @@
+name: Engineering journal
+
+# Builds docs/build/journal.pdf on every change to the documentation and
+# attaches it to the release when a version tag (v*) is pushed.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths: ['docs/**', 'README.md', '.github/workflows/journal.yml']
+  pull_request:
+    paths: ['docs/**', 'README.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install tools
+        run: |
+          pip install -r docs/requirements.txt
+          npm install -g @mermaid-js/mermaid-cli
+      - name: Checks (README length, untranslated text)
+        run: python docs/build.py --check || true
+      - name: Build PDF
+        run: python docs/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: journal
+          path: docs/build/journal.pdf
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: docs/build/journal.pdf
