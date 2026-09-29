@@ -1,116 +1,116 @@
 #!/usr/bin/env python3
-"""Ablauftest der Ausparksequenz -- ohne ROS-Kern, ohne Roboter.
+"""Sequence test of the unpark sequence -- without the ROS core, without the robot.
 
-    python3 -m ekf.test_ausparksequenz
+    python3 -m ekf.test_unpark_sequence
 
-Borgt sich die Methoden von Round1Controller und faehrt sie mit Attrappen fuer
-Uhr, Logger und Publisher. Geprueft wird der ABLAUF: erst lenken, dann fahren,
-auf die Quittung warten, Zug fuer Zug -- und was passiert, wenn etwas schief
-geht. Genau das soll man nicht am Roboter herausfinden.
+Borrows the methods of Round1Controller and drives them with stubs for
+clock, logger and publishers. What is checked is the SEQUENCE: first steer, then drive,
+wait for the ack, move by move -- and what happens when something goes
+wrong. That is exactly what you do not want to find out on the robot.
 """
 import math
 import types
 
 from ekf.round1_controller_node import Round1Controller
-from ekf import ausparken as A
+from ekf import unpark as A
 
 
-def pruefe(name, bedingung, zusatz=''):
-    if not bedingung:
-        raise AssertionError('FEHLGESCHLAGEN: %s %s' % (name, zusatz))
-    print('  ok  %s%s' % (name, ('  ' + zusatz) if zusatz else ''))
+def check(name, cond, extra=''):
+    if not cond:
+        raise AssertionError('FAILED: %s %s' % (name, extra))
+    print('  ok  %s%s' % (name, ('  ' + extra) if extra else ''))
 
 
-class Sammler:
-    """Publisher-Attrappe. Schreibt zusaetzlich in ein gemeinsames Protokoll,
-    damit die REIHENFOLGE ueber alle Topics hinweg pruefbar ist."""
+class Collector:
+    """Publisher stub. Also writes into a shared trace,
+    so that the ORDER across all topics can be checked."""
 
-    def __init__(self, name='?', protokoll=None, abonnenten=1):
+    def __init__(self, name='?', trace=None, subscribers=1):
         self.name = name
-        self.werte = []
-        self.protokoll = protokoll if protokoll is not None else []
-        self.abonnenten = abonnenten
+        self.values = []
+        self.trace = trace if trace is not None else []
+        self.subscribers = subscribers
 
     def publish(self, msg):
-        self.werte.append(msg)
-        wert = msg.data if not isinstance(msg.data, (list, tuple)) else list(msg.data)
-        self.protokoll.append((self.name, wert))
+        self.values.append(msg)
+        val = msg.data if not isinstance(msg.data, (list, tuple)) else list(msg.data)
+        self.trace.append((self.name, val))
 
     def get_subscription_count(self):
-        return self.abonnenten
+        return self.subscribers
 
 
-class Logbuch:
+class Logbook:
     def __init__(self):
-        self.zeilen = []
+        self.lines = []
 
-    def _an(self, stufe):
-        return lambda text, **kw: self.zeilen.append((stufe, text))
+    def _add(self, level):
+        return lambda text, **kw: self.lines.append((level, text))
 
     def __getattr__(self, name):
-        return self._an(name)
+        return self._add(name)
 
     def text(self):
-        return '\n'.join(t for _s, t in self.zeilen)
+        return '\n'.join(t for _s, t in self.lines)
 
-    def stufen(self, stufe):
-        return [t for s, t in self.zeilen if s == stufe]
+    def at_level(self, level):
+        return [t for s, t in self.lines if s == level]
 
 
-class Attrappe:
-    _ausparken_schritt = Round1Controller._ausparken_schritt
-    _ausparken_planen = Round1Controller._ausparken_planen
-    _ausparken_fertig = Round1Controller._ausparken_fertig
-    _ausparken_pid = Round1Controller._ausparken_pid
-    _ausparken_abbruch = Round1Controller._ausparken_abbruch
-    ausparken_move_done_cb = Round1Controller.ausparken_move_done_cb
-    _ausparken_scanhalt = Round1Controller._ausparken_scanhalt
-    _ausparken_uebergeben = Round1Controller._ausparken_uebergeben
-    _ausparken_richtung_uebernehmen = \
-        Round1Controller._ausparken_richtung_uebernehmen
+class Stub:
+    _unpark_step = Round1Controller._unpark_step
+    _unpark_plan = Round1Controller._unpark_plan
+    _unpark_done = Round1Controller._unpark_done
+    _unpark_pid = Round1Controller._unpark_pid
+    _unpark_abort = Round1Controller._unpark_abort
+    unpark_move_done_cb = Round1Controller.unpark_move_done_cb
+    _unpark_scan_hold = Round1Controller._unpark_scan_hold
+    _unpark_handover = Round1Controller._unpark_handover
+    _unpark_adopt_direction = \
+        Round1Controller._unpark_adopt_direction
 
     def __init__(self, **kw):
         self.t = 100.0
-        self.x = self.y = self.th = 0.0     # Attrappe der Pose
-        self.state = 'AUSPARK_BUTTON'
+        self.x = self.y = self.th = 0.0     # stub of the pose
+        self.state = 'UNPARK_BUTTON'
         self.require_button = False
         self.button_pressed = False
-        self.ausparken_nur = False
-        self.ausparken_richtung_invertieren = False
-        self.ausparken_schritte = list(A.SCHRITTE_STANDARD)
-        self.ausparken_schritte_cw = []
-        self.ausparken_schritte_ccw = []
-        self.ausparken_pid = [4.0, 140.0, 8.0, 90.0]   # wie der echte Standard
-        self.ausparken_pid_nachher = [4.0, 1023.0]
-        self.ausparken_scans = 5
-        self.ausparken_sektor_grad = 20.0
-        self.ausparken_richtung_timeout = 8.0
-        self.ausparken_lenk_wartezeit = 0.6
-        self.ausparken_zug_timeout = 15.0
-        self.ausparken_weg_toleranz_cm = 1.0
-        self.ausparken_halt_s = 2.0
+        self.unpark_only = False
+        self.unpark_invert_direction = False
+        self.unpark_steps = list(A.STEPS_DEFAULT)
+        self.unpark_steps_cw = []
+        self.unpark_steps_ccw = []
+        self.unpark_pid = [4.0, 140.0, 8.0, 90.0]   # like the real default
+        self.unpark_pid_after = [4.0, 1023.0]
+        self.unpark_scans = 5
+        self.unpark_sector_deg = 20.0
+        self.unpark_direction_timeout = 8.0
+        self.unpark_steer_wait_s = 0.6
+        self.unpark_move_timeout = 15.0
+        self.unpark_travel_tol_cm = 1.0
+        self.unpark_hold_s = 2.0
         self.race_direction = None
-        self.ausparken_setzt_richtung = True
-        self.ausp_stimmen = ['CW'] * 5
-        self.ausp_letzter_grund = 'links 0.14 m, rechts 0.87 m'
-        self.ausp_schritte = None
-        self.ausp_richtung = None
-        self.ausp_index = 0
-        self.ausp_phase = 'lenken'
-        self.ausp_lenk_gesendet = False
-        self.ausp_t0 = 0.0
-        self.ausp_gesendet_t = None
-        self.ausp_move_done = None
-        self.ausp_theta0 = 0.0
-        self.ausp_pose0 = None
-        self.protokoll = []
-        self.pub_steer = Sammler('steer', self.protokoll)
-        self.pub_move = Sammler('move', self.protokoll)
-        self.pub_pid = Sammler('pid', self.protokoll)
-        self.pub_motor = Sammler('motor', self.protokoll)
-        self.pub_park_dir = Sammler('park_dir', self.protokoll)
-        self.stopps = 0
-        self._log = Logbuch()
+        self.unpark_sets_direction = True
+        self.unpark_votes = ['CW'] * 5
+        self.unpark_last_reason = 'left 0.14 m, right 0.87 m'
+        self.unpark_steps_run = None
+        self.unpark_direction = None
+        self.unpark_index = 0
+        self.unpark_phase = 'steer'
+        self.unpark_steer_sent = False
+        self.unpark_t0 = 0.0
+        self.unpark_sent_t = None
+        self.unpark_move_done = None
+        self.unpark_theta0 = 0.0
+        self.unpark_pose0 = None
+        self.trace = []
+        self.pub_steer = Collector('steer', self.trace)
+        self.pub_move = Collector('move', self.trace)
+        self.pub_pid = Collector('pid', self.trace)
+        self.pub_motor = Collector('motor', self.trace)
+        self.pub_park_dir = Collector('park_dir', self.trace)
+        self.stops = 0
+        self._log = Logbook()
         self.__dict__.update(kw)
 
     def now_s(self):
@@ -120,310 +120,310 @@ class Attrappe:
         return self._log
 
     def publish_stop(self):
-        self.stopps += 1
+        self.stops += 1
 
-    # --- Hilfen fuer die Tests ---
-    def takt(self, n=1, dt=0.1):
+    # --- Helpers for the tests ---
+    def tick(self, n=1, dt=0.1):
         for _ in range(n):
-            self._ausparken_schritt(self.x, self.y, self.th)
+            self._unpark_step(self.x, self.y, self.th)
             self.t += dt
 
-    def quittiere(self, status=0, pos_zehntelgrad=0):
-        self.ausparken_move_done_cb(
-            types.SimpleNamespace(data=[1, status, pos_zehntelgrad]))
+    def ack(self, status=0, pos_decideg=0):
+        self.unpark_move_done_cb(
+            types.SimpleNamespace(data=[1, status, pos_decideg]))
 
-    def durchfahren(self, status=0, weg_stimmt=True, grenze=4000):
-        """Die Folge abfahren. weg_stimmt=True laesst die Attrappen-Pose dem
-        Plan folgen -- dann ist eine Zeitueberschreitung des ESP harmlos."""
-        for _ in range(grenze):
-            vorher = len(self.pub_move.werte)
-            self._ausparken_schritt(self.x, self.y, self.th)
+    def run_through(self, status=0, travel_ok=True, limit=4000):
+        """Drive the sequence. travel_ok=True lets the stub pose follow the
+        plan -- then a timeout of the ESP is harmless."""
+        for _ in range(limit):
+            before = len(self.pub_move.values)
+            self._unpark_step(self.x, self.y, self.th)
             self.t += 0.1
-            if len(self.pub_move.werte) > vorher:
-                if weg_stimmt:
-                    lenk, cm = self.ausp_schritte[self.ausp_index]
-                    ex, ey, eth = A.bahn((0.0, 0.0, 0.0), [(lenk, cm)])[-1][0]
+            if len(self.pub_move.values) > before:
+                if travel_ok:
+                    steer, cm = self.unpark_steps_run[self.unpark_index]
+                    ex, ey, eth = A.trajectory((0.0, 0.0, 0.0), [(steer, cm)])[-1][0]
                     c, si = math.cos(self.th), math.sin(self.th)
                     self.x += c * ex - si * ey
                     self.y += si * ex + c * ey
                     self.th += eth
                 self.t += 0.5
-                self.quittiere(status)
-            if self.state == 'AUSPARK_SCAN':
-                self.t += self.ausparken_halt_s + 0.1
+                self.ack(status)
+            if self.state == 'UNPARK_SCAN':
+                self.t += self.unpark_hold_s + 0.1
             if self.state in ('WAIT_INPUTS', 'DONE'):
                 return
-        raise AssertionError('Sequenz haengt -- kein Ende nach %d Takten' % grenze)
+        raise AssertionError('sequence hangs -- no end after %d ticks' % limit)
 
 
-print('Taster')
-f = Attrappe(require_button=True)
-f.takt(5)
-pruefe('ohne Taster bleibt er stehen',
-       f.state == 'AUSPARK_BUTTON' and f.stopps == 5 and not f.pub_move.werte)
+print('Button')
+f = Stub(require_button=True)
+f.tick(5)
+check('without the button it stays put',
+      f.state == 'UNPARK_BUTTON' and f.stops == 5 and not f.pub_move.values)
 f.button_pressed = True
-f.takt(1)
-pruefe('mit Taster geht es zur Richtungssuche', f.state == 'AUSPARK_RICHTUNG')
+f.tick(1)
+check('with the button it goes on to the direction search', f.state == 'UNPARK_DIRECTION')
 
-print('\nRichtungssuche')
-f = Attrappe(ausp_stimmen=[])
-f.takt(1)                                  # AUSPARK_BUTTON -> AUSPARK_RICHTUNG
-f.takt(10)
-pruefe('ohne Stimmen wird nicht gefahren',
-       f.state == 'AUSPARK_RICHTUNG' and not f.pub_move.werte)
+print('\nDirection search')
+f = Stub(unpark_votes=[])
+f.tick(1)                                  # UNPARK_BUTTON -> UNPARK_DIRECTION
+f.tick(10)
+check('without votes nothing is driven',
+      f.state == 'UNPARK_DIRECTION' and not f.pub_move.values)
 f.t += 20.0
-f.takt(1)
-pruefe('Zeitueberschreitung bricht ab', f.state == 'DONE')
-pruefe('Abbruch stoppt den Motor aktiv',
-       len(f.pub_motor.werte) == 1 and f.pub_motor.werte[0].data == 0)
-pruefe('Abbruch stellt die Regelparameter zurueck',
-       [list(m.data) for m in f.pub_pid.werte] == [[4.0, 1023.0]])
-pruefe('Abbruch wird als Fehler protokolliert', f._log.stufen('error'))
+f.tick(1)
+check('timeout aborts', f.state == 'DONE')
+check('abort actively stops the motor',
+      len(f.pub_motor.values) == 1 and f.pub_motor.values[0].data == 0)
+check('abort resets the control parameters',
+      [list(m.data) for m in f.pub_pid.values] == [[4.0, 1023.0]])
+check('abort is logged as an error', f._log.at_level('error'))
 
-# Solange die Bruecke die Topics nicht abonniert hat, darf nichts rausgehen:
-# die ersten Nachrichten auf einer frischen Verbindung verschluckt die
-# DDS-Erkennung, und das waeren ausgerechnet maxduty und der erste Lenkbefehl.
-f = Attrappe()
-f.pub_steer.abonnenten = 0
-f.takt(4)
-pruefe('ohne Abonnent wird nicht geplant',
-       f.state == 'AUSPARK_RICHTUNG' and not f.pub_pid.werte
-       and not f.pub_steer.werte)
-f.pub_steer.abonnenten = 1
-f.takt(1)
-pruefe('sobald die Bruecke da ist, geht es weiter',
-       f.state == 'AUSPARK_FAHREN' and len(f.pub_pid.werte) == 2)
+# As long as the bridge has not subscribed to the topics, nothing may go out:
+# DDS discovery swallows the first messages on a fresh connection,
+# and those would be maxduty and the first steering command of all things.
+f = Stub()
+f.pub_steer.subscribers = 0
+f.tick(4)
+check('without a subscriber nothing is planned',
+      f.state == 'UNPARK_DIRECTION' and not f.pub_pid.values
+      and not f.pub_steer.values)
+f.pub_steer.subscribers = 1
+f.tick(1)
+check('as soon as the bridge is there, it goes on',
+      f.state == 'UNPARK_DRIVE' and len(f.pub_pid.values) == 2)
 
-f = Attrappe()
-f.pub_move.abonnenten = 0
-f.takt(2)
-f.t += f.ausparken_richtung_timeout + 1.0
-f.takt(1)
-pruefe('bleibt die Bruecke weg, wird abgebrochen', f.state == 'DONE')
-pruefe('... und die Meldung nennt das fehlende Topic',
-       'move' in f._log.text() and 'esp_serial_bridge' in f._log.text())
+f = Stub()
+f.pub_move.subscribers = 0
+f.tick(2)
+f.t += f.unpark_direction_timeout + 1.0
+f.tick(1)
+check('if the bridge stays away, it aborts', f.state == 'DONE')
+check('... and the message names the missing topic',
+      'move' in f._log.text() and 'esp_serial_bridge' in f._log.text())
 
-print('\nPlanung')
-f = Attrappe()
-f.takt(2)
-pruefe('CW spiegelt die Tabelle nach rechts',
-       f.ausp_schritte[0][0] < 0 and A.SCHRITTE_STANDARD[0] > 0,
-       'erster Zug %+.0f %%' % f.ausp_schritte[0][0])
-pruefe('Strecken bleiben unveraendert',
-       [cm for _l, cm in f.ausp_schritte] == list(A.SCHRITTE_STANDARD[1::2]))
-pruefe('Regelparameter werden vor der Sequenz gesetzt',
-       [list(m.data) for m in f.pub_pid.werte] == [[4.0, 140.0], [8.0, 90.0]])
-pruefe('Trockenlauf steht im Log', 'Trockenlauf' in f._log.text())
+print('\nPlanning')
+f = Stub()
+f.tick(2)
+check('CW mirrors the table to the right',
+      f.unpark_steps_run[0][0] < 0 and A.STEPS_DEFAULT[0] > 0,
+      'first move %+.0f %%' % f.unpark_steps_run[0][0])
+check('travels stay unchanged',
+      [cm for _l, cm in f.unpark_steps_run] == list(A.STEPS_DEFAULT[1::2]))
+check('control parameters are set before the sequence',
+      [list(m.data) for m in f.pub_pid.values] == [[4.0, 140.0], [8.0, 90.0]])
+check('dry run is in the log', 'dry run' in f._log.text())
 
-f2 = Attrappe(ausp_stimmen=['CCW'] * 5)
-f2.takt(2)
-pruefe('CCW spiegelt nicht', f2.ausp_schritte[0][0] > 0,
-       'erster Zug %+.0f %%' % f2.ausp_schritte[0][0])
-f3 = Attrappe(ausparken_richtung_invertieren=True)
-f3.takt(2)
-pruefe('Invertierschalter dreht die Seite',
-       f3.ausp_schritte[0][0] * f.ausp_schritte[0][0] < 0)
+f2 = Stub(unpark_votes=['CCW'] * 5)
+f2.tick(2)
+check('CCW does not mirror', f2.unpark_steps_run[0][0] > 0,
+      'first move %+.0f %%' % f2.unpark_steps_run[0][0])
+f3 = Stub(unpark_invert_direction=True)
+f3.tick(2)
+check('invert switch flips the side',
+      f3.unpark_steps_run[0][0] * f.unpark_steps_run[0][0] < 0)
 
-# Eigene Folge fuer die erkannte Richtung (hier CW) schlaegt die gemeinsame.
-EIGEN = [100.0, 3.0, -100.0, -2.0]
-f = Attrappe(ausparken_schritte_cw=EIGEN)
-f.takt(2)
-pruefe('CW nimmt die eigene Folge',
-       [cm for _l, cm in f.ausp_schritte] == [3.0, -2.0],
-       '%d Zuege' % len(f.ausp_schritte))
-pruefe('und sagt das im Log', 'eigene Folge fuer CW' in f._log.text())
+# An own sequence for the detected direction (here CW) beats the shared one.
+OWN = [100.0, 3.0, -100.0, -2.0]
+f = Stub(unpark_steps_cw=OWN)
+f.tick(2)
+check('CW takes its own sequence',
+      [cm for _l, cm in f.unpark_steps_run] == [3.0, -2.0],
+      '%d moves' % len(f.unpark_steps_run))
+check('and says so in the log', 'own sequence for CW' in f._log.text())
 
-f = Attrappe(ausparken_schritte_ccw=EIGEN)     # gefuellt, aber erkannt wird CW
-f.takt(2)
-pruefe('die Folge der ANDEREN Richtung bleibt unbeachtet',
-       [cm for _l, cm in f.ausp_schritte]
-       == list(A.SCHRITTE_STANDARD[1::2]))
-pruefe('und die gemeinsame wird benannt', 'gemeinsame Folge' in f._log.text())
+f = Stub(unpark_steps_ccw=OWN)     # filled, but CW is detected
+f.tick(2)
+check('the sequence of the OTHER direction is ignored',
+      [cm for _l, cm in f.unpark_steps_run]
+      == list(A.STEPS_DEFAULT[1::2]))
+check('and the shared one is named', 'shared sequence' in f._log.text())
 
-print('\nEin einzelner Zug')
-f = Attrappe()
-f.takt(2)                                   # geplant, jetzt AUSPARK_FAHREN
-f.stopps = 0            # der Halt aus der Richtungssuche zaehlt hier nicht mit
-lenk_soll, cm_soll = f.ausp_schritte[0]
-f.takt(1)
-pruefe('zuerst wird gelenkt, noch nicht gefahren',
-       len(f.pub_steer.werte) == 1 and not f.pub_move.werte)
-pruefe('Lenkwert stimmt',
-       abs(f.pub_steer.werte[0].data - lenk_soll) < 1e-6)
-f.takt(2)
-pruefe('waehrend der Wartezeit wird nicht gefahren', not f.pub_move.werte)
-f.t += f.ausparken_lenk_wartezeit
-f.takt(1)
-pruefe('nach der Wartezeit geht die Fahrt raus', len(f.pub_move.werte) == 1)
-pruefe('Fahrstrecke in Encodergrad',
-       abs(f.pub_move.werte[0].data - A.cm_zu_grad(cm_soll)) < 1e-3,
-       '%.0f grad fuer %.1f cm' % (f.pub_move.werte[0].data, cm_soll))
-# Waehrend einer Positionsfahrt darf KEIN /cmd_vel rausgehen: die Bruecke
-# wuerde daraufhin die Lenkung neu stellen.
-pruefe('kein /cmd_vel waehrend der Fahrt', f.stopps == 0)
-f.takt(5)
-pruefe('ohne Quittung geht es nicht weiter',
-       f.ausp_index == 0 and len(f.pub_move.werte) == 1)
+print('\nA single move')
+f = Stub()
+f.tick(2)                                   # planned, now UNPARK_DRIVE
+f.stops = 0            # the halt from the direction search does not count here
+steer_target, cm_target = f.unpark_steps_run[0]
+f.tick(1)
+check('first it steers, does not drive yet',
+      len(f.pub_steer.values) == 1 and not f.pub_move.values)
+check('steering value is right',
+      abs(f.pub_steer.values[0].data - steer_target) < 1e-6)
+f.tick(2)
+check('during the wait time nothing is driven', not f.pub_move.values)
+f.t += f.unpark_steer_wait_s
+f.tick(1)
+check('after the wait time the move goes out', len(f.pub_move.values) == 1)
+check('travel in encoder degrees',
+      abs(f.pub_move.values[0].data - A.cm_to_deg(cm_target)) < 1e-3,
+      '%.0f deg for %.1f cm' % (f.pub_move.values[0].data, cm_target))
+# During a position move NO /cmd_vel may go out: the bridge
+# would then set the steering again.
+check('no /cmd_vel during the move', f.stops == 0)
+f.tick(5)
+check('without an ack it does not go on',
+      f.unpark_index == 0 and len(f.pub_move.values) == 1)
 
-print('\nQuittungen')
-f_alt = Attrappe()
-f_alt.takt(2)
-f_alt.ausp_move_done = (f_alt.t - 50.0, 1, 0, 0.0)     # Quittung von VORHER
-f_alt.t += f_alt.ausparken_lenk_wartezeit
-f_alt.takt(3)
-pruefe('alte Quittung zaehlt nicht', f_alt.ausp_index == 0)
+print('\nAcks')
+f_old = Stub()
+f_old.tick(2)
+f_old.unpark_move_done = (f_old.t - 50.0, 1, 0, 0.0)     # ack from BEFORE
+f_old.t += f_old.unpark_steer_wait_s
+f_old.tick(3)
+check('old ack does not count', f_old.unpark_index == 0)
 
-f = Attrappe()
-f.takt(2)
-f.stopps = 0
-f.durchfahren()
-# Waehrend der Fahrten darf kein /cmd_vel rausgehen; danach schon: einmal
-# beim Abschluss und dann im Scan-Halt.
-pruefe('waehrend der Fahrten kein Halt, danach schon', f.stopps >= 2,
-       '%d Halte' % f.stopps)
-pruefe('vollstaendige Sequenz laeuft durch',
-       len(f.pub_move.werte) == len(f.ausp_schritte),
-       '%d Fahrten' % len(f.pub_move.werte))
-# Der Lenkbefehl wird waehrend der Wartezeit wiederholt, also nicht zaehlen,
-# sondern die Reihenfolge pruefen: vor JEDEM move muss zuletzt der Lenkwert
-# genau dieses Zuges gesendet worden sein.
-zuletzt_gelenkt, gesehen = None, []
-for name, wert in f.protokoll:
+f = Stub()
+f.tick(2)
+f.stops = 0
+f.run_through()
+# During the moves no /cmd_vel may go out; afterwards it may: once
+# at completion and then in the scan hold.
+check('no halt during the moves, afterwards yes', f.stops >= 2,
+      '%d halts' % f.stops)
+check('complete sequence runs through',
+      len(f.pub_move.values) == len(f.unpark_steps_run),
+      '%d moves sent' % len(f.pub_move.values))
+# The steering command is repeated during the wait time, so do not count,
+# but check the order: before EVERY move the last thing sent must be the
+# steering value of exactly this move.
+last_steered, seen = None, []
+for name, val in f.trace:
     if name == 'steer':
-        zuletzt_gelenkt = wert
+        last_steered = val
     elif name == 'move':
-        gesehen.append(zuletzt_gelenkt)
-pruefe('vor jeder Fahrt steht der richtige Lenkwert',
-       all(a is not None and abs(a - b) < 1e-6
-           for a, b in zip(gesehen, [l for l, _cm in f.ausp_schritte]))
-       and len(gesehen) == len(f.ausp_schritte),
-       '%s' % ['%+.0f' % g for g in gesehen])
-pruefe('die Regelparameter kommen VOR der ersten Fahrt',
-       [n for n, _w in f.protokoll].index('pid')
-       < [n for n, _w in f.protokoll].index('move'))
-pruefe('danach weiter zum Rennen', f.state == 'WAIT_INPUTS')
-pruefe('Taster gilt als gedrueckt', f.button_pressed is True)
-pruefe('Regelparameter am Ende zurueckgestellt',
-       list(f.pub_pid.werte[-1].data) == [4.0, 1023.0])
+        seen.append(last_steered)
+check('before every move there is the right steering value',
+      all(a is not None and abs(a - b) < 1e-6
+          for a, b in zip(seen, [l for l, _cm in f.unpark_steps_run]))
+      and len(seen) == len(f.unpark_steps_run),
+      '%s' % ['%+.0f' % g for g in seen])
+check('the control parameters come BEFORE the first move',
+      [n for n, _w in f.trace].index('pid')
+      < [n for n, _w in f.trace].index('move'))
+check('then on to the race', f.state == 'WAIT_INPUTS')
+check('button counts as pressed', f.button_pressed is True)
+check('control parameters reset at the end',
+      list(f.pub_pid.values[-1].data) == [4.0, 1023.0])
 
-print('\nScan-Halt nach dem Ausparken')
-f = Attrappe()
-f.takt(2)
+print('\nScan hold after unparking')
+f = Stub()
+f.tick(2)
 for _ in range(4000):
-    vorher = len(f.pub_move.werte)
-    f._ausparken_schritt(f.x, f.y, f.th)
+    before = len(f.pub_move.values)
+    f._unpark_step(f.x, f.y, f.th)
     f.t += 0.1
-    if len(f.pub_move.werte) > vorher:
+    if len(f.pub_move.values) > before:
         f.t += 0.5
-        f.quittiere(0)
-    if f.state == 'AUSPARK_SCAN':
+        f.ack(0)
+    if f.state == 'UNPARK_SCAN':
         break
-pruefe('nach dem letzten Zug wird gehalten', f.state == 'AUSPARK_SCAN')
-pruefe('die Richtung ist schon VOR dem Halt raus',
-       'CW' in [w for n, w in f.protokoll if n == 'park_dir'])
-halte_vorher = f.stopps
-f.takt(5)
-pruefe('waehrend des Halts bleibt er stehen',
-       f.state == 'AUSPARK_SCAN' and f.stopps == halte_vorher + 5)
-pruefe('und faehrt nicht weiter', len(f.pub_move.werte) == len(f.ausp_schritte))
-f.t += f.ausparken_halt_s
-f.takt(1)
-pruefe('nach der Zeit geht es zum Rennen', f.state == 'WAIT_INPUTS')
+check('after the last move it holds', f.state == 'UNPARK_SCAN')
+check('the direction is out already BEFORE the hold',
+      'CW' in [w for n, w in f.trace if n == 'park_dir'])
+halts_before = f.stops
+f.tick(5)
+check('during the hold it stays put',
+      f.state == 'UNPARK_SCAN' and f.stops == halts_before + 5)
+check('and does not drive on', len(f.pub_move.values) == len(f.unpark_steps_run))
+f.t += f.unpark_hold_s
+f.tick(1)
+check('after the time it goes on to the race', f.state == 'WAIT_INPUTS')
 
-f = Attrappe(ausparken_halt_s=0.0)
-f.durchfahren()
-pruefe('halt_s = 0 schaltet die Pause ab', f.state == 'WAIT_INPUTS')
+f = Stub(unpark_hold_s=0.0)
+f.run_through()
+check('hold_s = 0 switches the pause off', f.state == 'WAIT_INPUTS')
 
-# Der Latch der Wahrnehmung kann aus der Zeit IN der Luecke stammen und dann
-# die falsche Richtung tragen. Das muss auffallen, nicht stillschweigend
-# ueberstimmt werden.
-f = Attrappe(race_direction='CCW')      # Ausparken misst CW
-f.durchfahren()
-pruefe('das Parken setzt die Richtung durch', f.race_direction == 'CW')
-# Nicht latched, also wird sie waehrend des Halts wiederholt -- geprueft wird
-# der Inhalt, nicht die Anzahl.
-gesendet = [w for n, w in f.protokoll if n == 'park_dir']
-pruefe('... und schickt sie an den scan_processor',
-       gesendet and set(gesendet) == {'CW'}, '%dx' % len(gesendet))
-pruefe('... und sagt, dass es dem Latch widerspricht',
-       any('/race_direction meldet' in t for t in f._log.stufen('warn')))
-pruefe('... und der Lauf geht weiter', f.state == 'WAIT_INPUTS')
+# The latch of the perception can come from the time IN the bay and then
+# carry the wrong direction. That must be noticed, not silently
+# overruled.
+f = Stub(race_direction='CCW')      # unparking measures CW
+f.run_through()
+check('the parking enforces the direction', f.race_direction == 'CW')
+# Not latched, so it is repeated during the hold -- what is checked is
+# the content, not the count.
+sent = [w for n, w in f.trace if n == 'park_dir']
+check('... and sends it to the scan_processor',
+      sent and set(sent) == {'CW'}, '%dx' % len(sent))
+check('... and says that it contradicts the latch',
+      any('/race_direction reports' in t for t in f._log.at_level('warn')))
+check('... and the run goes on', f.state == 'WAIT_INPUTS')
 
-f = Attrappe(race_direction='CW')
-f.durchfahren()
-pruefe('passende Richtung erzeugt keine Warnung',
-       not any('meldet' in t for t in f._log.stufen('warn')
-               if 'Richtung' in t or 'race_direction' in t))
-gesendet = [w for n, w in f.protokoll if n == 'park_dir']
-pruefe('... wird aber trotzdem veroeffentlicht',
-       gesendet and set(gesendet) == {'CW'}, '%dx' % len(gesendet))
+f = Stub(race_direction='CW')
+f.run_through()
+check('matching direction produces no warning',
+      not any('reports' in t for t in f._log.at_level('warn')
+              if 'direction' in t or 'race_direction' in t))
+sent = [w for n, w in f.trace if n == 'park_dir']
+check('... but is published anyway',
+      sent and set(sent) == {'CW'}, '%dx' % len(sent))
 
-# Schalter aus: die Eckengeometrie behaelt das Wort.
-f = Attrappe(race_direction='CCW', ausparken_setzt_richtung=False)
-f.durchfahren()
-pruefe('Schalter aus -> /race_direction bleibt', f.race_direction == 'CCW')
-pruefe('... nichts wird veroeffentlicht',
-       not [w for n, w in f.protokoll if n == 'park_dir'])
-pruefe('... der Widerspruch wird trotzdem gemeldet',
-       any('WIDERSPRUCH' in t for t in f._log.stufen('error')))
+# Switch off: the corner geometry keeps the say.
+f = Stub(race_direction='CCW', unpark_sets_direction=False)
+f.run_through()
+check('switch off -> /race_direction stays', f.race_direction == 'CCW')
+check('... nothing is published',
+      not [w for n, w in f.trace if n == 'park_dir'])
+check('... the conflict is reported anyway',
+      any('CONFLICT' in t for t in f._log.at_level('error')))
 
-# Ohne jeden Latch traegt das Parken die Richtung allein.
-f = Attrappe(race_direction=None)
-f.durchfahren()
-pruefe('ohne Latch gilt das Parken', f.race_direction == 'CW')
+# Without any latch the parking carries the direction alone.
+f = Stub(race_direction=None)
+f.run_through()
+check('without a latch the parking applies', f.race_direction == 'CW')
 
-f = Attrappe(ausparken_nur=True)
-f.durchfahren()
-pruefe('ausparken_nur haelt an', f.state == 'DONE')
-pruefe('ausparken_nur faehrt trotzdem die ganze Folge',
-       len(f.pub_move.werte) == len(f.ausp_schritte))
+f = Stub(unpark_only=True)
+f.run_through()
+check('unpark_only stops', f.state == 'DONE')
+check('unpark_only still drives the whole sequence',
+      len(f.pub_move.values) == len(f.unpark_steps_run))
 
-# Status 2 heisst: etwas anderes hat den Motor uebernommen. Immer fatal.
-f = Attrappe()
-f.durchfahren(status=2)
-pruefe('abgeloeste Fahrt bricht ab', f.state == 'DONE')
-pruefe('Abbruch nach dem ERSTEN schlechten Zug', len(f.pub_move.werte) == 1)
+# Status 2 means: something else has taken over the motor. Always fatal.
+f = Stub()
+f.run_through(status=2)
+check('replaced move aborts', f.state == 'DONE')
+check('abort after the FIRST bad move', len(f.pub_move.values) == 1)
 
-# Status 1 heisst nur "nicht eingeschwungen". Entscheidend ist der Weg.
-f = Attrappe()
-f.durchfahren(status=1, weg_stimmt=True)
-pruefe('Zeitueberschreitung mit richtigem Weg laeuft weiter',
-       f.state == 'WAIT_INPUTS' and len(f.pub_move.werte) == len(f.ausp_schritte),
-       '%d Fahrten' % len(f.pub_move.werte))
-pruefe('... wird aber bei jedem Zug gewarnt',
-       len([t for t in f._log.stufen('warn') if 'Zeitueberschreitung' in t])
-       == len(f.ausp_schritte))
-pruefe('... und die Warnung nennt den Ausweg',
-       any('minduty' in t for t in f._log.stufen('warn')))
+# Status 1 only means "not settled". What matters is the travel.
+f = Stub()
+f.run_through(status=1, travel_ok=True)
+check('timeout with the right travel carries on',
+      f.state == 'WAIT_INPUTS' and len(f.pub_move.values) == len(f.unpark_steps_run),
+      '%d moves sent' % len(f.pub_move.values))
+check('... but warns on every move',
+      len([t for t in f._log.at_level('warn') if 'timeout' in t])
+      == len(f.unpark_steps_run))
+check('... and the warning names the way out',
+      any('minduty' in t for t in f._log.at_level('warn')))
 
-f = Attrappe()
-f.durchfahren(status=1, weg_stimmt=False)
-pruefe('Zeitueberschreitung OHNE Weg bricht ab', f.state == 'DONE')
-pruefe('... nach dem ersten Zug', len(f.pub_move.werte) == 1)
+f = Stub()
+f.run_through(status=1, travel_ok=False)
+check('timeout WITHOUT travel aborts', f.state == 'DONE')
+check('... after the first move', len(f.pub_move.values) == 1)
 
-print('\nHaenger')
-f = Attrappe()
-f.takt(2)                                    # geplant
-f.takt(1)                                    # Lenkbefehl raus, Uhr laeuft ab hier
-f.t += f.ausparken_lenk_wartezeit
-f.takt(1)                                    # Fahrbefehl raus
-assert f.ausp_phase == 'fahren', 'Aufbau des Tests stimmt nicht'
-f.t += f.ausparken_zug_timeout + 1.0
-f.takt(1)
-pruefe('ausbleibende Quittung bricht ab', f.state == 'DONE')
-pruefe('Fehlermeldung nennt die Bruecke',
-       'esp_serial_bridge' in f._log.text())
+print('\nHangs')
+f = Stub()
+f.tick(2)                                    # planned
+f.tick(1)                                    # steering command out, clock runs from here
+f.t += f.unpark_steer_wait_s
+f.tick(1)                                    # drive command out
+assert f.unpark_phase == 'drive', 'test setup is wrong'
+f.t += f.unpark_move_timeout + 1.0
+f.tick(1)
+check('missing ack aborts', f.state == 'DONE')
+check('error message names the bridge',
+      'esp_serial_bridge' in f._log.text())
 
-print('\nSchlechte Eingaben')
-f = Attrappe(ausparken_schritte=[100.0, 5.0, -100.0])      # ungerade
-f.takt(2)
-pruefe('ungerade Schrittliste bricht sauber ab', f.state == 'DONE')
-f = Attrappe(ausparken_schritte=[])
-f.takt(2)
-pruefe('leere Schrittliste bricht sauber ab', f.state == 'DONE')
-f = Attrappe(ausparken_pid=[4.0])                          # ungerade
-f.takt(2)
-pruefe('ungerade PID-Liste wird nur gemeldet, nicht gefahren',
-       f.state == 'AUSPARK_FAHREN' and f._log.stufen('warn'))
+print('\nBad inputs')
+f = Stub(unpark_steps=[100.0, 5.0, -100.0])      # odd
+f.tick(2)
+check('odd step list aborts cleanly', f.state == 'DONE')
+f = Stub(unpark_steps=[])
+f.tick(2)
+check('empty step list aborts cleanly', f.state == 'DONE')
+f = Stub(unpark_pid=[4.0])                          # odd
+f.tick(2)
+check('odd PID list is only reported, not driven',
+      f.state == 'UNPARK_DRIVE' and f._log.at_level('warn'))
 
-print('\nalle Tests bestanden')
+print('\nall tests passed')

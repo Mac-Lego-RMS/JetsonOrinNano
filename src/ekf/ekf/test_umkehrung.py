@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Der Rueckweg muss den Hinweg kinematisch genau aufheben.
+"""The way back must cancel the way out exactly, kinematically.
 
-    python3 -m ekf.test_umkehrung
+    python3 -m ekf.test_reversal
 
-Das ist die Grundlage des Ausparktests (ekf/ausparken_test_node.py): gilt es
-nicht schon auf dem Papier, misst der Test am Roboter nichts Brauchbares.
+This is the basis of the unpark test (ekf/unpark_test_node.py): if it does
+not hold on paper already, the test on the robot measures nothing useful.
 """
 import math
 import sys
@@ -12,225 +12,225 @@ import threading
 import time
 import types
 
-from ekf import ausparken as A
-from ekf.ausparken_test_node import (AusparkTest, im_startrahmen, pose_text,
-                                     umkehren, wrap)
+from ekf import unpark as A
+from ekf.unpark_test_node import (UnparkTest, in_start_frame, pose_text,
+                                  reverse_steps, wrap)
 
 
-def pruefe(name, bedingung, zusatz=''):
-    if not bedingung:
-        raise AssertionError('FEHLGESCHLAGEN: %s %s' % (name, zusatz))
-    print('  ok  %s%s' % (name, ('  ' + zusatz) if zusatz else ''))
+def check(name, cond, extra=''):
+    if not cond:
+        raise AssertionError('FAILED: %s %s' % (name, extra))
+    print('  ok  %s%s' % (name, ('  ' + extra) if extra else ''))
 
 
-print('Umkehrung der Schrittfolge')
+print('Reversal of the step sequence')
 
-hin = A.spiegeln(A.schritte_aus_flach(A.SCHRITTE_STANDARD), True)
-zurueck = umkehren(hin)
+steps_out = A.mirror_steps(A.steps_from_flat(A.STEPS_DEFAULT), True)
+steps_back = reverse_steps(steps_out)
 
-pruefe('gleich viele Zuege', len(zurueck) == len(hin))
-pruefe('Reihenfolge ist gedreht',
-       [l for l, _c in zurueck] == [l for l, _c in reversed(hin)])
-pruefe('jede Strecke ist negiert',
-       [c for _l, c in zurueck] == [-c for _l, c in reversed(hin)])
-pruefe('die Lenkung bleibt je Zug dieselbe',
-       [l for l, _c in zurueck] == [l for l, _c in reversed(hin)])
-pruefe('zweimal umkehren ergibt das Original', umkehren(zurueck) == hin)
+check('same number of moves', len(steps_back) == len(steps_out))
+check('order is reversed',
+      [l for l, _c in steps_back] == [l for l, _c in reversed(steps_out)])
+check('every travel is negated',
+      [c for _l, c in steps_back] == [-c for _l, c in reversed(steps_out)])
+check('the steering stays the same per move',
+      [l for l, _c in steps_back] == [l for l, _c in reversed(steps_out)])
+check('reversing twice gives the original', reverse_steps(steps_back) == steps_out)
 
-print('\nAufhebung in der Kinematik')
+print('\nCancellation in the kinematics')
 start = (0.0, 0.0, 0.0)
-nach_hin = A.bahn(start, hin)[-1][0]
-nach_zurueck = A.bahn(nach_hin, zurueck)[-1][0]
-laengs, quer, gier = im_startrahmen(start, nach_zurueck)
-pruefe('der Rueckweg landet wieder im Start',
-       abs(laengs) < 1e-9 and abs(quer) < 1e-9 and abs(gier) < 1e-9,
-       '%.1e m / %.1e m / %.1e rad' % (laengs, quer, gier))
+after_out = A.trajectory(start, steps_out)[-1][0]
+after_back = A.trajectory(after_out, steps_back)[-1][0]
+long, lat, yaw = in_start_frame(start, after_back)
+check('the way back lands at the start again',
+      abs(long) < 1e-9 and abs(lat) < 1e-9 and abs(yaw) < 1e-9,
+      '%.1e m / %.1e m / %.1e rad' % (long, lat, yaw))
 
-# Auch aus einer schraegen Startlage, und fuer die gespiegelte Folge.
+# Also from a slanted start pose, and for the mirrored sequence.
 for start in ((0.4, -0.2, math.radians(37.0)),
               (-1.1, 0.8, math.radians(-160.0))):
-    for tab in (hin, A.spiegeln(A.schritte_aus_flach(A.SCHRITTE_STANDARD), False)):
-        ende = A.bahn(A.bahn(start, tab)[-1][0], umkehren(tab))[-1][0]
-        l, q, g = im_startrahmen(start, ende)
-        pruefe('auch aus (%.1f, %.1f, %+.0f grad)'
-               % (start[0], start[1], math.degrees(start[2])),
-               abs(l) < 1e-9 and abs(q) < 1e-9 and abs(g) < 1e-9,
-               '%.1e m' % math.hypot(l, q))
+    for tab in (steps_out, A.mirror_steps(A.steps_from_flat(A.STEPS_DEFAULT), False)):
+        end = A.trajectory(A.trajectory(start, tab)[-1][0], reverse_steps(tab))[-1][0]
+        l, q, g = in_start_frame(start, end)
+        check('also from (%.1f, %.1f, %+.0f deg)'
+              % (start[0], start[1], math.degrees(start[2])),
+              abs(l) < 1e-9 and abs(q) < 1e-9 and abs(g) < 1e-9,
+              '%.1e m' % math.hypot(l, q))
 
-print('\nAbweichung im Startrahmen')
+print('\nDeviation in the start frame')
 start = (1.0, 2.0, math.radians(90.0))
-# 10 cm in Blickrichtung des Starts = +y im Weltrahmen, wenn er nach Norden schaut
-l, q, g = im_startrahmen(start, (1.0, 2.1, math.radians(90.0)))
-pruefe('laengs zeigt in Blickrichtung des Starts',
-       abs(l - 0.1) < 1e-12 and abs(q) < 1e-12, '%.3f / %.3f' % (l, q))
-l, q, g = im_startrahmen(start, (0.9, 2.0, math.radians(90.0)))
-pruefe('quer zeigt nach links', abs(q - 0.1) < 1e-12 and abs(l) < 1e-12,
-       '%.3f / %.3f' % (l, q))
-l, q, g = im_startrahmen(start, (1.0, 2.0, math.radians(-175.0)))
-pruefe('die Gierabweichung wird kurz herum gerechnet',
-       abs(math.degrees(g) - 95.0) < 1e-9, '%.1f grad' % math.degrees(g))
+# 10 cm in the facing direction of the start = +y in the world frame when it faces north
+l, q, g = in_start_frame(start, (1.0, 2.1, math.radians(90.0)))
+check('long points in the facing direction of the start',
+      abs(l - 0.1) < 1e-12 and abs(q) < 1e-12, '%.3f / %.3f' % (l, q))
+l, q, g = in_start_frame(start, (0.9, 2.0, math.radians(90.0)))
+check('lat points to the left', abs(q - 0.1) < 1e-12 and abs(l) < 1e-12,
+      '%.3f / %.3f' % (l, q))
+l, q, g = in_start_frame(start, (1.0, 2.0, math.radians(-175.0)))
+check('the yaw deviation is computed the short way round',
+      abs(math.degrees(g) - 95.0) < 1e-9, '%.1f deg' % math.degrees(g))
 
-print('\nFahrtrichtung messen statt raten')
+print('\nMeasure the driving direction instead of guessing')
 from sensor_msgs.msg import LaserScan
 
 
-def scan_bauen(links_m, rechts_m, n=360):
-    """Ein Scan, der links und rechts unterschiedlich weit sieht.
+def build_scan(left_m, right_m, n=360):
+    """A scan that sees different distances left and right.
 
-    Gebaut ueber die echte Umrechnung in scan_to_points, damit der Test die
-    Konvention nicht ein zweites Mal festschreibt.
+    Built through the real conversion in scan_to_points, so that the test does
+    not lay down the convention a second time.
     """
     msg = LaserScan()
     msg.angle_min = -math.pi
     msg.angle_increment = 2.0 * math.pi / n
     msg.range_min, msg.range_max = 0.05, 12.0
-    werte = []
+    vals = []
     for i in range(n):
         a = msg.angle_min + i * msg.angle_increment
-        # wie scan_to_points: x = -r*cos(a), y = -r*sin(a)
+        # like scan_to_points: x = -r*cos(a), y = -r*sin(a)
         phi = math.atan2(-math.sin(a), -math.cos(a))
-        werte.append(links_m if phi > 0.0 else rechts_m)
-    msg.ranges = werte
+        vals.append(left_m if phi > 0.0 else right_m)
+    msg.ranges = vals
     return msg
 
 
-class RichtungAttrappe:
-    scan_cb = AusparkTest.scan_cb
+class DirectionStub:
+    scan_cb = UnparkTest.scan_cb
 
-    def __init__(self, zustand='RICHTUNG'):
-        self.zustand = zustand
-        self.sektor_grad = 20.0
-        self.stimmen = []
-        self.letzter_grund = None
+    def __init__(self, state='DIRECTION'):
+        self.state = state
+        self.sector_deg = 20.0
+        self.votes = []
+        self.last_reason = None
 
 
-# Wand rechts, Feld links -> CCW (field_map: CW hat den Innenblock rechts)
-f = RichtungAttrappe()
+# Wall right, field left -> CCW (field_map: CW has the inner block on the right)
+f = DirectionStub()
 for _ in range(5):
-    f.scan_cb(scan_bauen(links_m=0.86, rechts_m=0.15))
-pruefe('Feld links wird als CCW gezaehlt',
-       f.stimmen == ['CCW'] * 5, str(f.stimmen))
+    f.scan_cb(build_scan(left_m=0.86, right_m=0.15))
+check('field left is counted as CCW',
+      f.votes == ['CCW'] * 5, str(f.votes))
 
-f = RichtungAttrappe()
+f = DirectionStub()
 for _ in range(5):
-    f.scan_cb(scan_bauen(links_m=0.15, rechts_m=0.86))
-pruefe('Feld rechts wird als CW gezaehlt', f.stimmen == ['CW'] * 5,
-       str(f.stimmen))
+    f.scan_cb(build_scan(left_m=0.15, right_m=0.86))
+check('field right is counted as CW', f.votes == ['CW'] * 5,
+      str(f.votes))
 
-# Ein Widerspruch setzt zurueck -- keine knappe Mehrheit gewinnen lassen.
-f = RichtungAttrappe()
+# A contradiction resets -- do not let a narrow majority win.
+f = DirectionStub()
 for _ in range(3):
-    f.scan_cb(scan_bauen(0.86, 0.15))
-f.scan_cb(scan_bauen(0.15, 0.86))
-pruefe('ein Widerspruch setzt die Stimmen zurueck', f.stimmen == ['CW'],
-       str(f.stimmen))
+    f.scan_cb(build_scan(0.86, 0.15))
+f.scan_cb(build_scan(0.15, 0.86))
+check('a contradiction resets the votes', f.votes == ['CW'],
+      str(f.votes))
 
-# Unentschiedene Scans zaehlen gar nicht.
-f = RichtungAttrappe()
-f.scan_cb(scan_bauen(0.86, 0.15))
-f.scan_cb(scan_bauen(0.50, 0.46))
-pruefe('unsichere Scans setzen zurueck', f.stimmen == [], f.letzter_grund)
+# Undecided scans do not count at all.
+f = DirectionStub()
+f.scan_cb(build_scan(0.86, 0.15))
+f.scan_cb(build_scan(0.50, 0.46))
+check('uncertain scans reset', f.votes == [], f.last_reason)
 
-# Ausserhalb der Suche wird nicht gezaehlt.
-f = RichtungAttrappe(zustand='HIN')
-f.scan_cb(scan_bauen(0.86, 0.15))
-pruefe('nur waehrend der Suche wird gestimmt', f.stimmen == [])
+# Outside the search nothing is counted.
+f = DirectionStub(state='OUTBOUND')
+f.scan_cb(build_scan(0.86, 0.15))
+check('votes only during the search', f.votes == [])
 
 
-class FolgeAttrappe:
-    _folge_festlegen = AusparkTest._folge_festlegen
+class SequenceStub:
+    _choose_sequence = UnparkTest._choose_sequence
 
-    def __init__(self, tabelle):
-        self.tabelle = tabelle
-        self.zeilen = []
+    def __init__(self, table):
+        self.table = table
+        self.lines = []
 
     def get_parameter(self, name):
-        return types.SimpleNamespace(value=self.tabelle)
+        return types.SimpleNamespace(value=self.table)
 
     def get_logger(self):
-        an = lambda t, **kw: self.zeilen.append(t)
-        return types.SimpleNamespace(info=an, warn=an, error=an)
+        add = lambda t, **kw: self.lines.append(t)
+        return types.SimpleNamespace(info=add, warn=add, error=add)
 
 
 TAB = [100.0, 6.0, -100.0, -4.0, 0.0, 9.0]
-a, b = FolgeAttrappe(TAB), FolgeAttrappe(TAB)
-a._folge_festlegen('CW', 'Test')
-b._folge_festlegen('CCW', 'Test')
-pruefe('CW und CCW spiegeln die Lenkung gegeneinander',
-       all(x * y < 0 for (x, _c1), (y, _c2) in zip(a.hin, b.hin)
-           if abs(x) > 5.0),
-       '%s vs %s' % ([round(l) for l, _c in a.hin],
-                     [round(l) for l, _c in b.hin]))
-pruefe('die Strecken bleiben in beiden gleich',
-       [c for _l, c in a.hin] == [c for _l, c in b.hin])
-pruefe('der Rueckweg wird gleich mitgebaut',
-       a.zurueck == umkehren(a.hin) and b.zurueck == umkehren(b.hin))
-pruefe('die Richtung steht im Log',
-       any('CW' in z for z in a.zeilen) and any('CCW' in z for z in b.zeilen))
+a, b = SequenceStub(TAB), SequenceStub(TAB)
+a._choose_sequence('CW', 'Test')
+b._choose_sequence('CCW', 'Test')
+check('CW and CCW mirror the steering against each other',
+      all(x * y < 0 for (x, _c1), (y, _c2) in zip(a.steps_out, b.steps_out)
+          if abs(x) > 5.0),
+      '%s vs %s' % ([round(l) for l, _c in a.steps_out],
+                    [round(l) for l, _c in b.steps_out]))
+check('the travels stay the same in both',
+      [c for _l, c in a.steps_out] == [c for _l, c in b.steps_out])
+check('the way back is built along with it',
+      a.steps_back == reverse_steps(a.steps_out) and b.steps_back == reverse_steps(b.steps_out))
+check('the direction is in the log',
+      any('CW' in z for z in a.lines) and any('CCW' in z for z in b.lines))
 
-print('\nPose-Ausgabe')
-pruefe('Pose wird lesbar ausgegeben',
-       pose_text((0.1234, -0.5678, math.radians(12.34)))
-       == 'x=+0.123 m  y=-0.568 m  Kurs=+12.3 grad',
-       pose_text((0.1234, -0.5678, math.radians(12.34))))
+print('\nPose output')
+check('pose is printed readably',
+      pose_text((0.1234, -0.5678, math.radians(12.34)))
+      == 'x=+0.123 m  y=-0.568 m  heading=+12.3 deg',
+      pose_text((0.1234, -0.5678, math.radians(12.34))))
 
 
-class PauseAttrappe:
-    _pause_vorbei = AusparkTest._pause_vorbei
-    _auf_taste_warten = AusparkTest._auf_taste_warten
+class PauseStub:
+    _pause_over = UnparkTest._pause_over
+    _wait_for_key = UnparkTest._wait_for_key
 
-    def __init__(self, mit_taste, tty):
-        self.pause_mit_taste = mit_taste
+    def __init__(self, with_key, tty):
+        self.pause_on_key = with_key
         self.pause_s = 2.0
-        self.weiter = False
-        self.taste_laeuft = False
+        self.proceed = False
+        self.key_wait_active = False
         self.t0 = 100.0
         self._tty = tty
-        self.zeilen = []
+        self.lines = []
 
     def get_logger(self):
-        an = lambda text, **kw: self.zeilen.append(text)
-        return types.SimpleNamespace(info=an, warn=an, error=an)
+        add = lambda text, **kw: self.lines.append(text)
+        return types.SimpleNamespace(info=add, warn=add, error=add)
 
 
-print('\nPause an der Wende')
-echtes_stdin = sys.stdin
+print('\nPause at the turnaround')
+real_stdin = sys.stdin
 
-# Mit Terminal: es wartet, bis die Taste kam -- und nicht auf die Uhr.
-# readline() muss BLOCKIEREN wie ein echtes Terminal, sonst setzt der Faden
-# das Flag schon im selben Augenblick und der Test misst nichts.
-taste = threading.Event()
+# With a terminal: it waits until the key came -- and not for the clock.
+# readline() must BLOCK like a real terminal, otherwise the thread sets
+# the flag in the very same moment and the test measures nothing.
+key = threading.Event()
 sys.stdin = types.SimpleNamespace(
     isatty=lambda: True,
-    readline=lambda: (taste.wait(5.0), '\n')[1])
-f = PauseAttrappe(mit_taste=True, tty=True)
-pruefe('ohne Tastendruck geht es nicht weiter', not f._pause_vorbei(100.0))
-pruefe('die Aufforderung steht im Log',
-       any('ENTER' in z for z in f.zeilen))
-pruefe('auch nach langer Zeit nicht', not f._pause_vorbei(1e6))
-taste.set()
-for _ in range(200):                      # dem Faden Zeit lassen
-    if f.weiter:
+    readline=lambda: (key.wait(5.0), '\n')[1])
+f = PauseStub(with_key=True, tty=True)
+check('without a key press it does not go on', not f._pause_over(100.0))
+check('the prompt is in the log',
+      any('ENTER' in z for z in f.lines))
+check('not even after a long time', not f._pause_over(1e6))
+key.set()
+for _ in range(200):                      # give the thread time
+    if f.proceed:
         break
     time.sleep(0.01)
-pruefe('nach dem Tastendruck geht es weiter', f._pause_vorbei(100.0))
-pruefe('der Faden hat das Flag wirklich gesetzt', f.weiter is True)
+check('after the key press it goes on', f._pause_over(100.0))
+check('the thread really set the flag', f.proceed is True)
 
-# Ohne Terminal darf er nicht ewig haengen.
+# Without a terminal it must not hang forever.
 sys.stdin = types.SimpleNamespace(isatty=lambda: False)
-f = PauseAttrappe(mit_taste=True, tty=False)
-pruefe('ohne Terminal faellt er auf die Uhr zurueck',
-       not f._pause_vorbei(100.0) and f._pause_vorbei(102.5))
-pruefe('und sagt, dass er das tut',
-       any('kein Terminal' in z for z in f.zeilen))
+f = PauseStub(with_key=True, tty=False)
+check('without a terminal it falls back to the clock',
+      not f._pause_over(100.0) and f._pause_over(102.5))
+check('and says that it does so',
+      any('no terminal' in z for z in f.lines))
 
-# Abgeschaltet wartet er ebenfalls nur die Zeit ab.
+# Switched off it also just waits out the time.
 sys.stdin = types.SimpleNamespace(isatty=lambda: True)
-f = PauseAttrappe(mit_taste=False, tty=True)
-pruefe('pause_mit_taste=False nimmt wieder die Uhr',
-       not f._pause_vorbei(101.0) and f._pause_vorbei(102.1)
-       and not any('ENTER' in z for z in f.zeilen))
+f = PauseStub(with_key=False, tty=True)
+check('pause_on_key=False uses the clock again',
+      not f._pause_over(101.0) and f._pause_over(102.1)
+      and not any('ENTER' in z for z in f.lines))
 
-sys.stdin = echtes_stdin
+sys.stdin = real_stdin
 
-print('\nalle Tests bestanden')
+print('\nall tests passed')

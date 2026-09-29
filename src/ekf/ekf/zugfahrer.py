@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
 """
-Eine Rangierfolge Zug fuer Zug ueber die Bruecke abfahren.
+Drive a manoeuvre sequence move by move through the bridge.
 
-Gemeinsam genutzt von ausparken_test_node und round1_controller_node: beide
-fahren Zuege auf DEMSELBEN Weg. Die Messreihen aus dem Ausparktest gelten fuer
-genau diese Ausfuehrung -- eine zweite Implementierung im Regler wuerde
-frueher oder spaeter davon abweichen, und dann gelten die Messungen nicht mehr.
+Shared by unpark_test_node and round1_controller_node: both
+drive moves the SAME way. The measurement series from the unpark test apply to
+exactly this implementation -- a second implementation in the controller would
+sooner or later drift away from it, and then the measurements no longer apply.
 
-Ablauf je Zug:
-  1. Lenkwert lenk_wartezeit lang wiederholen (im Stand lenken; der erste
-     Befehl auf einer frischen Verbindung geht in der DDS-Erkennung verloren).
-  2. Strecke als Wellendrehung in Grad auf /esp_serial_bridge/move schicken.
-     Die Strecke regelt der ESP ueber die Encoder, nicht der EKF.
-  3. Auf die Quittung auf /esp_serial_bridge/move_done warten.
+Sequence per move:
+  1. Repeat the steering value for steer_wait_s (steer at standstill; the first
+     command on a fresh connection gets lost in DDS discovery).
+  2. Send the travel as shaft rotation in degrees on /esp_serial_bridge/move.
+     The ESP controls the travel via the encoders, not the EKF.
+  3. Wait for the ack on /esp_serial_bridge/move_done.
 
-Waehrend eines Zuges darf niemand /cmd_vel senden: die Bruecke wuerde die
-Lenkung neu stellen, und ein Motorbefehl loest die laufende Fahrt ab.
+During a move nobody may send /cmd_vel: the bridge would set the
+steering again, and a motor command replaces the running move.
 
-Der Besitzer (``node``) muss bereitstellen:
-    pub_steer, pub_move            Publisher (Float32)
-    lenk_wartezeit, zug_timeout    Sekunden
-    weg_toleranz_cm                Toleranz fuer die Plausibilitaetspruefung
+The owner (``node``) must provide:
+    pub_steer, pub_move            publishers (Float32)
+    steer_wait_s, move_timeout     seconds
+    travel_tol_cm                  tolerance for the plausibility check
     get_logger()
-und ``quittung`` von aussen setzen, wenn move_done eintrifft:
-    fahrer.quittung = (zeitpunkt, status, wert)
+and set ``ack`` from outside when move_done arrives:
+    sequencer.ack = (timestamp, status, value)
 """
 import math
 
 from std_msgs.msg import Float32
 
-from ekf.ausparken import bahn, cm_zu_grad
+from ekf.unpark import trajectory, cm_to_deg
 
 
 def wrap(a):
@@ -37,101 +37,101 @@ def wrap(a):
 
 
 def pose_text(pose):
-    return ('x=%+.3f m  y=%+.3f m  Kurs=%+.1f grad'
+    return ('x=%+.3f m  y=%+.3f m  heading=%+.1f deg'
             % (pose[0], pose[1], math.degrees(pose[2])))
 
 
-def umkehren(schritte):
-    """Die Folge, die den Hinweg aufhebt: rueckwaerts durch die Liste, jede
-    Strecke negiert, jede Lenkung unveraendert. Aus dem Ausparken wird so das
-    Einparken -- am Roboter nachgemessen auf rund 2 cm genau."""
-    return [(lenk, -cm) for lenk, cm in reversed(schritte)]
+def reverse_steps(steps):
+    """The sequence that undoes the outbound path: backwards through the list,
+    every travel negated, every steering unchanged. That turns unparking into
+    parking -- measured on the robot to about 2 cm."""
+    return [(steer, -cm) for steer, cm in reversed(steps)]
 
 
-class Fahrer:
-    """Faehrt eine Schrittfolge ueber die Bruecke ab.
+class MoveSequencer:
+    """Drives a step sequence through the bridge.
 
-    Erst lenken, dann die Positionsfahrt ausloesen, dann auf die Quittung
-    warten. Kein /cmd_vel dazwischen.
+    First steer, then trigger the position move, then wait for the
+    ack. No /cmd_vel in between.
     """
 
-    def __init__(self, node, schritte, name):
+    def __init__(self, node, steps, name):
         self.node = node
-        self.schritte = schritte
+        self.steps = steps
         self.name = name
         self.i = 0
-        self.phase = 'lenken'
-        self.gesendet = False
+        self.phase = 'steer'
+        self.sent = False
         self.t0 = 0.0
-        self.quittung = None
-        self.los_t = None
+        self.ack = None
+        self.go_t = None
         self.pose0 = None
-        self.fehler = None
+        self.error = None
 
     @property
-    def fertig(self):
-        return self.i >= len(self.schritte)
+    def done(self):
+        return self.i >= len(self.steps)
 
-    def takt(self, jetzt, pose):
-        """Einmal pro Regeltakt aufrufen. True, wenn fertig oder abgebrochen
-        (dann steht der Grund in ``fehler``)."""
-        if self.fertig:
+    def tick(self, now, pose):
+        """Call once per control tick. True when done or aborted
+        (then the reason is in ``error``)."""
+        if self.done:
             return True
-        lenk, cm = self.schritte[self.i]
+        steer, cm = self.steps[self.i]
 
-        if self.phase == 'lenken':
-            if not self.gesendet:
-                self.gesendet = True
-                self.t0 = jetzt
-            self.node.pub_steer.publish(Float32(data=float(lenk)))
-            if jetzt - self.t0 < self.node.lenk_wartezeit:
+        if self.phase == 'steer':
+            if not self.sent:
+                self.sent = True
+                self.t0 = now
+            self.node.pub_steer.publish(Float32(data=float(steer)))
+            if now - self.t0 < self.node.steer_wait_s:
                 return False
-            self.quittung = None
-            self.los_t = jetzt
+            self.ack = None
+            self.go_t = now
             self.pose0 = pose
-            self.node.pub_move.publish(Float32(data=float(cm_zu_grad(cm))))
-            self.phase = 'fahren'
+            self.node.pub_move.publish(Float32(data=float(cm_to_deg(cm))))
+            self.phase = 'drive'
             self.node.get_logger().info(
-                "%s Zug %d/%d: Lenkung %+.0f %%, %+.1f cm"
-                % (self.name, self.i + 1, len(self.schritte), lenk, cm))
+                "%s move %d/%d: steering %+.0f %%, %+.1f cm"
+                % (self.name, self.i + 1, len(self.steps), steer, cm))
             return False
 
-        q = self.quittung
-        if q is not None and q[0] >= self.los_t:
+        q = self.ack
+        if q is not None and q[0] >= self.go_t:
             status = q[1]
-            plan = bahn((0.0, 0.0, 0.0), [(lenk, cm)])[-1][0]
-            soll_dreh = math.degrees(plan[2])
-            soll_weg = math.hypot(plan[0], plan[1])
-            ist_dreh = math.degrees(wrap(pose[2] - self.pose0[2]))
-            ist_weg = math.hypot(pose[0] - self.pose0[0], pose[1] - self.pose0[1])
+            plan = trajectory((0.0, 0.0, 0.0), [(steer, cm)])[-1][0]
+            target_rot = math.degrees(plan[2])
+            target_travel = math.hypot(plan[0], plan[1])
+            actual_rot = math.degrees(wrap(pose[2] - self.pose0[2]))
+            actual_travel = math.hypot(pose[0] - self.pose0[0], pose[1] - self.pose0[1])
             self.node.get_logger().info(
-                "%s Zug %d fertig: Drehung %+.1f grad (Modell %+.1f), "
-                "Weg %.1f cm (Modell %.1f)%s"
-                % (self.name, self.i + 1, ist_dreh, soll_dreh,
-                   ist_weg * 100, soll_weg * 100,
-                   '' if status == 0 else '  [Status %d]' % status))
-            self.node.get_logger().info("           steht bei  %s"
+                "%s move %d done: rotation %+.1f deg (model %+.1f), "
+                "travel %.1f cm (model %.1f)%s"
+                % (self.name, self.i + 1, actual_rot, target_rot,
+                   actual_travel * 100, target_travel * 100,
+                   '' if status == 0 else '  [status %d]' % status))
+            self.node.get_logger().info("           stands at  %s"
                                         % pose_text(pose))
             if status == 2:
-                self.fehler = ("Zug %d wurde von einem Motorbefehl abgeloest"
+                self.error = ("move %d was replaced by a motor command"
                                % (self.i + 1))
                 return True
-            # ACHTUNG: ist_weg kommt aus der EKF-Pose. Springt die Lokalisierung,
-            # schlaegt diese Pruefung fehl, obwohl der Zug korrekt gefahren ist
-            # (so geschehen im CCW-Test, Lauf 5). Sobald geklaert ist, was
-            # move_done in data[2] meldet, sollte hier q[2] stehen.
-            if status == 1 and abs(ist_weg - soll_weg) > \
-                    self.node.weg_toleranz_cm / 100.0:
-                self.fehler = ("Zug %d: Zeitueberschreitung UND %.1f cm zu "
-                               "kurz" % (self.i + 1, (soll_weg - ist_weg) * 100))
+            # CAUTION: actual_travel comes from the EKF pose. If the localisation jumps,
+            # this check fails although the move was driven correctly
+            # (happened in the CCW test, run 5). As soon as it is clear what
+            # move_done reports in data[2], q[2] should be used here.
+            if status == 1 and abs(actual_travel - target_travel) > \
+                    self.node.travel_tol_cm / 100.0:
+                self.error = ("move %d: timeout AND %.1f cm too "
+                               "short" % (self.i + 1, (target_travel - actual_travel) * 100))
                 return True
             self.i += 1
-            self.phase = 'lenken'
-            self.gesendet = False
-            return self.fertig
+            self.phase = 'steer'
+            self.sent = False
+            return self.done
 
-        if jetzt - self.los_t > self.node.zug_timeout:
-            self.fehler = ("Zug %d ohne Quittung nach %.0f s -- laeuft der "
-                           "esp_serial_bridge?" % (self.i + 1, self.node.zug_timeout))
+        if now - self.go_t > self.node.move_timeout:
+            self.error = ("move %d without ack after %.0f s -- is "
+                           "esp_serial_bridge running?" % (self.i + 1, self.node.move_timeout))
             return True
         return False

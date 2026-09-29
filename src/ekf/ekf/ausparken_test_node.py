@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
-Ausparksequenz hin und zurueck fahren, um ihren Fehler zu MESSEN.
+Drive the unpark sequence out and back again, to MEASURE its error.
 
-    ros2 run ekf ausparken_test
+    ros2 run ekf unpark_test
 
-Zuerst wird die Folge vorwaerts gefahren, dann dieselbe Folge rueckwaerts:
-Schritte in umgekehrter Reihenfolge, jeder mit derselben Lenkung und
-negativer Strecke. Kinematisch hebt das den Hinweg exakt auf -- der Roboter
-muesste wieder genau dort stehen, wo er losgefahren ist.
+First the sequence is driven forwards, then the same sequence backwards:
+steps in reverse order, each with the same steering and
+negative travel. Kinematically that cancels the outbound path exactly -- the robot
+should end up exactly where it started.
 
-Was uebrig bleibt, ist der RUECKKEHRFEHLER, und der ist das Messergebnis.
-Er braucht keine Lueckenmasse und keine Karte, nur die Odometrie, und er
-trennt zwei Dinge, die sich sonst vermischen:
+What is left over is the RETURN ERROR, and that is the measurement result.
+It needs no bay dimensions and no map, only the odometry, and it
+separates two things that otherwise get mixed up:
 
-  * Ein Fehler, der sich auf dem Rueckweg AUFHEBT (Hinweg und Rueckweg weichen
-    gleich ab), steckt im Modell -- Wendekreis, Radstand, Trimm.
-  * Ein Fehler, der BLEIBT, steckt in der Mechanik -- Schlupf, Spiel in der
-    Lenkung, Nachlauf des Positionsreglers.
+  * An error that CANCELS on the way back (outbound and return deviate
+    the same way) is in the model -- turning circle, wheelbase, trim.
+  * An error that STAYS is in the mechanics -- slip, play in the
+    steering, overrun of the position controller.
 
-Der Vergleich zwischen gefahrener und gerechneter Endpose des Hinwegs zeigt
-zusaetzlich, wie gut die Kennlinie aus steer_calib.json gerade passt.
+The comparison between the driven and the computed end pose of the outbound
+path also shows how well the curve from steer_calib.json fits right now.
 
-ACHTUNG: dieser Knoten FAEHRT. Er zaehlt vor dem Start herunter, und waehrend
-einer Positionsfahrt wirkt /cmd_vel nicht -- der Nothalt geht ueber
+CAUTION: this node DRIVES. It counts down before the start, and during
+a position move /cmd_vel has no effect -- the emergency stop goes through
 /esp_serial_bridge/emergency.
 """
 import math
@@ -36,11 +36,11 @@ from std_msgs.msg import Float32, Float32MultiArray, Int32, Int32MultiArray
 
 from sensor_msgs.msg import LaserScan
 
-from ekf.ausparken import (bahn, cm_zu_grad, richtung_aus_scan,
-                           schritte_aus_flach, schritte_fuer, spiegeln,
-                           LENK_QUELLE, SCHRITTE_STANDARD, wenderadius)
+from ekf.unpark import (trajectory, cm_to_deg, direction_from_scan,
+                        steps_from_flat, steps_for, mirror_steps,
+                        STEER_SOURCE, STEPS_DEFAULT, turn_radius_of)
 from ekf.wall_extraction import scan_to_points
-from ekf.zugfahrer import Fahrer, pose_text, umkehren, wrap
+from ekf.move_sequencer import MoveSequencer, pose_text, reverse_steps, wrap
 
 
 def yaw_from_quaternion(q):
@@ -49,11 +49,11 @@ def yaw_from_quaternion(q):
     return math.atan2(siny, cosy)
 
 
-def im_startrahmen(start, pose):
-    """Abweichung von ``start`` in dessen eigenem Rahmen: (laengs, quer, gier).
+def in_start_frame(start, pose):
+    """Deviation from ``start`` in its own frame: (long, lat, yaw).
 
-    Laengs und quer sind aussagekraeftiger als x/y im Odom-Rahmen -- "3 cm zu
-    weit" und "3 cm daneben" sind verschiedene Fehler.
+    Long and lat say more than x/y in the odom frame -- "3 cm too
+    far" and "3 cm off to the side" are different errors.
     """
     xs, ys, ths = start
     dx, dy = pose[0] - xs, pose[1] - ys
@@ -61,58 +61,58 @@ def im_startrahmen(start, pose):
     return (c * dx + s * dy, -s * dx + c * dy, wrap(pose[2] - ths))
 
 
-class AusparkTest(Node):
+class UnparkTest(Node):
 
     def __init__(self):
-        super().__init__('ausparken_test')
-        arr = self._array_typ()
-        self.declare_parameter('schritte', list(SCHRITTE_STANDARD), arr)
-        # Leer = aus dem Scan MESSEN, so wie es der Regler tut. Der Roboter
-        # steht beim Test in derselben Luecke; eine geratene Richtung
-        # spiegelt die Folge falsch herum und misst dann etwas anderes, als
-        # spaeter gefahren wird. CW oder CCW erzwingt eine Richtung, fuer
-        # Versuche ausserhalb der Luecke.
-        self.declare_parameter('richtung', '')
+        super().__init__('unpark_test')
+        arr = self._array_type()
+        self.declare_parameter('steps', list(STEPS_DEFAULT), arr)
+        # Empty = MEASURE from the scan, the way the controller does it. The robot
+        # stands in the same bay during the test; a guessed direction
+        # mirrors the sequence the wrong way round and then measures something other
+        # than what is driven later. CW or CCW forces a direction, for
+        # trials outside the bay.
+        self.declare_parameter('direction', '')
         self.declare_parameter('scans', 5)
-        self.declare_parameter('sektor_grad', 20.0)
-        self.declare_parameter('richtung_timeout', 8.0)
-        self.declare_parameter('wiederholungen', 1)
-        # An der Wende auf Enter warten statt auf die Uhr: dort will man
-        # nachmessen, und eine feste Zeit ist dafuer immer entweder zu kurz
-        # oder zu lang. Ohne Terminal (stdin kein TTY) faellt es auf pause_s
-        # zurueck, sonst haengt der Knoten dort fuer immer.
-        self.declare_parameter('pause_mit_taste', True)
+        self.declare_parameter('sector_deg', 20.0)
+        self.declare_parameter('direction_timeout', 8.0)
+        self.declare_parameter('repetitions', 1)
+        # At the turnaround wait for Enter instead of the clock: that is where
+        # you want to measure, and a fixed time is always either too short
+        # or too long for that. Without a terminal (stdin not a TTY) it falls back to
+        # pause_s, otherwise the node hangs there forever.
+        self.declare_parameter('pause_on_key', True)
         self.declare_parameter('pause_s', 2.0)
         self.declare_parameter('countdown_s', 3.0)
-        self.declare_parameter('lenk_wartezeit', 0.6)
-        self.declare_parameter('zug_timeout', 15.0)
-        self.declare_parameter('weg_toleranz_cm', 1.0)
+        self.declare_parameter('steer_wait_s', 0.6)
+        self.declare_parameter('move_timeout', 15.0)
+        self.declare_parameter('travel_tol_cm', 1.0)
         self.declare_parameter('pid', [4.0, 140.0, 8.0, 90.0], arr)
-        self.declare_parameter('pid_nachher', [4.0, 1023.0], arr)
+        self.declare_parameter('pid_after', [4.0, 1023.0], arr)
 
-        self.lenk_wartezeit = float(self.get_parameter('lenk_wartezeit').value)
-        self.zug_timeout = float(self.get_parameter('zug_timeout').value)
-        self.weg_toleranz_cm = float(self.get_parameter('weg_toleranz_cm').value)
+        self.steer_wait_s = float(self.get_parameter('steer_wait_s').value)
+        self.move_timeout = float(self.get_parameter('move_timeout').value)
+        self.travel_tol_cm = float(self.get_parameter('travel_tol_cm').value)
         self.pause_s = float(self.get_parameter('pause_s').value)
-        self.pause_mit_taste = bool(self.get_parameter('pause_mit_taste').value)
-        self.weiter = False
-        self.taste_laeuft = False
+        self.pause_on_key = bool(self.get_parameter('pause_on_key').value)
+        self.proceed = False
+        self.key_wait_active = False
         self.countdown_s = float(self.get_parameter('countdown_s').value)
-        self.runden = max(1, int(self.get_parameter('wiederholungen').value))
+        self.rounds = max(1, int(self.get_parameter('repetitions').value))
 
-        self.vorgabe = str(self.get_parameter('richtung').value).strip().upper()
-        if self.vorgabe not in ('', 'CW', 'CCW'):
-            raise ValueError('richtung muss leer, CW oder CCW sein, nicht "%s"'
-                             % self.vorgabe)
+        self.preset_direction = str(self.get_parameter('direction').value).strip().upper()
+        if self.preset_direction not in ('', 'CW', 'CCW'):
+            raise ValueError('direction must be empty, CW or CCW, not "%s"'
+                             % self.preset_direction)
         self.scans = max(1, int(self.get_parameter('scans').value))
-        self.sektor_grad = float(self.get_parameter('sektor_grad').value)
-        self.richtung_timeout = float(
-            self.get_parameter('richtung_timeout').value)
-        self.stimmen = []
-        self.letzter_grund = None
-        self.richtung = None
-        self.hin = None
-        self.zurueck = None
+        self.sector_deg = float(self.get_parameter('sector_deg').value)
+        self.direction_timeout = float(
+            self.get_parameter('direction_timeout').value)
+        self.votes = []
+        self.last_reason = None
+        self.direction = None
+        self.steps_out = None
+        self.steps_back = None
 
         self.pub_steer = self.create_publisher(Float32, '/esp_serial_bridge/steer', 10)
         self.pub_move = self.create_publisher(Float32, '/esp_serial_bridge/move', 10)
@@ -125,28 +125,28 @@ class AusparkTest(Node):
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
 
         self.pose = None
-        self.zustand = 'WARTEN'
+        self.state = 'WAITING'
         self.t0 = self.now_s()
-        self.fahrer = None
-        self.runde = 0
+        self.sequencer = None
+        self.round_no = 0
         self.start_pose = None
-        self.wende_pose = None
-        self.protokoll = []
+        self.turnaround_pose = None
+        self.log = []
 
         self.get_logger().info(
-            ">>> Ausparktest: hin und dieselbe Strecke zurueck, %dx. "
-            "Fahrtrichtung: %s <<<"
-            % (self.runden,
-               self.vorgabe + ' (vorgegeben)' if self.vorgabe
-               else 'wird aus dem Scan gemessen'))
+            ">>> Unpark test: out and the same path back, %dx. "
+            "Driving direction: %s <<<"
+            % (self.rounds,
+               self.preset_direction + ' (preset)' if self.preset_direction
+               else 'is measured from the scan'))
         self.get_logger().info(
-            "Lenkung: %s, Vollausschlag R = %.3f m."
-            % (LENK_QUELLE or 'NOTNAGEL (steer_calib.json nicht gefunden!)',
-               wenderadius(100.0)))
+            "Steering: %s, full lock R = %.3f m."
+            % (STEER_SOURCE or 'FALLBACK (steer_calib.json not found!)',
+               turn_radius_of(100.0)))
         self.create_timer(1.0 / 30.0, self.control_loop)
 
     @staticmethod
-    def _array_typ():
+    def _array_type():
         from rcl_interfaces.msg import ParameterDescriptor, ParameterType
         return ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE_ARRAY)
 
@@ -159,237 +159,237 @@ class AusparkTest(Node):
                      yaw_from_quaternion(p.orientation))
 
     def scan_cb(self, msg):
-        """Eine Stimme fuer die Fahrtrichtung, solange gesucht wird."""
-        if self.zustand != 'RICHTUNG':
+        """One vote for the driving direction, while searching."""
+        if self.state != 'DIRECTION':
             return
-        e = richtung_aus_scan(scan_to_points(msg),
-                              halbwinkel_grad=self.sektor_grad)
-        self.letzter_grund = e['grund']
-        if not e['sicher']:
-            self.stimmen = []
+        e = direction_from_scan(scan_to_points(msg),
+                                half_angle_deg=self.sector_deg)
+        self.last_reason = e['reason']
+        if not e['confident']:
+            self.votes = []
             return
-        # Nur EINIGE Stimmen zaehlen: ein Widerspruch setzt zurueck. Wer den
-        # Roboter waehrend der Suche anfasst, bekommt keine Entscheidung statt
-        # einer knappen -- dieselbe Regel wie im Regler.
-        if self.stimmen and self.stimmen[-1] != e['richtung']:
-            self.stimmen = []
-        self.stimmen.append(e['richtung'])
+        # Only AGREEING votes count: a contradiction resets. Whoever touches the
+        # robot during the search gets no decision instead of
+        # a narrow one -- the same rule as in the controller.
+        if self.votes and self.votes[-1] != e['direction']:
+            self.votes = []
+        self.votes.append(e['direction'])
 
-    def _folge_festlegen(self, richtung, quelle):
-        """Schrittfolge fuer diese Richtung waehlen und spiegeln."""
-        self.richtung = richtung
-        roh, herkunft = schritte_fuer(
-            richtung, gemeinsam=list(self.get_parameter('schritte').value))
-        self.hin = spiegeln(schritte_aus_flach(roh), richtung == 'CCW')
-        self.zurueck = umkehren(self.hin)
-        ende = bahn((0.0, 0.0, 0.0), self.hin)[-1][0]
+    def _choose_sequence(self, direction, source):
+        """Pick the step sequence for this direction and mirror it."""
+        self.direction = direction
+        raw, origin = steps_for(
+            direction, shared=list(self.get_parameter('steps').value))
+        self.steps_out = mirror_steps(steps_from_flat(raw), direction == 'CCW')
+        self.steps_back = reverse_steps(self.steps_out)
+        end = trajectory((0.0, 0.0, 0.0), self.steps_out)[-1][0]
         self.get_logger().info(
-            "Fahrtrichtung %s (%s). %s: %d Zuege, %.0f cm je Richtung."
-            % (richtung, quelle, herkunft, len(self.hin),
-               sum(abs(cm) for _l, cm in self.hin)))
+            "Driving direction %s (%s). %s: %d moves, %.0f cm per direction."
+            % (direction, source, origin, len(self.steps_out),
+               sum(abs(cm) for _l, cm in self.steps_out)))
         self.get_logger().info(
-            "Modell sagt fuer den Hinweg: %.1f cm voraus, %.1f cm zur Seite, "
-            "%+.1f grad." % (ende[0] * 100, ende[1] * 100,
-                             math.degrees(ende[2])))
+            "Model predicts for the outbound path: %.1f cm ahead, %.1f cm to the side, "
+            "%+.1f deg." % (end[0] * 100, end[1] * 100,
+                            math.degrees(end[2])))
 
     def move_done_cb(self, msg):
-        if len(msg.data) >= 3 and self.fahrer is not None:
-            self.fahrer.quittung = (self.now_s(), int(msg.data[1]),
-                                    msg.data[2] / 10.0)
+        if len(msg.data) >= 3 and self.sequencer is not None:
+            self.sequencer.ack = (self.now_s(), int(msg.data[1]),
+                                  msg.data[2] / 10.0)
 
-    def _pid(self, werte):
-        werte = list(werte)
-        for i in range(0, len(werte) - 1, 2):
+    def _pid(self, vals):
+        vals = list(vals)
+        for i in range(0, len(vals) - 1, 2):
             self.pub_pid.publish(
-                Float32MultiArray(data=[float(werte[i]), float(werte[i + 1])]))
+                Float32MultiArray(data=[float(vals[i]), float(vals[i + 1])]))
 
-    def _abbruch(self, grund):
+    def _abort(self, reason):
         self.pub_motor.publish(Int32(data=0))
-        self._pid(self.get_parameter('pid_nachher').value)
-        self.get_logger().error("Abgebrochen: %s" % grund)
+        self._pid(self.get_parameter('pid_after').value)
+        self.get_logger().error("Aborted: %s" % reason)
         if self.pose is not None:
-            self.get_logger().error("           steht bei  %s"
+            self.get_logger().error("           stands at  %s"
                                     % pose_text(self.pose))
-        self.zustand = 'ENDE'
+        self.state = 'END'
 
     def control_loop(self):
         if self.pose is None:
-            self.get_logger().warn("warte auf /ekf/odom -- laeuft ekf_node?",
+            self.get_logger().warn("waiting for /ekf/odom -- is ekf_node running?",
                                    throttle_duration_sec=2.0)
             return
-        jetzt = self.now_s()
+        t_now = self.now_s()
 
-        if self.zustand == 'WARTEN':
-            fehlt = [n for n, pub in (('steer', self.pub_steer),
-                                      ('move', self.pub_move),
-                                      ('pid_set', self.pub_pid),
-                                      ('motor', self.pub_motor))
-                     if pub.get_subscription_count() == 0]
-            if fehlt:
-                self.get_logger().info("warte auf die Bruecke (%s)"
-                                       % ', '.join(fehlt),
+        if self.state == 'WAITING':
+            missing = [n for n, pub in (('steer', self.pub_steer),
+                                        ('move', self.pub_move),
+                                        ('pid_set', self.pub_pid),
+                                        ('motor', self.pub_motor))
+                       if pub.get_subscription_count() == 0]
+            if missing:
+                self.get_logger().info("waiting for the bridge (%s)"
+                                       % ', '.join(missing),
                                        throttle_duration_sec=1.0)
-                if jetzt - self.t0 > 15.0:
-                    self._abbruch("Bruecke hoert nicht zu (%s)"
-                                  % ', '.join(fehlt))
+                if t_now - self.t0 > 15.0:
+                    self._abort("bridge is not listening (%s)"
+                                % ', '.join(missing))
                 return
-            self.zustand = 'RICHTUNG'
-            self.t0 = jetzt
-            if self.vorgabe:
-                self._folge_festlegen(self.vorgabe, 'vorgegeben')
-                self.zustand = 'COUNTDOWN'
+            self.state = 'DIRECTION'
+            self.t0 = t_now
+            if self.preset_direction:
+                self._choose_sequence(self.preset_direction, 'preset')
+                self.state = 'COUNTDOWN'
             else:
                 self.get_logger().info(
-                    "suche die offene Seite, %d einige Scans noetig."
+                    "looking for the open side, %d agreeing scans needed."
                     % self.scans)
             return
 
-        if self.zustand == 'RICHTUNG':
-            if len(self.stimmen) < self.scans:
-                if jetzt - self.t0 > self.richtung_timeout:
-                    self._abbruch(
-                        "keine eindeutige Fahrtrichtung in %.0f s -- zuletzt: "
-                        "%s. Steht er in der Luecke? Sonst richtung:=CW oder "
-                        "CCW vorgeben."
-                        % (self.richtung_timeout,
-                           self.letzter_grund or 'kein /scan empfangen'))
+        if self.state == 'DIRECTION':
+            if len(self.votes) < self.scans:
+                if t_now - self.t0 > self.direction_timeout:
+                    self._abort(
+                        "no clear driving direction in %.0f s -- last: "
+                        "%s. Is it standing in the bay? Otherwise preset direction:=CW or "
+                        "CCW."
+                        % (self.direction_timeout,
+                           self.last_reason or 'no /scan received'))
                 else:
                     self.get_logger().info(
-                        "%d/%d Stimmen -- %s"
-                        % (len(self.stimmen), self.scans,
-                           self.letzter_grund or 'warte auf /scan'),
+                        "%d/%d votes -- %s"
+                        % (len(self.votes), self.scans,
+                           self.last_reason or 'waiting for /scan'),
                         throttle_duration_sec=1.0)
                 return
-            self._folge_festlegen(self.stimmen[-1], 'aus dem Scan gemessen')
-            self.zustand = 'COUNTDOWN'
-            self.t0 = jetzt
+            self._choose_sequence(self.votes[-1], 'measured from the scan')
+            self.state = 'COUNTDOWN'
+            self.t0 = t_now
             return
 
-        if self.zustand == 'COUNTDOWN':
-            rest = self.countdown_s - (jetzt - self.t0)
-            if rest > 0.0:
-                self.get_logger().warn("Start in %.0f s -- er FAEHRT gleich."
-                                       % math.ceil(rest),
+        if self.state == 'COUNTDOWN':
+            remaining = self.countdown_s - (t_now - self.t0)
+            if remaining > 0.0:
+                self.get_logger().warn("Start in %.0f s -- it is about to DRIVE."
+                                       % math.ceil(remaining),
                                        throttle_duration_sec=0.9)
                 return
             self._pid(self.get_parameter('pid').value)
-            self._neue_runde()
+            self._new_round()
             return
 
-        if self.zustand in ('HIN', 'ZURUECK'):
-            if self.fahrer.takt(jetzt, self.pose):
-                if self.fahrer.fehler:
-                    self._abbruch(self.fahrer.fehler)
+        if self.state in ('OUTBOUND', 'RETURN'):
+            if self.sequencer.tick(t_now, self.pose):
+                if self.sequencer.error:
+                    self._abort(self.sequencer.error)
                     return
-                self._abschnitt_fertig(jetzt)
+                self._leg_done(t_now)
             return
 
-        if self.zustand == 'PAUSE':
-            if not self._pause_vorbei(jetzt):
+        if self.state == 'PAUSE':
+            if not self._pause_over(t_now):
                 return
-            self.get_logger().info("Rueckweg: dieselbe Folge, rueckwaerts.")
-            self.fahrer = Fahrer(self, self.zurueck, 'RUECKWEG')
-            self.zustand = 'ZURUECK'
+            self.get_logger().info("Way back: the same sequence, in reverse.")
+            self.sequencer = MoveSequencer(self, self.steps_back, 'WAY-BACK')
+            self.state = 'RETURN'
             return
 
-        if self.zustand == 'ENDE':
-            self._bericht()
+        if self.state == 'END':
+            self._report()
             raise SystemExit(0)
 
-    def _auf_taste_warten(self):
-        """Auf Enter warten, in einem eigenen Faden -- rclpy.spin blockiert."""
+    def _wait_for_key(self):
+        """Wait for Enter, in a thread of its own -- rclpy.spin blocks."""
         try:
             sys.stdin.readline()
         except Exception:
             pass
-        self.weiter = True
+        self.proceed = True
 
-    def _pause_vorbei(self, jetzt):
-        if not self.pause_mit_taste or not sys.stdin.isatty():
-            if not self.taste_laeuft:
-                self.taste_laeuft = True
-                if self.pause_mit_taste:
+    def _pause_over(self, t_now):
+        if not self.pause_on_key or not sys.stdin.isatty():
+            if not self.key_wait_active:
+                self.key_wait_active = True
+                if self.pause_on_key:
                     self.get_logger().warn(
-                        "kein Terminal an stdin -- warte %.1f s statt auf "
+                        "no terminal on stdin -- waiting %.1f s instead of for "
                         "Enter." % self.pause_s)
-            return jetzt - self.t0 >= self.pause_s
-        if not self.taste_laeuft:
-            self.taste_laeuft = True
-            threading.Thread(target=self._auf_taste_warten,
+            return t_now - self.t0 >= self.pause_s
+        if not self.key_wait_active:
+            self.key_wait_active = True
+            threading.Thread(target=self._wait_for_key,
                              daemon=True).start()
             self.get_logger().info(
-                ">>> ENTER druecken, dann faehrt er den Rueckweg. <<<")
-        return self.weiter
+                ">>> Press ENTER, then it drives the way back. <<<")
+        return self.proceed
 
-    def _neue_runde(self):
-        self.runde += 1
+    def _new_round(self):
+        self.round_no += 1
         self.start_pose = self.pose
-        self.fahrer = Fahrer(self, self.hin, 'HINWEG')
-        self.zustand = 'HIN'
-        self.get_logger().info("--- Runde %d/%d, Start bei  %s ---"
-                               % (self.runde, self.runden,
+        self.sequencer = MoveSequencer(self, self.steps_out, 'WAY-OUT')
+        self.state = 'OUTBOUND'
+        self.get_logger().info("--- Round %d/%d, start at  %s ---"
+                               % (self.round_no, self.rounds,
                                   pose_text(self.pose)))
 
-    def _abschnitt_fertig(self, jetzt):
-        if self.zustand == 'HIN':
-            self.wende_pose = self.pose
-            laengs, quer, gier = im_startrahmen(self.start_pose, self.pose)
-            modell = bahn((0.0, 0.0, 0.0), self.hin)[-1][0]
+    def _leg_done(self, t_now):
+        if self.state == 'OUTBOUND':
+            self.turnaround_pose = self.pose
+            long, lat, yaw = in_start_frame(self.start_pose, self.pose)
+            model = trajectory((0.0, 0.0, 0.0), self.steps_out)[-1][0]
             self.get_logger().info(
-                "HINWEG fertig: %.1f cm voraus, %.1f cm zur Seite, %+.1f grad "
-                "| Modell: %.1f / %.1f / %+.1f"
-                % (laengs * 100, quer * 100, math.degrees(gier),
-                   modell[0] * 100, modell[1] * 100, math.degrees(modell[2])))
-            self.get_logger().info("           steht bei  %s"
+                "WAY-OUT done: %.1f cm ahead, %.1f cm to the side, %+.1f deg "
+                "| model: %.1f / %.1f / %+.1f"
+                % (long * 100, lat * 100, math.degrees(yaw),
+                   model[0] * 100, model[1] * 100, math.degrees(model[2])))
+            self.get_logger().info("           stands at  %s"
                                    % pose_text(self.pose))
-            self.zustand = 'PAUSE'
-            self.weiter = False
-            self.taste_laeuft = False
-            self.t0 = jetzt
+            self.state = 'PAUSE'
+            self.proceed = False
+            self.key_wait_active = False
+            self.t0 = t_now
             return
 
-        laengs, quer, gier = im_startrahmen(self.start_pose, self.pose)
-        self.protokoll.append((laengs, quer, gier))
+        long, lat, yaw = in_start_frame(self.start_pose, self.pose)
+        self.log.append((long, lat, yaw))
         self.get_logger().info(
-            "RUECKKEHRFEHLER Runde %d: %+.1f cm laengs, %+.1f cm quer, "
-            "%+.1f grad  (Abstand %.1f cm)"
-            % (self.runde, laengs * 100, quer * 100, math.degrees(gier),
-               math.hypot(laengs, quer) * 100))
-        self.get_logger().info("           steht bei  %s  (Start war %s)"
+            "RETURN ERROR round %d: %+.1f cm long, %+.1f cm lat, "
+            "%+.1f deg  (distance %.1f cm)"
+            % (self.round_no, long * 100, lat * 100, math.degrees(yaw),
+               math.hypot(long, lat) * 100))
+        self.get_logger().info("           stands at  %s  (start was %s)"
                                % (pose_text(self.pose),
                                   pose_text(self.start_pose)))
-        if self.runde < self.runden:
-            self._neue_runde()
+        if self.round_no < self.rounds:
+            self._new_round()
         else:
-            self._pid(self.get_parameter('pid_nachher').value)
-            self.zustand = 'ENDE'
+            self._pid(self.get_parameter('pid_after').value)
+            self.state = 'END'
 
-    def _bericht(self):
-        if not self.protokoll:
-            self.get_logger().warn("Keine vollstaendige Runde gefahren.")
+    def _report(self):
+        if not self.log:
+            self.get_logger().warn("No complete round driven.")
             return
-        self.get_logger().info("=== Ergebnis ueber %d Runde(n) ==="
-                               % len(self.protokoll))
-        for i, (l, q, g) in enumerate(self.protokoll, 1):
+        self.get_logger().info("=== Result over %d round(s) ==="
+                               % len(self.log))
+        for i, (l, q, g) in enumerate(self.log, 1):
             self.get_logger().info(
-                "  Runde %d: %+6.1f cm laengs  %+6.1f cm quer  %+6.1f grad"
+                "  Round %d: %+6.1f cm long  %+6.1f cm lat  %+6.1f deg"
                 % (i, l * 100, q * 100, math.degrees(g)))
-        n = len(self.protokoll)
-        ml = sum(p[0] for p in self.protokoll) / n
-        mq = sum(p[1] for p in self.protokoll) / n
-        mg = sum(p[2] for p in self.protokoll) / n
+        n = len(self.log)
+        m_long = sum(p[0] for p in self.log) / n
+        m_lat = sum(p[1] for p in self.log) / n
+        m_yaw = sum(p[2] for p in self.log) / n
         self.get_logger().info(
-            "  Mittel:  %+6.1f cm laengs  %+6.1f cm quer  %+6.1f grad"
-            % (ml * 100, mq * 100, math.degrees(mg)))
+            "  Mean:    %+6.1f cm long  %+6.1f cm lat  %+6.1f deg"
+            % (m_long * 100, m_lat * 100, math.degrees(m_yaw)))
         self.get_logger().info(
-            "Ein Fehler, der sich hier aufhebt, steckt im Modell "
-            "(Wendekreis, Radstand); was uebrig bleibt, ist Mechanik "
-            "(Schlupf, Lenkspiel, Nachlauf).")
+            "An error that cancels here is in the model "
+            "(turning circle, wheelbase); what is left over is mechanics "
+            "(slip, steering play, overrun).")
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = AusparkTest()
+    node = UnparkTest()
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, SystemExit):
