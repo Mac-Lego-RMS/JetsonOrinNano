@@ -5,16 +5,16 @@ def wrap(a):
 
 class DeadReckoningEKF:
     # State: [x, y, theta, v, omega, b_g]
-    # Konvention: theta CCW von x-Achse, rechtshaendig (REP-103).
+    # Convention: theta CCW from the x axis, right-handed (REP-103).
     def __init__(self):
         self.x = np.zeros(6)
         self.P = np.diag([1e-3, 1e-3, 1e-3, 1e-2, 1e-2, 1e-4])
-        self.q_v, self.q_w, self.q_bg = 1.0, 1.0, 1e-6   # random-walk PSD, Tuning spaeter
+        self.q_v, self.q_w, self.q_bg = 1.0, 1.0, 1e-6   # random-walk PSD, tune later
         self.q_v, self.q_w, self.q_bg = 1.0, 1.0, 1e-6
         self.q_pos, self.q_theta = 1e-4, 1e-5   # position/heading process noise: keeps P from collapsing at standstill
-        self.r_gyro = 2.83e-7     # Yaw-Varianz (rad/s)² — Stillstand-Test
-        self.r_enc  = 9.3e-4      # (m/s)² — eingeschwungene Varianz · r_eff², × 3 Kurvenfaktor
-        self.r_eff  = 0.0150      # m — Strecken-Kalibrierung (2,41 m / 10431 Ticks)
+        self.r_gyro = 2.83e-7     # yaw variance (rad/s)^2 -- standstill test
+        self.r_enc  = 9.3e-4      # (m/s)^2 -- steady-state variance * r_eff^2, x 3 curve factor
+        self.r_eff  = 0.0150      # m -- distance calibration (2.41 m / 10431 ticks)
         self.r_wall_alpha = 1.0e-5    # rad^2  (~0.19 deg std)
         self.r_wall_d     = 3.6e-6    # m^2    (~1.9 mm std)
         self.last_stamp = None
@@ -25,9 +25,9 @@ class DeadReckoningEKF:
         self.x[0] = x + v*np.cos(th_mid)*dt
         self.x[1] = y + v*np.sin(th_mid)*dt
         self.x[2] = wrap(th + w*dt)
-        # v, w, bg: random walk, bleiben
+        # v, w, bg: random walk, stay as they are
 
-        # ---- DEIN TEIL: F = d(x_neu)/d(x_alt), 6x6 ----
+        # ---- YOUR PART: F = d(x_new)/d(x_old), 6x6 ----
         F = np.eye(6)
         F[0] = [1, 0, -v*np.sin(th_mid)*dt, np.cos(th_mid)*dt, -0.5*v*np.sin(th_mid)*dt**2, 0]
         F[1] = [0, 1, v*np.cos(th_mid)*dt, np.sin(th_mid)*dt, 0.5*v*np.cos(th_mid)*dt**2, 0]
@@ -99,7 +99,7 @@ class DeadReckoningEKF:
         H = np.array([0,0,0,1.0,0,0])
         self._update(v_meas, self.x[3], H, self.r_enc)
 
-    def update_zero_motion(self):             # Stillstand: omega=0 -> zieht b_g
+    def update_zero_motion(self):             # standstill: omega=0 -> pulls b_g
         H = np.array([0,0,0,0,1.0,0])
         self._update(0.0, self.x[4], H, 1e-4)
 
