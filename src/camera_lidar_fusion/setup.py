@@ -20,8 +20,8 @@ setup(
     zip_safe=True,
     maintainer='macjetson',
     maintainer_email='maeclegorms@gmail.com',
-    description='Fusion der liegenden 360-Grad-Fisheye-Kamera mit dem 2D-Lidar: '
-                'Farbe je Lidar-Punkt (CSV) und Kalibrierung der Kameraverdrehung.',
+    description='Fusion of the horizontally mounted 360 degree fisheye camera with the 2D lidar: '
+                'colour per lidar point (CSV) and calibration of the camera rotation.',
     license='MIT',
     extras_require={
         'test': [
@@ -32,7 +32,7 @@ setup(
         'console_scripts': [
             'lidar_pixel_mapper = camera_lidar_fusion.lidar_pixel_mapper:main',
             'rotation_calibration = camera_lidar_fusion.rotation_calibration:main',
-            'kamera_einmessen = camera_lidar_fusion.kamera_einmessen:main',
+            'camera_exposure_calib = camera_lidar_fusion.camera_exposure_calib:main',
         ],
     },
 )
