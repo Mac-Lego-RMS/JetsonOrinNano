@@ -29,7 +29,7 @@ import numpy as np
 
 import rclpy
 
-from ekf.einzelinstanz import nur_eine_instanz
+from ekf.single_instance import ensure_single_instance
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
@@ -50,7 +50,7 @@ GYRO_SCALE = -0.9674
 # lateral/vertical speed). ROS convention for "unknown", not a real number.
 UNKNOWN_VAR = 1e6
 
-# (ROS-Index, Filter-Index) fuer die Kovarianz-Abbildung
+# (ROS index, filter index) for the covariance mapping
 POSE_MAP = ((0, 0), (1, 1), (5, 2))
 TWIST_MAP = ((0, 3), (5, 4))
 
@@ -59,13 +59,13 @@ TWIST_MAP = ((0, 3), (5, 4))
 # a run) while still rejecting real transport gaps (observed one at -98 ms).
 STALE_TOLERANCE = 0.050          # s
 
-# Gyro-Ueberwachung. In parken_test_15 fiel der BNO055 nach I2C-Fehlern
-# ("Remote I/O error") aus: /bno055/imu kam gar nicht mehr, imu_raw nur noch
-# Nullen, und der Treiber richtete den Chip nicht neu ein. Der Filter rechnete
-# den Kurs dann allein aus den Wandtreffern -- bis zu 20 grad daneben, der
-# Wagen schlingerte, und gemerkt hat es niemand. Jetzt wird es gemeldet.
-GYRO_TIMEOUT = 0.5               # s ohne Nachricht -> ausgefallen
-GYRO_NULL_DAUER = 1.0            # s lang exakt 0 auf allen Achsen -> ausgefallen
+# Gyro monitoring. In parken_test_15 the BNO055 dropped out after I2C errors
+# ("Remote I/O error"): /bno055/imu stopped completely, imu_raw only gave
+# zeros, and the driver did not re-initialise the chip. The filter then took
+# the heading from the wall matches alone -- up to 20 deg off, the car
+# wobbled, and nobody noticed. Now it is reported.
+GYRO_TIMEOUT = 0.5               # s without a message -> failed
+GYRO_ZERO_DURATION = 1.0         # s of exact 0 on all axes -> failed
 
 
 def stamp_to_sec(stamp):
@@ -95,44 +95,44 @@ class EKFNode(Node):
 
         self.create_subscription(Imu, '/bno055/imu', self.gyro_cb, 50)
 
-        # Gyro-Ueberwachung (siehe GYRO_TIMEOUT). Der Zustand geht gelatcht auf
-        # /ekf/gyro_ok; der scan_processor meldet bei False 'lost', und der
-        # Regler faehrt dann langsam und haelt an.
-        self._gyro_letzt = None          # monotonic der letzten Nachricht
-        self._gyro_null_seit = None      # monotonic, seit wann nur Nullen kommen
+        # Gyro monitoring (see GYRO_TIMEOUT). The state goes latched onto
+        # /ekf/gyro_ok; on False the scan_processor reports 'lost', and the
+        # controller then drives slowly and stops.
+        self._gyro_last = None           # monotonic of the last message
+        self._gyro_zero_since = None     # monotonic, since when only zeros arrive
         self._gyro_ok = None
         self._start_mono = time.monotonic()
         latched = QoSProfile(depth=1)
         latched.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.gyro_ok_pub = self.create_publisher(Bool, '/ekf/gyro_ok', latched)
-        self.create_timer(0.1, self._gyro_pruefen)
+        self.create_timer(0.1, self._check_gyro)
         self.create_subscription(JointState, '/esp_serial_bridge/joint_states',
                                  self.enc_cb, 50)
         self.create_subscription(WallMatchArray, '/wall_matches', self.wall_cb, 10)
         self.pub = self.create_publisher(Odometry, '/ekf/odom', 10)
 
-        # Der Filter rechnet weiter mit jeder Messung (Gyro ~93 Hz, Encoder
-        # ~108 Hz) -- veroeffentlicht wird aber getaktet. Vorher ging je
-        # Messung eine Odometry raus, rund 200 Hz; am Aufbau gemessen kostete
-        # das den EKF-Knoten 1.27 von 6 Kernen, fast alles Nachrichtenbau und
-        # Serialisierung. Der Regler laeuft mit 30 Hz, der scan_processor mit
-        # der Scanrate, die esp-Bruecke merkt sich nur den letzten Skalarwert.
-        # 0 = wie frueher, bei jeder Messung senden.
+        # The filter still updates on every measurement (gyro ~93 Hz, encoder
+        # ~108 Hz) -- but publishing runs on a timer. Before, one Odometry went
+        # out per measurement, about 200 Hz; measured on the robot that cost
+        # the EKF node 1.27 of 6 cores, almost all message building and
+        # serialisation. The controller runs at 30 Hz, the scan_processor at
+        # the scan rate, the esp bridge only keeps the last scalar value.
+        # 0 = as before, publish on every measurement.
         self.declare_parameter('publish_rate_hz', 50.0,
                                ParameterDescriptor(dynamic_typing=True))
         self.publish_rate = float(self.get_parameter('publish_rate_hz').value)
-        # Nur senden, wenn seit dem letzten Mal wirklich gerechnet wurde. Sonst
-        # liefe die Odometrie bei ausgefallenen Sensoren einfach weiter und die
-        # Stale-Erkennung im Regler (odom_timeout) wuerde nie ausloesen.
+        # Only publish if something was really computed since the last time.
+        # Otherwise the odometry would just keep going with failed sensors and
+        # the stale detection in the controller (odom_timeout) would never fire.
         self._dirty = False
         if self.publish_rate > 0.0:
             self.create_timer(1.0 / self.publish_rate, self._on_publish_timer)
             self.get_logger().info(
-                f'/ekf/odom wird mit {self.publish_rate:.0f} Hz veroeffentlicht '
-                f'(Filter rechnet unveraendert mit jeder Messung).')
+                f'/ekf/odom is published at {self.publish_rate:.0f} Hz '
+                f'(the filter still updates on every measurement).')
 
-        # Kovarianz-Puffer: die "unbekannt"-Diagonalen aendern sich nie, die
-        # werden einmal gesetzt statt 36 Werte je Nachricht neu aufzubauen.
+        # Covariance buffers: the "unknown" diagonals never change, so they
+        # are set once instead of rebuilding 36 values per message.
         self._pose_cov = np.zeros(36)
         self._twist_cov = np.zeros(36)
         for k in (2, 3, 4):
@@ -142,35 +142,35 @@ class EKFNode(Node):
 
     # --- gyro / encoder: stamp-ordered queue ------------------------------
     def gyro_cb(self, msg):
-        jetzt = time.monotonic()
-        self._gyro_letzt = jetzt
+        now_mono = time.monotonic()
+        self._gyro_last = now_mono
         w = msg.angular_velocity
         if w.x == 0.0 and w.y == 0.0 and w.z == 0.0:
-            # Ein lebender Gyro rauscht, auch im Stand -- exakt null auf allen
-            # drei Achsen liefert nur ein Chip, der nicht mehr misst.
-            if self._gyro_null_seit is None:
-                self._gyro_null_seit = jetzt
+            # A live gyro is noisy, even at standstill -- exactly zero on all
+            # three axes only comes from a chip that no longer measures.
+            if self._gyro_zero_since is None:
+                self._gyro_zero_since = now_mono
         else:
-            self._gyro_null_seit = None
+            self._gyro_zero_since = None
         t = stamp_to_sec(msg.header.stamp)
         self._push(t, 'gyro', msg.angular_velocity.z * GYRO_SCALE)
         self._drain(t)
 
-    def _gyro_pruefen(self):
-        jetzt = time.monotonic()
-        if self._gyro_letzt is None:
-            grund = (None if jetzt - self._start_mono < 2.0
-                     else 'noch nie eine Nachricht auf /bno055/imu')
-        elif jetzt - self._gyro_letzt > GYRO_TIMEOUT:
-            grund = f'seit {jetzt - self._gyro_letzt:.1f} s keine Nachricht auf /bno055/imu'
-        elif (self._gyro_null_seit is not None
-              and jetzt - self._gyro_null_seit > GYRO_NULL_DAUER):
-            grund = f'seit {jetzt - self._gyro_null_seit:.1f} s nur exakte Nullen'
+    def _check_gyro(self):
+        now_mono = time.monotonic()
+        if self._gyro_last is None:
+            reason = (None if now_mono - self._start_mono < 2.0
+                      else 'never a message on /bno055/imu yet')
+        elif now_mono - self._gyro_last > GYRO_TIMEOUT:
+            reason = f'for {now_mono - self._gyro_last:.1f} s no message on /bno055/imu'
+        elif (self._gyro_zero_since is not None
+              and now_mono - self._gyro_zero_since > GYRO_ZERO_DURATION):
+            reason = f'for {now_mono - self._gyro_zero_since:.1f} s nothing but exact zeros'
         else:
-            grund = ''
-        if grund is None:
-            return                       # Anlauf: dem Treiber Zeit lassen
-        ok = grund == ''
+            reason = ''
+        if reason is None:
+            return                       # start-up: give the driver time
+        ok = reason == ''
         if ok != self._gyro_ok:
             self._gyro_ok = ok
             self.gyro_ok_pub.publish(Bool(data=ok))
@@ -178,19 +178,18 @@ class EKFNode(Node):
                 self.get_logger().info('Gyro: ok.')
         if not ok:
             self.get_logger().error(
-                f'GYRO AUSGEFALLEN: {grund}. Der Kurs kommt jetzt nur noch aus '
-                f'den Wandtreffern. BNO055-Stecker pruefen und den IMU-Knoten '
-                f'(Fenster 1) neu starten.', throttle_duration_sec=2.0)
+                f'GYRO FAILED: {reason}. The heading now comes only from '
+                f'the wall matches. Check the BNO055 connector and restart the IMU node '
+                f'(window 1).', throttle_duration_sec=2.0)
 
     def enc_cb(self, msg):
-        # Die Bruecke schickt auf diesem Topic DREI Sorten Nachrichten. Nur
-        # CMD_TELEMETRY traegt eine Geschwindigkeit; MOVE_DONE und
-        # PROGRESS_RSP kennen nur die Position und lassen velocity absichtlich
-        # leer ("nicht gemessen" statt einer hingeschriebenen Null, siehe
-        # _publish_joint in esp_serial_bridge.py). Waehrend einer
-        # Positionsfahrt kommen genau solche Nachrichten -- ohne diese Zeile
-        # stirbt der Knoten an der ersten davon, und damit die ganze
-        # Zustandsschaetzung.
+        # The bridge sends THREE kinds of messages on this topic. Only
+        # CMD_TELEMETRY carries a velocity; MOVE_DONE and PROGRESS_RSP only
+        # know the position and leave velocity empty on purpose ("not
+        # measured" instead of a made-up zero, see _publish_joint in
+        # esp_serial_bridge.py). Exactly such messages arrive during a
+        # position move -- without this line the node dies on the first of
+        # them, and with it the whole state estimation.
         if not msg.velocity:
             return
         t = stamp_to_sec(msg.header.stamp)
@@ -265,8 +264,8 @@ class EKFNode(Node):
             self._publish(self.last_processed)
 
     def _mark(self, t):
-        """Zustand hat sich geaendert. Bei publish_rate_hz=0 sofort senden,
-        sonst uebernimmt das der Timer."""
+        """State has changed. With publish_rate_hz=0 publish right away,
+        otherwise the timer does it."""
         self._dirty = True
         if self.publish_rate <= 0.0:
             self._publish(t)
@@ -288,8 +287,8 @@ class EKFNode(Node):
         # [x, y, z, roll, pitch, yaw]; our state is [x, y, theta, v, omega, b_g].
         # Axes we do not estimate get a large variance (the ROS convention for
         # "unknown"), so consumers do not read a confident zero.
-        # Nur die Eintraege schreiben, die sich aendern -- die "unbekannt"-
-        # Diagonalen stehen seit __init__ und bleiben.
+        # Only write the entries that change -- the "unknown" diagonals have
+        # been set since __init__ and stay.
         P = self.ekf.P
         pc, tc = self._pose_cov, self._twist_cov
         for r, i in POSE_MAP:                    # (ROS index, filter index)
@@ -298,9 +297,9 @@ class EKFNode(Node):
         for r, i in TWIST_MAP:                   # vx <- v, yaw rate <- omega
             for c, j in TWIST_MAP:
                 tc[r * 6 + c] = P[i, j]
-        # .copy(): rclpy legt das numpy-Array per Referenz in die Nachricht.
-        # Ohne Kopie wuerde der naechste Publish den Puffer der vorigen
-        # Nachricht mit ueberschreiben.
+        # .copy(): rclpy puts the numpy array into the message by reference.
+        # Without a copy the next publish would also overwrite the buffer of
+        # the previous message.
         msg.pose.covariance = pc.copy()
         msg.twist.covariance = tc.copy()
 
@@ -309,7 +308,7 @@ class EKFNode(Node):
 
 def main():
     rclpy.init()
-    nur_eine_instanz('/ekf/odom', 'ekf_node')
+    ensure_single_instance('/ekf/odom', 'ekf_node')
     rclpy.spin(EKFNode())
 
 
