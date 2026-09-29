@@ -1,0 +1,5 @@
+# M3 encoder calibration: drive straight, measure the true distance with a folding rule.
+# ticks = encoder count difference; OR fill shaft_rad = difference of
+# /esp_serial_bridge/joint_states position [rad] (takes precedence). See README.
+# Example values are in m3_encoder_distance_example.csv -- do NOT put fake rows here.
+trial,distance_true_m,ticks,shaft_rad,notes

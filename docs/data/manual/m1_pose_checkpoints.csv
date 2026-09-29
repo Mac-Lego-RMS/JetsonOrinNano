@@ -1,0 +1,5 @@
+# M1 EKF pose vs ground truth. One row per stop at a checkpoint sticker.
+# x/y in metres, yaw in degrees, all in the start-anchored map frame of /ekf/odom
+# (origin = start pose, x = initial driving direction). See docs/analysis/README.md.
+# Example values are in m1_pose_checkpoints_example.csv -- do NOT put fake rows here.
+run,lap,checkpoint,x_true_m,y_true_m,yaw_true_deg,x_ekf_m,y_ekf_m,yaw_ekf_deg,notes

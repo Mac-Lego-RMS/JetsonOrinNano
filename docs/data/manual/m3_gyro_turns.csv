@@ -1,0 +1,5 @@
+# M3 gyro scale: turn the robot by an exact number of full turns (on the spot / on a turntable).
+# integrated_deg = |integral of RAW /bno055/imu angular_velocity.z| in degrees
+# (python3 docs/analysis/plot_manual.py --gyro-integral BAG --t0 .. --t1 ..). See README.
+# Example values are in m3_gyro_turns_example.csv -- do NOT put fake rows here.
+trial,turns,integrated_deg,notes

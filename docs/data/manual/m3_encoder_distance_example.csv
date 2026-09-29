@@ -1,0 +1,5 @@
+# EXAMPLE DATA -- FAKE NUMBERS, only for trying plot_manual.py --example
+trial,distance_true_m,ticks,shaft_rad,notes
+1,2.410,10431,,EXAMPLE
+2,2.405,10460,,EXAMPLE
+3,1.200,,79.8,EXAMPLE

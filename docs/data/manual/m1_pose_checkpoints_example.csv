@@ -1,0 +1,6 @@
+# EXAMPLE DATA -- FAKE NUMBERS, only for trying plot_manual.py --example
+run,lap,checkpoint,x_true_m,y_true_m,yaw_true_deg,x_ekf_m,y_ekf_m,yaw_ekf_deg,notes
+example_1,1,C1,0.950,-0.500,-90.0,0.962,-0.487,-88.9,EXAMPLE
+example_1,1,C2,0.000,-2.000,180.0,-0.015,-2.011,178.6,EXAMPLE
+example_1,2,C1,0.950,-0.500,-90.0,0.941,-0.521,-91.5,EXAMPLE
+example_1,2,C2,0.000,-2.000,180.0,0.020,-1.984,181.2,EXAMPLE
