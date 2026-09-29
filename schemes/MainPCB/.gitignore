@@ -1,0 +1,11 @@
+# KiCad-generated files that do not belong in the repo
+*-backups/
+*.lck
+_autosave-*
+fp-info-cache
+*.kicad_prl
+
+# Fabrication output - regenerate from the board when ordering
+gerber/
+production/*.zip
+production/backups/
