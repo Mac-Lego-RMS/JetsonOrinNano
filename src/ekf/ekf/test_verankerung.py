@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Verankerung der Karte: Feldpose des Roboters -> Feldpose des Odom-Ursprungs.
+"""Anchoring of the map: field pose of the robot -> field pose of the odom origin.
 
-    python3 -m ekf.test_verankerung
+    python3 -m ekf.test_anchoring
 
-generate_map() erwartet die Pose des Punktes, an dem die Odometrie genullt
-wurde, nicht die des Roboters. Bei einem normalen Start ist das dasselbe -- der
-Roboter steht still, bis erkannt ist. Nach dem Ausparken liegen 50 cm
-dazwischen, und ohne die Verrechnung ist die ganze Karte um die Ausparkstrecke
-versetzt. Genau das hat einen Lauf in die Wand gefahren (1,67 m
-Querabweichung im ersten Regelschritt).
+generate_map() expects the pose of the point where the odometry was zeroed,
+not that of the robot. On a normal start that is the same -- the
+robot stands still until detection is done. After unparking there are 50 cm
+in between, and without the conversion the whole map is offset by the unpark
+travel. Exactly that drove a run into the wall (1.67 m
+lateral deviation in the first control step).
 """
 import math
 
@@ -18,64 +18,64 @@ from ekf.scan_processor_node import ScanProcessor
 from ekf.field_map import generate_map, START_POSES_CW
 
 
-def pruefe(name, bedingung, zusatz=''):
-    if not bedingung:
-        raise AssertionError('FEHLGESCHLAGEN: %s %s' % (name, zusatz))
-    print('  ok  %s%s' % (name, ('  ' + zusatz) if zusatz else ''))
+def check(name, cond, extra=''):
+    if not cond:
+        raise AssertionError('FAILED: %s %s' % (name, extra))
+    print('  ok  %s%s' % (name, ('  ' + extra) if extra else ''))
 
 
-class Attrappe:
-    _verankert = ScanProcessor._verankert
+class Stub:
+    _anchored = ScanProcessor._anchored
 
     def __init__(self, commit_pose=(0.0, 0.0, 0.0)):
         self.commit_pose = commit_pose
 
 
-def roboter_im_feld(anker, odom_pose):
-    """Wo liegt der Roboter im Feld, wenn der Ursprung bei ``anker`` liegt?"""
-    xa, ya, tha = anker
+def robot_in_field(anchor, odom_pose):
+    """Where is the robot in the field if the origin lies at ``anchor``?"""
+    xa, ya, tha = anchor
     xo, yo, tho = odom_pose
     c, s = math.cos(tha), math.sin(tha)
     return (xa + c * xo - s * yo, ya + s * xo + c * yo, tha + tho)
 
 
-print('Verankerung')
+print('Anchoring')
 
-f = Attrappe()
-feld = START_POSES_CW['pos1']
-pruefe('im Ursprung aendert sich nichts',
-       all(abs(a - b) < 1e-12 for a, b in zip(f._verankert(feld), feld)),
-       '%s' % (f._verankert(feld),))
+f = Stub()
+field = START_POSES_CW['pos1']
+check('at the origin nothing changes',
+       all(abs(a - b) < 1e-12 for a, b in zip(f._anchored(field), field)),
+       '%s' % (f._anchored(field),))
 
-# Der Roboter hat sich seit dem Nullen bewegt: der Anker muss so liegen, dass
-# er JETZT auf der erkannten Feldpose steht.
+# The robot has moved since the zeroing: the anchor must lie so that
+# it stands on the detected field pose NOW.
 for odom in ((0.25, -0.33, math.radians(-34.6)),
              (0.5, 0.0, 0.0),
              (-0.2, 0.7, math.radians(120.0)),
              (1.3, -0.4, math.radians(-175.0))):
-    f = Attrappe(odom)
-    anker = f._verankert(feld)
-    zurueck = roboter_im_feld(anker, odom)
-    passt = (abs(zurueck[0] - feld[0]) < 1e-9 and abs(zurueck[1] - feld[1]) < 1e-9
-             and abs(math.atan2(math.sin(zurueck[2] - feld[2]),
-                                math.cos(zurueck[2] - feld[2]))) < 1e-9)
-    pruefe('Roboter landet auf der erkannten Feldpose (odom %+.2f,%+.2f,%+.0f)'
-           % (odom[0], odom[1], math.degrees(odom[2])), passt,
-           'Anker (%+.3f,%+.3f,%+.0f)' % (anker[0], anker[1], math.degrees(anker[2])))
+    f = Stub(odom)
+    anchor = f._anchored(field)
+    back = robot_in_field(anchor, odom)
+    fits = (abs(back[0] - field[0]) < 1e-9 and abs(back[1] - field[1]) < 1e-9
+            and abs(math.atan2(math.sin(back[2] - field[2]),
+                               math.cos(back[2] - field[2]))) < 1e-9)
+    check('robot lands on the detected field pose (odom %+.2f,%+.2f,%+.0f)'
+          % (odom[0], odom[1], math.degrees(odom[2])), fits,
+          'anchor (%+.3f,%+.3f,%+.0f)' % (anchor[0], anchor[1], math.degrees(anchor[2])))
 
-print('\nWirkung auf die Karte')
-# Ohne Verankerung waere die Karte um die gefahrene Strecke versetzt.
+print('\nEffect on the map')
+# Without anchoring the map would be offset by the distance driven.
 odom = (0.25, -0.33, math.radians(-34.6))
-f = Attrappe(odom)
-ohne = generate_map(feld)
-mit = generate_map(f._verankert(feld))
-versatz = max(abs(a['d'] - b['d']) for a, b in zip(ohne, mit))
-pruefe('ohne Verankerung liegt die Karte deutlich daneben', versatz > 0.20,
-       'groesster Abstandsfehler %.2f m' % versatz)
+f = Stub(odom)
+without = generate_map(field)
+with_anchor = generate_map(f._anchored(field))
+offset = max(abs(a['d'] - b['d']) for a, b in zip(without, with_anchor))
+check('without anchoring the map is clearly off', offset > 0.20,
+      'largest distance error %.2f m' % offset)
 
-f0 = Attrappe()
-gleich = generate_map(f0._verankert(feld))
-pruefe('im Ursprung ist die Karte unveraendert',
-       all(abs(a['d'] - b['d']) < 1e-12 for a, b in zip(ohne, gleich)))
+f0 = Stub()
+same = generate_map(f0._anchored(field))
+check('at the origin the map is unchanged',
+      all(abs(a['d'] - b['d']) < 1e-12 for a, b in zip(without, same)))
 
-print('\nalle Tests bestanden')
+print('\nall tests passed')

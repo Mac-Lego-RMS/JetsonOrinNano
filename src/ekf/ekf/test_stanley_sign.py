@@ -71,6 +71,6 @@ for name, (ux, uy) in dirs.items():
         want_negative = (side == "LEFT")
         ok = (omega < 0) == want_negative or abs(omega) < 1e-6
         all_ok = all_ok and ok
-        print(f"{name:>6} {side:>6} {e_ct:+8.3f} {omega:+8.3f}  {'OK' if ok else 'FALSCH <<<'}")
+        print(f"{name:>6} {side:>6} {e_ct:+8.3f} {omega:+8.3f}  {'OK' if ok else 'WRONG <<<'}")
 print("-" * 45)
-print("ALLE RICHTUNGEN OK" if all_ok else "MINDESTENS EINE RICHTUNG FALSCH -- Vorzeichenfehler!")
+print("ALL DIRECTIONS OK" if all_ok else "AT LEAST ONE DIRECTION WRONG -- sign error!")
