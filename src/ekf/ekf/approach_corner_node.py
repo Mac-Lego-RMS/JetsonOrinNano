@@ -123,7 +123,7 @@ class ApproachCorner(Node):
         self.create_timer(self.dt, self.control_loop)
 
         self.get_logger().info(
-            ">>> ApproachCorner bereit. Warte auf /ekf/odom und /front_wall_x... <<<"
+            ">>> ApproachCorner ready. Waiting for /ekf/odom and /front_wall_x... <<<"
         )
 
     # ------------------------------------------------------------------ callbacks
@@ -134,7 +134,7 @@ class ApproachCorner(Node):
 
     def front_wall_cb(self, msg):
         if self.front_wall_x is None:
-            self.get_logger().info(f"/front_wall_x empfangen: {msg.data:.3f} m.")
+            self.get_logger().info(f"/front_wall_x received: {msg.data:.3f} m.")
         self.front_wall_x = float(msg.data)
 
     def button_cb(self, msg):
@@ -181,9 +181,9 @@ class ApproachCorner(Node):
                 return
             self.state = 'WAIT_BUTTON' if self.require_button else 'DRIVE'
             if self.state == 'WAIT_BUTTON':
-                self.get_logger().info("Eingaben da. Warte auf Button-Start...")
+                self.get_logger().info("Inputs present. Waiting for button start...")
             else:
-                self.get_logger().info("Eingaben da. Fahre los.")
+                self.get_logger().info("Inputs present. Driving off.")
             return
 
         if self.state == 'WAIT_BUTTON':
@@ -201,7 +201,7 @@ class ApproachCorner(Node):
 
         # --- DRIVE ---
         if self.odom_is_stale():
-            self.get_logger().warn("Pose veraltet (kein /ekf/odom). Stoppe.")
+            self.get_logger().warn("Pose stale (no /ekf/odom). Stopping.")
             self.publish_stop()
             return
 
@@ -212,16 +212,16 @@ class ApproachCorner(Node):
         if not self._decision_window_logged and wall_dist <= self.decision_window_dist:
             self._decision_window_logged = True
             self.get_logger().info(
-                f"--- ENTSCHEIDUNGSFENSTER bei {wall_dist:.2f} m (v={self.v_cmd:.2f} m/s). "
-                f"Hier wird spaeter die gelatchte Richtung gelesen. ---"
+                f"--- DECISION WINDOW at {wall_dist:.2f} m (v={self.v_cmd:.2f} m/s). "
+                f"This is where the latched direction will be read later. ---"
             )
 
         if front_dist <= self.stop_gap:
             self.state = 'CORNER_REACHED'
             self.publish_stop()
             self.get_logger().info(
-                f"CORNER_REACHED (Sicherheits-Halt). front_dist={front_dist:.2f} m, x={x:.2f} m. "
-                f"Hier uebernimmt spaeter TURN."
+                f"CORNER_REACHED (safety stop). front_dist={front_dist:.2f} m, x={x:.2f} m. "
+                f"TURN will take over here later."
             )
             return
 

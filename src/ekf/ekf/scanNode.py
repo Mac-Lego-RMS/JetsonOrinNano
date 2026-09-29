@@ -78,7 +78,7 @@ def merge_wraparound(clusters, gap_threshold=0.15):
     split into the last cluster (angles near +pi) and the first (near -pi),
     though the points are physically continuous. If the end of the last
     cluster is within gap_threshold of the start of the first, they are one
-    wall — merge them.
+    wall -- merge them.
     """
     if len(clusters) < 2:
         return clusters
@@ -153,7 +153,7 @@ def match_walls(measured, map_walls, pose, alpha_tol=np.radians(20.0), d_tol=0.3
         measured:  list of (alpha, d), robot frame (from fit_wall_hnf).
         map_walls: list of (alpha, d), map frame (the fixed map).
         pose:      (x, y, theta) current estimate.
-        alpha_tol, d_tol: gates — reject a match whose innovation exceeds these.
+        alpha_tol, d_tol: gates -- reject a match whose innovation exceeds these.
 
     Returns:
         list of dicts: {measured, map, map_index, innov_alpha, innov_d}

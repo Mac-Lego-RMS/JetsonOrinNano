@@ -68,7 +68,7 @@ class SpeedVerify(Node):
         # window start
         start = self.pos
         if start is None:
-            self.get_logger().warn("  Keine position empfangen.")
+            self.get_logger().warn("  No position received.")
             self._stop()
             return None
         pos0, t0s = start
@@ -89,15 +89,15 @@ class SpeedVerify(Node):
 
         dt_meas = t1s - t0s
         if dt_meas <= 0.0:
-            self.get_logger().warn("  Zeitfenster ungueltig (Stempel gleich?).")
+            self.get_logger().warn("  Time window invalid (stamps equal?).")
             return None
         v_real = (pos1 - pos0) * K_POS_M_PER_RAD / dt_meas
         ratio = v_real / v_cmd if v_cmd > 1e-6 else 0.0
         if aborted:
-            self.get_logger().warn(f"  Distanz-Stopp (~{MAX_DIST} m).")
+            self.get_logger().warn(f"  Distance stop (~{MAX_DIST} m).")
         self.get_logger().info(
             f"  v_cmd {v_cmd:.2f} -> v_real {v_real:.3f} m/s "
-            f"(Faktor {ratio:.3f}, dt {dt_meas:.2f} s)"
+            f"(factor {ratio:.3f}, dt {dt_meas:.2f} s)"
         )
         return v_real
 
@@ -108,14 +108,14 @@ class SpeedVerify(Node):
 
     def run_sequence(self):
         time.sleep(0.5)
-        print("\n=== Speed-Verifikation (position-basiert, AKKU) ===")
-        print("Enter = Stufe fahren | r = wiederholen | q = beenden\n")
+        print("\n=== Speed verification (position-based, BATTERY) ===")
+        print("Enter = drive step | r = repeat | q = quit\n")
         idx = 0
         while idx < len(V_CMD_STEPS):
             v = V_CMD_STEPS[idx]
             try:
                 c = input(f"[{idx+1}/{len(V_CMD_STEPS)}] v_cmd {v:.2f} m/s. "
-                          f"Roboter frei? Enter/r/q: ").strip().lower()
+                          f"Robot clear? Enter/r/q: ").strip().lower()
             except EOFError:
                 break
             if c == 'q':
@@ -130,8 +130,8 @@ class SpeedVerify(Node):
         rclpy.shutdown()
 
     def report(self):
-        print("\n=== Ergebnis ===")
-        print("v_cmd   v_real   Faktor")
+        print("\n=== Result ===")
+        print("v_cmd   v_real   factor")
         for vc, vr, r in self.results:
             print(f"{vc:.2f}    {vr:.3f}    {r:.3f}")
         if len(self.results) >= 2:
@@ -139,13 +139,13 @@ class SpeedVerify(Node):
             factors = [r for _, _, r in self.results]
             fmean = sum(factors) / len(factors)
             fspread = max(factors) - min(factors)
-            print(f"\nFaktor v_real/v_cmd: Mittel {fmean:.3f}, Spanne {fspread:.3f}")
+            print(f"\nFactor v_real/v_cmd: mean {fmean:.3f}, spread {fspread:.3f}")
             if fspread < 0.06:
-                print("  -> nahezu konstanter Faktor => v_max anpassen:")
-                print(f"     v_max_neu = v_max_alt * {fmean:.3f}")
+                print("  -> almost constant factor => adjust v_max:")
+                print(f"     v_max_new = v_max_old * {fmean:.3f}")
             else:
-                print("  -> Faktor variiert => eher pwm_deadband (additiver Offset).")
-                print("     Vergleiche (v_real - v_cmd) ueber die Stufen.")
+                print("  -> factor varies => rather pwm_deadband (additive offset).")
+                print("     Compare (v_real - v_cmd) across the steps.")
         print()
 
 

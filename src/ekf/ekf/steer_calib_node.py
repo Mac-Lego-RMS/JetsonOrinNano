@@ -19,10 +19,10 @@ defined around straight-ahead (calibration steps usually skip the tiny angles).
 SAFETY: circles at up to max(SPEEDS). Clear a big enough circle. Battery, speed
 controller running. Terminal: [Enter] run | r = redo | q = quit + write JSON.
 
-Am Anfang wird gefragt, welche Geschwindigkeiten kalibriert werden sollen (alle
-oder einzelne). Beim Schreiben wird die BESTEHENDE JSON eingelesen und nur die
-neu gemessenen Geschwindigkeiten werden ersetzt -- die anderen bleiben erhalten.
-Vorher wird eine Sicherung steer_calib.json.bak angelegt.
+At the start it asks which speeds should be calibrated (all
+or single ones). When writing, the EXISTING JSON is read in and only the
+newly measured speeds are replaced -- the others are kept.
+Before that a backup steer_calib.json.bak is made.
 """
 
 import json
@@ -107,7 +107,7 @@ class SteerCalib(Node):
         self.stop()
 
         if len(ts) < 5:
-            self.get_logger().warn("  Zu wenige Samples."); return None
+            self.get_logger().warn("  Too few samples."); return None
 
         t0 = ts[0]; xs = [t - t0 for t in ts]
         n = len(xs); mx = sum(xs)/n; my = sum(ths)/n
@@ -120,53 +120,53 @@ class SteerCalib(Node):
 
         warn = ""
         if abs(v_real - v_target) > V_TOL:
-            warn = f"  <<< v real {v_real:.2f} weicht von Soll {v_target:.2f} ab!"
+            warn = f"  <<< v real {v_real:.2f} differs from target {v_target:.2f}!"
         self.get_logger().info(
-            f"  v_soll {v_target:.2f} servo {servo_pct:+.2f} -> "
+            f"  v_target {v_target:.2f} servo {servo_pct:+.2f} -> "
             f"v_real {v_real:.2f}, omega {omega:+.3f}, delta {math.degrees(delta):+.2f} deg{warn}")
         return (servo_pct, omega, v_real, delta)
 
     def choose_speeds(self):
-        """Fragt, welche Geschwindigkeiten gemessen werden. Enter = alle."""
-        print("Welche Geschwindigkeiten kalibrieren?")
+        """Asks which speeds are measured. Enter = all."""
+        print("Which speeds to calibrate?")
         for i, v in enumerate(SPEEDS, 1):
             print(f"  {i} = {v:.2f} m/s")
-        print("  Enter = alle (mehrere z.B. als 2,3)")
+        print("  Enter = all (several e.g. as 2,3)")
         while True:
             try:
-                c = input("Auswahl: ").strip().lower()
+                c = input("Selection: ").strip().lower()
             except EOFError:
                 return list(SPEEDS)
-            if c in ('', 'a', 'alle'):
+            if c in ('', 'a', 'all'):
                 return list(SPEEDS)
             try:
-                nummern = sorted({int(t) for t in c.replace(' ', '').split(',') if t})
-                if nummern and all(1 <= n <= len(SPEEDS) for n in nummern):
-                    return [SPEEDS[n - 1] for n in nummern]
+                numbers = sorted({int(t) for t in c.replace(' ', '').split(',') if t})
+                if numbers and all(1 <= n <= len(SPEEDS) for n in numbers):
+                    return [SPEEDS[n - 1] for n in numbers]
             except ValueError:
                 pass
-            print(f"  Ungueltig -- Nummer(n) von 1 bis {len(SPEEDS)} oder Enter.")
+            print(f"  Invalid -- number(s) from 1 to {len(SPEEDS)} or Enter.")
 
     def run_sequence(self):
         time.sleep(0.5)
-        print("\n=== Lenk-Kalibrierung ueber GESCHWINDIGKEITEN (AKKU) ===")
-        print(f"L={L_WHEELBASE} m, Speeds={SPEEDS}, {len(SERVO_STEPS)} Servo-Stufen\n")
-        auswahl = self.choose_speeds()
-        andere = [v for v in SPEEDS if v not in auswahl]
-        print(f"\nKalibriert: {', '.join(f'{v:.2f}' for v in auswahl)} m/s"
-              + (f" -- {', '.join(f'{v:.2f}' for v in andere)} m/s bleiben in der JSON wie sie sind."
-                 if andere else ""))
-        print("negativ=rechts, positiv=links | Enter=fahren  r=wiederholen  q=beenden+schreiben\n")
-        for v_target in auswahl:
+        print("\n=== Steering calibration across SPEEDS (BATTERY) ===")
+        print(f"L={L_WHEELBASE} m, Speeds={SPEEDS}, {len(SERVO_STEPS)} servo steps\n")
+        selection = self.choose_speeds()
+        others = [v for v in SPEEDS if v not in selection]
+        print(f"\nCalibrated: {', '.join(f'{v:.2f}' for v in selection)} m/s"
+              + (f" -- {', '.join(f'{v:.2f}' for v in others)} m/s stay in the JSON as they are."
+                 if others else ""))
+        print("negative=right, positive=left | Enter=drive  r=repeat  q=quit+write\n")
+        for v_target in selection:
             self.results[v_target] = []
-            print(f"\n--- Geschwindigkeit {v_target:.2f} m/s ---")
+            print(f"\n--- Speed {v_target:.2f} m/s ---")
             idx = 0
             while idx < len(SERVO_STEPS):
                 s = SERVO_STEPS[idx]
-                side = "rechts" if s < 0 else "links"
+                side = "right turn" if s < 0 else "left turn"
                 try:
                     c = input(f"[v{v_target:.2f} {idx+1}/{len(SERVO_STEPS)}] "
-                              f"servo {s:+.2f} ({side}). Kreis frei? Enter/r/q: ").strip().lower()
+                              f"servo {s:+.2f} ({side}). Circle clear? Enter/r/q: ").strip().lower()
                 except EOFError:
                     self.finish(); return
                 if c == 'q':
@@ -185,7 +185,7 @@ class SteerCalib(Node):
         rclpy.shutdown()
 
     def report(self):
-        print("\n=== Ergebnis pro Geschwindigkeit ===")
+        print("\n=== Result per speed ===")
         for v_target, rows in self.results.items():
             print(f"\n-- v={v_target:.2f} --")
             print("servo  v_real  omega   delta")
@@ -193,14 +193,14 @@ class SteerCalib(Node):
                 print(f"{s:+.2f}  {vr:.2f}  {w:+.3f}  {math.degrees(d):+.2f}")
 
     def load_existing(self):
-        """Bestehende JSON lesen, um ungemessene Geschwindigkeiten zu behalten."""
+        """Read the existing JSON, to keep speeds that were not measured."""
         try:
             with open(OUT_PATH) as f:
                 return json.load(f)
         except FileNotFoundError:
             return None
         except Exception as e:
-            self.get_logger().warn(f"Bestehende JSON nicht lesbar ({e}) -- wird ersetzt.")
+            self.get_logger().warn(f"Existing JSON not readable ({e}) -- will be replaced.")
             return None
 
     def write_json(self):
@@ -217,41 +217,41 @@ class SteerCalib(Node):
             speeds_out.append({"v": v_target, "left": left, "right": right})
 
         if not speeds_out:
-            self.get_logger().warn("Keine Daten -- JSON nicht geschrieben.")
+            self.get_logger().warn("No data -- JSON not written.")
             return
 
-        # Mit der bestehenden Datei zusammenfuehren: nur die gemessenen
-        # Geschwindigkeiten ersetzen, alle anderen unveraendert uebernehmen.
-        alt = self.load_existing()
-        nach_v = {}
-        if alt:
-            for e in alt.get("speeds", []):
-                nach_v[round(float(e["v"]), 3)] = e
-            if abs(float(alt.get("wheelbase", L_WHEELBASE)) - L_WHEELBASE) > 1e-6:
+        # Merge with the existing file: replace only the measured
+        # speeds, take over all the others unchanged.
+        old = self.load_existing()
+        by_v = {}
+        if old:
+            for e in old.get("speeds", []):
+                by_v[round(float(e["v"]), 3)] = e
+            if abs(float(old.get("wheelbase", L_WHEELBASE)) - L_WHEELBASE) > 1e-6:
                 self.get_logger().warn(
-                    f"Radstand in der bestehenden JSON ({alt.get('wheelbase')}) weicht von "
-                    f"L_WHEELBASE={L_WHEELBASE} ab -- die behaltenen Geschwindigkeiten "
-                    f"wurden mit dem alten Radstand gerechnet. Besser alle neu kalibrieren.")
-        ersetzt = []
+                    f"Wheelbase in the existing JSON ({old.get('wheelbase')}) differs from "
+                    f"L_WHEELBASE={L_WHEELBASE} -- the kept speeds "
+                    f"were computed with the old wheelbase. Better recalibrate all of them.")
+        replaced = []
         for e in speeds_out:
             k = round(float(e["v"]), 3)
-            if k in nach_v:
-                ersetzt.append(k)
-            nach_v[k] = e
-        behalten = [k for k in nach_v if k not in {round(float(e["v"]), 3) for e in speeds_out}]
-        speeds_out = [nach_v[k] for k in sorted(nach_v)]
+            if k in by_v:
+                replaced.append(k)
+            by_v[k] = e
+        kept = [k for k in by_v if k not in {round(float(e["v"]), 3) for e in speeds_out}]
+        speeds_out = [by_v[k] for k in sorted(by_v)]
 
-        if alt:
+        if old:
             try:
                 shutil.copyfile(OUT_PATH, OUT_PATH + ".bak")
-                self.get_logger().info(f"Sicherung: {OUT_PATH}.bak")
+                self.get_logger().info(f"Backup: {OUT_PATH}.bak")
             except Exception as e:
-                self.get_logger().warn(f"Sicherung fehlgeschlagen: {e}")
+                self.get_logger().warn(f"Backup failed: {e}")
         self.get_logger().info(
-            "Neu gemessen: %s | aus der alten Datei behalten: %s" % (
+            "Newly measured: %s | kept from the old file: %s" % (
                 ', '.join(f'{e["v"]:.2f}' for e in speeds_out
-                          if round(float(e["v"]), 3) not in behalten) or '-',
-                ', '.join(f'{k:.2f}' for k in sorted(behalten)) or '-'))
+                          if round(float(e["v"]), 3) not in kept) or '-',
+                ', '.join(f'{k:.2f}' for k in sorted(kept)) or '-'))
 
         data = {
             "wheelbase": L_WHEELBASE,
@@ -263,10 +263,10 @@ class SteerCalib(Node):
         try:
             with open(OUT_PATH, "w") as f:
                 json.dump(data, f, indent=2)
-            self.get_logger().info(f"JSON geschrieben: {OUT_PATH} "
-                                   f"({len(speeds_out)} Geschwindigkeiten)")
+            self.get_logger().info(f"JSON written: {OUT_PATH} "
+                                   f"({len(speeds_out)} speeds)")
         except Exception as e:
-            self.get_logger().error(f"JSON schreiben fehlgeschlagen: {e}")
+            self.get_logger().error(f"Writing JSON failed: {e}")
 
 
 def main(args=None):
