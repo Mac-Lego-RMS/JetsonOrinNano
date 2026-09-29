@@ -50,7 +50,7 @@ class SpeedCalib(Node):
 
     def js_cb(self, msg):
         if msg.velocity:
-            # MOVE_DONE und PROGRESS_RSP der Bruecke lassen velocity leer.
+            # MOVE_DONE and PROGRESS_RSP from the bridge leave velocity empty.
             if not msg.velocity:
                 return
             self.vel_rad = float(msg.velocity[0])
@@ -90,24 +90,24 @@ class SpeedCalib(Node):
         v_mps = mean_rad * K_POS_M_PER_RAD
         if aborted:
             self.get_logger().warn(
-                f"  Distanz-Stopp bei ~{dist:.2f} m (Stufe evtl. zu kurz gemessen)."
+                f"  Distance stop at ~{dist:.2f} m (step possibly measured too short)."
             )
         self.get_logger().info(
             f"  PWM {pwm:.2f} (duty {round(pwm*1023):4d}) -> "
-            f"{mean_rad:6.2f} rad/s -> {v_mps:5.3f} m/s  (gefahren ~{dist:.2f} m)"
+            f"{mean_rad:6.2f} rad/s -> {v_mps:5.3f} m/s  (driven ~{dist:.2f} m)"
         )
         return v_mps
 
     def run_sequence(self):
         time.sleep(0.5)
-        print("\n=== Speed-Kalibrierung (Terminal) ===")
-        print("Enter = Stufe fahren | r = wiederholen | q = beenden\n")
+        print("\n=== Speed calibration (terminal) ===")
+        print("Enter = drive step | r = repeat | q = quit\n")
         idx = 0
         while idx < len(PWM_STEPS):
             pwm = PWM_STEPS[idx]
             try:
-                cmd = input(f"[Stufe {idx+1}/{len(PWM_STEPS)}] PWM {pwm:.2f} bereit. "
-                            f"Roboter frei? Enter/r/q: ").strip().lower()
+                cmd = input(f"[step {idx+1}/{len(PWM_STEPS)}] PWM {pwm:.2f} ready. "
+                            f"Robot clear? Enter/r/q: ").strip().lower()
             except EOFError:
                 break
             if cmd == 'q':
@@ -124,7 +124,7 @@ class SpeedCalib(Node):
         rclpy.shutdown()
 
     def report(self):
-        print("\n=== Ergebnis ===")
+        print("\n=== Result ===")
         print("pwm    duty    v_mps")
         for pwm, duty, v in self.results:
             print(f"{pwm:.2f}   {duty:4d}   {v:.3f}")

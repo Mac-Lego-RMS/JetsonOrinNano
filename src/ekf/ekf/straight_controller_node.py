@@ -103,9 +103,9 @@ class StraightController(Node):
         self.create_timer(self.dt, self.control_loop)
 
         self.get_logger().info(
-            f">>> StraightController bereit. front_wall_x={self.front_wall_x:.2f} m, "
-            f"Stopp bei {self.stop_distance:.2f} m (nose_offset={self.nose_offset:.2f} m). "
-            f"Warte auf /ekf/odom... <<<"
+            f">>> StraightController ready. front_wall_x={self.front_wall_x:.2f} m, "
+            f"Stop at {self.stop_distance:.2f} m (nose_offset={self.nose_offset:.2f} m). "
+            f"Waiting for /ekf/odom... <<<"
         )
 
     # ------------------------------------------------------------------ callbacks
@@ -154,9 +154,9 @@ class StraightController(Node):
         if self.state == 'WAIT_ODOM':
             self.state = 'WAIT_BUTTON' if self.require_button else 'DRIVE'
             if self.state == 'WAIT_BUTTON':
-                self.get_logger().info("Pose empfangen. Warte auf Button-Start...")
+                self.get_logger().info("Pose received. Waiting for button start...")
             else:
-                self.get_logger().info("Pose empfangen. Fahre los.")
+                self.get_logger().info("Pose received. Driving off.")
             return
 
         if self.state == 'WAIT_BUTTON':
@@ -174,7 +174,7 @@ class StraightController(Node):
         # --- DRIVE ---
         # Safety: if the pose feed dies, do not keep driving blind toward the wall.
         if self.odom_is_stale():
-            self.get_logger().warn("Pose veraltet (kein /ekf/odom). Stoppe.")
+            self.get_logger().warn("Pose stale (no /ekf/odom). Stopping.")
             self.publish_stop()
             return
 
@@ -184,7 +184,7 @@ class StraightController(Node):
         if front_dist <= self.stop_distance:
             self.state = 'STOPPED'
             self.publish_stop()
-            self.get_logger().info(f"Ziel erreicht. front_dist={front_dist:.2f} m, x={x:.2f} m.")
+            self.get_logger().info(f"Target reached. front_dist={front_dist:.2f} m, x={x:.2f} m.")
             return
 
         # lateral PD -> yaw rate (REP 103: +y left, +omega CCW/left)
