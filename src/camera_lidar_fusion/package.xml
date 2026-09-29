@@ -3,8 +3,8 @@
 <package format="3">
   <name>camera_lidar_fusion</name>
   <version>0.1.0</version>
-  <description>Fusion der liegenden 360-Grad-Fisheye-Kamera mit dem 2D-Lidar:
-    Farbe je Lidar-Punkt (CSV) und Kalibrierung der Kameraverdrehung.</description>
+  <description>Fusion of the horizontally mounted 360 degree fisheye camera with the 2D lidar:
+    colour per lidar point (CSV) and calibration of the camera rotation.</description>
   <maintainer email="maeclegorms@gmail.com">macjetson</maintainer>
   <license>MIT</license>
 

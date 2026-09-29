@@ -1,154 +1,153 @@
 # camera_lidar_fusion
 
-Verheiratet die liegend montierte 360-Grad-Fisheye-Kamera (USB, `/video_source/raw`,
-1280x960) mit dem 2D-Lidar. Zwei Nodes:
+Marries the horizontally mounted 360 degree fisheye camera (USB, `/video_source/raw`,
+1280x960) with the 2D lidar. Two nodes:
 
-| Node | Zweck |
+| Node | Purpose |
 | --- | --- |
-| `lidar_pixel_mapper` | Farbe je Lidar-Punkt -> CSV, PointCloud2, Debug-Bild |
-| `rotation_calibration` | Bildkreis vermessen und Verdrehung der Kamera bestimmen |
+| `lidar_pixel_mapper` | Colour per lidar point -> CSV, PointCloud2, debug image |
+| `rotation_calibration` | Measure the image circle and determine the rotation of the camera |
 
-## Geometrie
+## Geometry
 
-Roboter-/Lidar-Frame nach REP-103: **X vorne, Y links, Z oben**.
+Robot/lidar frame according to REP-103: **X front, Y left, Z up**.
 
-Die Kamera liegt auf dem Ruecken, die optische Achse zeigt also nach oben. Bei
-270 Grad Oeffnungswinkel reicht das Sichtfeld 45 Grad unter den Horizont -- damit
-sieht sie rundum und leicht nach unten. Genau das brauchen wir, um Hindernisse
-schon beim Kurveneingang zu erfassen.
+The camera lies on its back, so the optical axis points up. With a
+270 degree opening angle the field of view reaches 45 degrees below the horizon -- so
+it sees all round and slightly downwards. That is exactly what we need to pick up
+obstacles already at the corner entry.
 
-Fuer den Nominalfall (Achse exakt senkrecht) faellt der optische Frame mit dem
-Roboter-Frame zusammen, die Rotationsmatrix ist die Einheitsmatrix. Die
-Kalibrierwinkel beschreiben nur die Abweichung:
+For the nominal case (axis exactly vertical) the optical frame coincides with the
+robot frame, the rotation matrix is the identity. The
+calibration angles only describe the deviation:
 
-* `yaw_deg` -- Drehung um die optische Achse. **Das ist die Verdrehung, um die es
-  geht.** Sie haengt nur vom Azimut ab, nicht von der Hoehe des Zielobjekts,
-  und ist deshalb geschlossen loesbar.
-* `pitch_deg` / `roll_deg` -- Verkippung der Achse aus der Senkrechten.
+* `yaw_deg` -- rotation about the optical axis. **This is the rotation this is
+  all about.** It only depends on the azimuth, not on the height of the target object,
+  and can therefore be solved in closed form.
+* `pitch_deg` / `roll_deg` -- tilt of the axis from the vertical.
 
-Projektion: `P_cam = R @ (P_robot - t)`, dann equidistantes Fisheye
-`r = f * theta` mit `f = radius_px / (fov/2)`. Bei Bedarf `poly_coeffs` setzen.
+Projection: `P_cam = R @ (P_robot - t)`, then equidistant fisheye
+`r = f * theta` with `f = radius_px / (fov/2)`. Set `poly_coeffs` if needed.
 
-Wichtig: die Lidar-Ebene liegt **unter** der Kamera, also ist `theta > 90 Grad`
-fuer alle Bodenpunkte. Das ist korrekt und liegt innerhalb der 135 Grad.
+Important: the lidar plane lies **below** the camera, so `theta > 90 deg`
+for all ground points. That is correct and lies within the 135 degrees.
 
-### Wo im Bild abgegriffen wird: `sample_mode`
+### Where in the image it samples: `sample_mode`
 
-**`horizon` (Default).** Der Lidar-Punkt wird auf Objektivhoehe abgegriffen. Die
-Hoehendifferenz zur Kamera ist dann null, `theta` exakt 90 Grad und der
-Bildradius konstant `f*pi/2` = 301.3 px -- unabhaengig von der Entfernung. Es
-bleibt nur der Azimut, also **eine feste Kreislinie im Bild**.
+**`horizon` (default).** The lidar point is sampled at lens height. The
+height difference to the camera is then zero, `theta` exactly 90 degrees and the
+image radius constant `f*pi/2` = 301.3 px -- independent of the distance. Only
+the azimuth is left, i.e. **a fixed circle in the image**.
 
-Das reicht fuer Pylonen, solange das Objektiv zwischen Matte und
-Pylonenoberkante sitzt: eine Pylone, die die waagerechte Ebene durch die Linse
-durchstoesst, liegt in *jeder* Entfernung auf diesem Ring. Gemessen an echten
-Lidar-Daten (2203 Punkte, 0.05 bis 2.96 m): Radiusspanne 0.013 px.
+That is enough for pylons as long as the lens sits between the mat and the
+pylon top: a pylon that pierces the horizontal plane through the lens
+lies on this ring at *every* distance. Measured on real
+lidar data (2203 points, 0.05 to 2.96 m): radius span 0.013 px.
 
-Der Gewinn ist nicht nur Einfachheit -- radial fallen zwei Fehlerquellen
-komplett weg: die Entfernungsmessung des Lidars und ein falsches `cam_z`. Uebrig
-bleibt allein `yaw`. Genau das, was man fuer weit entfernte Hindernisse braucht.
+The gain is not only simplicity -- radially two error sources drop out
+completely: the range measurement of the lidar and a wrong `cam_z`. Only
+`yaw` is left. Exactly what you need for distant obstacles.
 
-Wieviel Luft der Ring in der Pylone hat (10-cm-Pylone, Abstand Ring zu Ober- und
-Unterkante in px):
+How much margin the ring has inside the pylon (10 cm pylon, distance from the ring to the top and
+bottom edge in px):
 
-| Linsenhoehe | 0.3 m | 1.0 m | 2.0 m |
+| Lens height | 0.3 m | 1.0 m | 2.0 m |
 | --- | --- | --- | --- |
 | 2 cm | 50.0 / 12.8 | 15.3 / 3.8 | 7.7 / 1.9 |
 | **5 cm** | **31.7 / 31.7** | **9.6 / 9.6** | **4.8 / 4.8** |
 | 8 cm | 12.8 / 50.0 | 3.8 / 15.3 | 1.9 / 7.7 |
-| 11 cm | daneben | daneben | daneben |
+| 11 cm | miss | miss | miss |
 
-Auf halber Pylonenhoehe ist der Abstand zu beiden Kanten am groessten -- **dort
-sollte das Objektiv sitzen**. Ueber der Pylonenoberkante greift der Ring an der
-Pylone vorbei und liest die Wand dahinter; dann `height` nehmen.
+At half the pylon height the distance to both edges is largest -- **that is where
+the lens should sit**. Above the pylon top the ring misses the
+pylon and reads the wall behind it; then use `height`.
 
-**`height`.** Abgriff auf fester Hoehe `sample_height_m` ueber der Lidar-Ebene,
-Bildradius haengt an der Entfernung. Nur noetig, wenn die Linse nicht zwischen
-Matte und Pylonenoberkante sitzt.
+**`height`.** Sampling at a fixed height `sample_height_m` above the lidar plane,
+the image radius depends on the distance. Only needed if the lens does not sit between
+the mat and the pylon top.
 
-### Statt einer Linie eine Zone
+### A zone instead of a line
 
-Ein einzelner Abgriffsradius ist zerbrechlich: er trifft je nach Entfernung und
-Kalibrierfehler mal die Pylone, mal die Wand dahinter, mal den Boden davor. Mit
-gesetzter Zone wird stattdessen ein Stueck der radialen Linie abgetastet und
-ausgezaehlt, welcher Anteil der Pixel zu welcher Farbe passt; ab
-`sample_zone_min_frac` gewinnt eine Farbe.
+A single sampling radius is fragile: depending on distance and
+calibration error it hits the pylon one time, the wall behind it the next, the floor in front of it the next. With
+a zone set, a piece of the radial line is scanned instead and
+it is counted which fraction of the pixels matches which colour; from
+`sample_zone_min_frac` on a colour wins.
 
-**Abstimmen, nicht mitteln.** Ein Median ueber ein Segment, das halb auf der
-Pylone und halb auf der Wand liegt, ergibt Mischmasch. Der Stimmenanteil bleibt
-aussagekraeftig, solange die Pylone einen nennenswerten Teil des Segments
-fuellt. Gegenprobe am Aufbau: nimmt man statt der Abstimmung einfach das
-gesaettigtste Pixel, findet man in fast jeder Linie irgendwas und erzeugt
-Cluster von 30 Grad Breite, wo eine Pylone 5 Grad haette.
+**Vote, do not average.** A median over a segment that lies half on the
+pylon and half on the wall gives a mishmash. The vote fraction stays
+meaningful as long as the pylon fills a significant part of the segment.
+Cross-check on the setup: if you simply take the most saturated pixel instead of the vote,
+you find something in almost every line and produce
+clusters 30 degrees wide where a pylon would have 5 degrees.
 
-**Die Zone ist nicht konstant dick.** Eine Bande fester Hoehe erscheint im
-Fisheye kein Kreisband gleicher Dicke -- und das ist der Kern der Sache. Sitzt
-das Objektiv auf Hoehe der Bandenoberkante, ist fuer diese Kante die
-Hoehendifferenz null, `theta` damit exakt 90 Grad und der Bildradius konstant:
-die Oberkante laeuft als gerade Linie. Die Unterkante liegt die Bandenhoehe
-tiefer, ihr `theta` naehert sich mit wachsender Entfernung von oben an 90 Grad
-an, ihr Radius also von aussen an den der Oberkante:
+**The zone is not of constant thickness.** A wall band of fixed height does not appear in the
+fisheye as a circular band of equal thickness -- and that is the heart of the matter. If
+the lens sits at the height of the top edge of the wall band, the height difference for this edge is
+zero, `theta` therefore exactly 90 degrees and the image radius constant:
+the top edge runs as a straight line. The bottom edge lies one band height
+lower, its `theta` approaches 90 degrees from above as the distance grows,
+so its radius approaches that of the top edge from outside:
 
-| Entfernung | Zone | Dicke |
+| Distance | Zone | Thickness |
 | --- | --- | --- |
 | 0.3 m | 392 .. 445 px | 53 px |
 | 1.0 m | 398 .. 413 px | 15 px |
 | 3.0 m | 399 .. 405 px | 6 px |
 
-Eine in Pixeln festgelegte Breite waere deshalb nah viel zu schmal und fern zu
-breit -- fern ragt sie ueber die Bande hinaus und sammelt die helle Matte oder
-die Wand mit ein, wodurch Punkte faelschlich als `unbekannt` statt `schwarz`
-herauskommen.
+A width fixed in pixels would therefore be much too narrow near and too
+wide far away -- far away it sticks out above the wall band and also collects the bright mat or
+the wall, so that points wrongly come out as `unknown` instead of `black`.
 
-Woher die Zonengrenzen kommen, entscheidet sich in dieser Reihenfolge:
+Where the zone limits come from is decided in this order:
 
-1. **`zone_from_band: true`** -- Unterkante live aus dem Bild (siehe unten),
-   Oberkante aus der Kalibrierung. Das Beste, was es gibt.
-2. **Kalibrierte Kurve** in der Kalibrierdatei (`zone` / `zonefit`).
-3. **`sample_zone_low_m` / `sample_zone_high_m`** -- aus zwei Hoehen gerechnet.
-   Nur als Notloesung, siehe Modellfehler weiter unten.
+1. **`zone_from_band: true`** -- bottom edge live from the image (see below),
+   top edge from the calibration. The best there is.
+2. **Calibrated curve** in the calibration file (`zone` / `zonefit`).
+3. **`sample_zone_low_m` / `sample_zone_high_m`** -- computed from two heights.
+   Only as a fallback, see model error further below.
 
 ```bash
-ros2 param set /lidar_pixel_mapper sample_zone_min_frac 0.5   # Stimmenanteil
-ros2 param set /lidar_pixel_mapper sample_zone_steps 13       # Stuetzstellen
-ros2 param set /lidar_pixel_mapper sample_zone_nutz 1.0       # 0.4 = mittleres Drittel
+ros2 param set /lidar_pixel_mapper sample_zone_min_frac 0.5   # vote fraction
+ros2 param set /lidar_pixel_mapper sample_zone_steps 13       # samples
+ros2 param set /lidar_pixel_mapper sample_zone_use 1.0        # 0.4 = middle third
 ```
 
-`sample_zone_nutz` tastet nur den mittleren Teil der Zone ab. Sitzen die Grenzen
-sauber, ist die Mitte die reinste Stelle -- die Raender tragen Mischpixel bei.
-Ganz auf eine Linie zu gehen ist aber riskant: bei 3 m ist die ganze Zone nur
-6 px dick, davon 40 Prozent sind zwei Pixel, und dann haengt wieder alles daran,
-dass die Zone aufs Pixel genau sitzt.
+`sample_zone_use` only scans the middle part of the zone. If the limits sit
+cleanly, the middle is the purest spot -- the edges contribute mixed pixels.
+Going all the way down to one line is risky though: at 3 m the whole zone is only
+6 px thick, 40 percent of that are two pixels, and then everything again depends on
+the zone sitting right to the pixel.
 
-Der Stimmenanteil muss zur Zonenbreite passen. Am Aufbau gemessen, mit zwei
-gruenen und zwei roten Pylonen im Feld:
+The vote fraction must match the zone width. Measured on the setup, with two
+green and two red pylons on the field:
 
-| `sample_zone_min_frac` | gruene Cluster | rote Cluster |
+| `sample_zone_min_frac` | green clusters | red clusters |
 | --- | --- | --- |
 | 0.20 | 7 | 3 |
 | 0.40 | 4 | 2 |
 | **0.50** | **2** | **2** |
 
-Bei 0.50 blieben genau die vier echten Pylonen uebrig, ohne Fehltreffer.
+At 0.50 exactly the four real pylons were left, without false hits.
 
-### Die Zone messen statt rechnen: `zone` und `zonefit`
+### Measuring the zone instead of computing it: `zone` and `zonefit`
 
-Die Zone aus `cam_z` und der Brennweite zu RECHNEN funktioniert nicht gut
-genug. Der Grund ist ein Modellfehler, der zum Bildrand hin waechst -- genau
-dort, wo wir arbeiten: `poly_coeffs` ist leer, das Modell rechnet also streng
-equidistant mit `r = f*theta`, und echte Fisheye-Objektive weichen davon am
-Rand ab. Am Aufbau waren das **9 bis 12 px**. Wie sich das auswirkt, sieht man
-daran, dass eine Rueckrechnung der Bandenoberkante drei verschiedene Hoehen fuer
-dieselbe Kante ergab: +10.1 cm bei 0.5 m, +5.5 cm bei 1.0 m, +12.7 cm bei
-2.5 m. Mit einer einzigen Hoehe sind nah und fern deshalb nicht gleichzeitig zu
-treffen.
+COMPUTING the zone from `cam_z` and the focal length does not work well
+enough. The reason is a model error that grows towards the image edge -- exactly
+where we work: `poly_coeffs` is empty, so the model computes strictly
+equidistant with `r = f*theta`, and real fisheye lenses deviate from that at the
+edge. On the setup that was **9 to 12 px**. You can see the effect in
+that a back-calculation of the top edge of the wall band gave three different heights for
+the same edge: +10.1 cm at 0.5 m, +5.5 cm at 1.0 m, +12.7 cm at
+2.5 m. With a single height, near and far can therefore not be hit at the
+same time.
 
-Deshalb wird die Zone gemessen. Die Kommandos laufen in `rotation_calibration`:
+That is why the zone is measured. The commands run in `rotation_calibration`:
 
 ```bash
-# Pylone in einer Entfernung aufstellen, dann:
+# place the pylon at one distance, then:
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: zone"
-# versetzen, wiederholen -- 5 bis 6 Positionen von 0.3 bis 2.5 m
+# move it, repeat -- 5 to 6 positions from 0.3 to 2.5 m
 
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: zonelist"
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: zonedel 3 7"
@@ -157,95 +156,94 @@ ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: save"
 ros2 topic pub --once /camera_lidar/reload std_msgs/msg/Empty "{}"
 ```
 
-`zone` tastet die radiale Linie durch das Lidar-Cluster ab und misst, ueber
-welchen Radiusbereich dort die Pylonenfarbe steht -- also genau den Bereich, den
-der Mapper spaeter abtasten soll. `zonefit` legt
+`zone` scans the radial line through the lidar cluster and measures over
+which radius range the pylon colour stands there -- i.e. exactly the range that
+the mapper is to sample later. `zonefit` fits
 
     r(rho) = r0 + k / rho
 
-durch die Messungen, getrennt fuer innen und aussen. Diese Form ist nicht
-geraten, sie folgt aus der Geometrie: fuer `theta` nahe 90 Grad ist
-`atan2(rho, dz)` ungefaehr `pi/2 - dz/rho`, also `r` ungefaehr
-`f*pi/2 - f*dz/rho`. Der 1/rho-Anteil traegt die Hoehe der Kante, der konstante
-Anteil die Brennweite -- **und mit ihm gleich den Modellfehler**, den man sonst
-nirgends loswird. Genau das ist der Gewinn gegenueber dem Rechnen.
+through the measurements, separately for inner and outer. This form is not
+guessed, it follows from the geometry: for `theta` near 90 degrees
+`atan2(rho, dz)` is roughly `pi/2 - dz/rho`, so `r` is roughly
+`f*pi/2 - f*dz/rho`. The 1/rho part carries the height of the edge, the constant
+part the focal length -- **and with it the model error as well**, which you cannot
+get rid of anywhere else. Exactly that is the gain over computing.
 
-Am Aufbau, 9 Samples von 0.27 bis 2.14 m:
+On the setup, 9 samples from 0.27 to 2.14 m:
 
 ```
-r_innen  = 399.9  -2.31/rho     RMS 1.0 px
-r_aussen = 400.1 +13.33/rho     RMS 1.6 px
+r_inner = 399.9  -2.31/rho     RMS 1.0 px
+r_outer = 400.1 +13.33/rho     RMS 1.6 px
 ```
 
-Das gerechnete Modell setzt den Horizontring auf 412.3 px, der Fit laeuft gegen
-399.9 px -- die Differenz von 12.4 px ist der Modellfehler. Und `zone_k_in` von
--2.31 entspricht nur 0.9 cm: das Objektiv sitzt praktisch auf der Hoehe der
-Bandenoberkante, deren Bildradius damit konstant ist.
+The computed model puts the horizon ring at 412.3 px, the fit tends towards
+399.9 px -- the difference of 12.4 px is the model error. And `zone_k_in` of
+-2.31 corresponds to only 0.9 cm: the lens sits practically at the height of the
+top edge of the wall band, whose image radius is therefore constant.
 
-**Weit spreizen.** Der Fit trennt einen konstanten von einem 1/rho-Anteil und
-braucht dafuer nah UND fern. Unter Faktor 2.5 Spreizung warnt `zonefit`.
+**Spread widely.** The fit separates a constant part from a 1/rho part and
+needs near AND far for that. Below a spread factor of 2.5 `zonefit` warns.
 
-Fuer die Kommandos gilt: erst `background` (sonst findet die Node den eigenen
-Aufbau statt der Pylone, siehe unten), und `target_label` auf die Pylonenfarbe
-setzen. `target_range_max_m` steht auf 1.5 m -- fuer Samples weiter draussen
-hochsetzen.
+For the commands: first `background` (otherwise the node finds our own
+build instead of the pylon, see below), and set `target_label` to the pylon colour.
+`target_range_max_m` is at 1.5 m -- raise it for samples further out.
 
-### Die Bande live finden: `band_detect`
+### Finding the wall band live: `band_detect`
 
-Die verlaesslichste Kante im Bild ist die **Unterkante** der schwarzen Bande,
-also der Uebergang zur hellen Matte: dahinter liegt immer dasselbe, egal in
-welche Richtung. Die Oberkante taugt dafuer nicht, hinter ihr ist mal weisse
-Wand, mal dunkle Couch, mal Holz. An 1362 Kantenpaaren gemessen:
+The most reliable edge in the image is the **bottom edge** of the black wall band,
+i.e. the transition to the bright mat: behind it there is always the same thing, whatever the
+direction. The top edge is no good for this, behind it there is white
+wall, dark couch or wood. Measured on 1362 edge pairs:
 
-| Kante | RMS des Fits |
+| Edge | RMS of the fit |
 | --- | --- |
-| Unterkante (gegen die Matte) | 5.3 px |
-| Oberkante (gegen den Raum) | 12.8 px |
-| zum Vergleich: Pylonenfarbe (`zonefit`) | 1.0 / 1.6 px |
+| bottom edge (against the mat) | 5.3 px |
+| top edge (against the room) | 12.8 px |
+| for comparison: pylon colour (`zonefit`) | 1.0 / 1.6 px |
 
-`_bande_finden` laeuft je Azimut von innen nach aussen und nimmt die erste
-Stelle, an der es dauerhaft hell wird -- `band_run` Pixel am Stueck. Damit loest
-ein einzelner Glanzpunkt auf der Bande die Kante nicht vorzeitig aus. Am Aufbau
-werden so **349 von 360 Azimuten** getroffen.
+`_find_band` walks from the inside outwards per azimuth and takes the first
+spot where it stays bright -- `band_run` pixels in a row. That way
+a single highlight on the wall band does not trigger the edge early. On the setup
+this hits **349 of 360 azimuths**.
 
-Zwei Ausreisserfilter, beide physikalisch begruendet: die Unterkante muss immer
-weiter aussen liegen als die Oberkante (die Bande ist rund 10 cm hoch), und
-Nachbarazimute muessen sich aehneln (die Bande springt nicht). Der Filter
-schrumpfte den gefundenen Radiusbereich von 368..436 auf 403..436 px.
+Two outlier filters, both physically justified: the bottom edge must always
+lie further out than the top edge (the wall band is about 10 cm high), and
+neighbouring azimuths must be similar (the wall band does not jump). The filter
+shrank the detected radius range from 368..436 to 403..436 px.
 
 ```bash
 ros2 param set /lidar_pixel_mapper band_detect true
-ros2 param set /lidar_pixel_mapper zone_from_band true   # Zone daran ausrichten
-ros2 param set /lidar_pixel_mapper band_steps 360        # Azimutaufloesung
-ros2 param set /lidar_pixel_mapper band_dark_max 60      # so dunkel ist die Bande
-ros2 param set /lidar_pixel_mapper band_bright_min 100   # so hell ist die Matte
-ros2 param set /lidar_pixel_mapper band_run 4            # helle Pixel am Stueck
-ros2 param set /lidar_pixel_mapper band_smooth 9         # Medianfenster
-ros2 param set /lidar_pixel_mapper band_max_dev 12.0     # max Abweichung [px]
+ros2 param set /lidar_pixel_mapper zone_from_band true   # align the zone to it
+ros2 param set /lidar_pixel_mapper band_steps 360        # azimuth resolution
+ros2 param set /lidar_pixel_mapper band_dark_max 60      # this dark is the wall band
+ros2 param set /lidar_pixel_mapper band_bright_min 100   # this bright is the mat
+ros2 param set /lidar_pixel_mapper band_run 4            # bright pixels in a row
+ros2 param set /lidar_pixel_mapper band_smooth 9         # median window
+ros2 param set /lidar_pixel_mapper band_max_dev 12.0     # max deviation [px]
 ```
 
-Mit `zone_from_band` kommt die Unterkante der Zone live aus dem Bild, die
-Oberkante bleibt konstant. Wo keine Kante gefunden wurde, greift die
-Kalibrierkurve -- die Bandensuche kann also nur verbessern, nie verschlechtern.
+With `zone_from_band` the bottom edge of the zone comes live from the image, the
+top edge stays constant. Where no edge was found, the
+calibration curve applies -- so the band search can only improve, never make it worse.
 
-### Wenn der Ring zu hoch sitzt: die Brennweite kalibrieren
+### If the ring sits too high: calibrate the focal length
 
-Der Ring liegt bei `r = f*pi/2`, und `f = radius_px / (fov/2)`. Die FOV war bis
-hierher eine **Annahme** (270 Grad aus der Produktbeschreibung), nie gemessen.
-Stimmt sie nicht, sitzt der Ring am falschen Radius -- und weil eine zu gross
-angenommene FOV `f` zu klein macht, sitzt er dann zu weit **innen**, also zu hoch
-im Raum, und schaut ueber die Pylonen hinweg.
+The ring lies at `r = f*pi/2`, and `f = radius_px / (fov/2)`. Up to this point the FOV was
+an **assumption** (270 degrees from the product description), never measured.
+If it is wrong, the ring sits at the wrong radius -- and because an FOV assumed too large
+makes `f` too small, it then sits too far **inside**, i.e. too high
+in the room, and looks over the pylons.
 
-| angenommene FOV | Ring bei |
+| assumed FOV | ring at |
 | --- | --- |
-| 270 Grad | 301 px |
-| 240 Grad | 339 px |
-| 220 Grad | 370 px |
-| 200 Grad | 407 px |
-| 180 Grad | 452 px (= Rand des Bildkreises) |
+| 270 deg | 301 px |
+| 240 deg | 339 px |
+| 220 deg | 370 px |
+| 200 deg | 407 px |
+| 180 deg | 452 px (= edge of the image circle) |
 
-**Schnellweg -- Ring von Hand setzen.** Der Ring ist im Debug-Bild orange
-eingezeichnet. Verschieben, bis er auf Pylonenhoehe liegt:
+**Quick way -- set the ring by hand.** The ring is drawn in orange in the debug image.
+Move it until it lies at pylon height:
 
 ```bash
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: ring"
@@ -253,246 +251,245 @@ ros2 param set /camera_rotation_calibration horizon_radius_px 370
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: save"
 ```
 
-**Sauberer Weg -- `radial`.** Eine Pylone bei mehreren Entfernungen samplen
-(wichtig: **weit gespreizt**, z.B. 0.2 bis 1.5 m) und dann:
+**Clean way -- `radial`.** Sample one pylon at several distances
+(important: **spread widely**, e.g. 0.2 to 1.5 m) and then:
 
 ```bash
 ros2 param set /camera_rotation_calibration pylon_height_m 0.10
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: radial"
 ```
 
-Der Fusspunkt der Pylone steht auf der Matte, also immer `L` unter dem Objektiv:
-`theta_fuss = pi - atan(L/rho)`. Wandert die Pylone von 0.2 auf 2 m, laeuft
-dieser Winkel von rund 158 auf 92 Grad -- diese Spreizung macht `f` und `L`
-gemeinsam bestimmbar. Die Oberkante liefert dieselbe Gleichung mit `L - H`.
+The foot point of the pylon stands on the mat, i.e. always `L` below the lens:
+`theta_foot = pi - atan(L/rho)`. If the pylon moves from 0.2 to 2 m, this
+angle runs from about 158 to 92 degrees -- this spread makes `f` and `L`
+jointly determinable. The top edge gives the same equation with `L - H`.
 
-`radial` gibt dir damit auch **die Objektivhoehe ueber der Matte** -- und sagt
-direkt, ob der Horizontring ueberhaupt funktionieren kann oder ob die Kamera
-tiefer muss.
+`radial` therefore also gives you **the lens height above the mat** -- and tells
+you directly whether the horizon ring can work at all or whether the camera
+has to go lower.
 
-### Ring nach unten kippen: `sample_depression_deg`
+### Tilting the ring down: `sample_depression_deg`
 
-Kippt den Ring um X Grad nach unten; aus der waagerechten Ebene wird ein Kegel.
-Der Bildradius bleibt konstant (`f*(pi/2 + X)`), aber die **Abgriffstiefe unter
-der Linse waechst mit der Entfernung**: `rho * tan(X)`.
+Tilts the ring down by X degrees; the horizontal plane becomes a cone.
+The image radius stays constant (`f*(pi/2 + X)`), but the **sampling depth below
+the lens grows with the distance**: `rho * tan(X)`.
 
 | `sample_depression_deg` | 0.3 m | 1.0 m | 2.0 m |
 | --- | --- | --- | --- |
-| 0.5 Grad | 0.3 cm | 0.9 cm | 1.7 cm |
-| 1.0 Grad | 0.5 cm | 1.7 cm | 3.5 cm |
-| 3.0 Grad | 1.6 cm | 5.2 cm | 10.5 cm (unter der Matte) |
+| 0.5 deg | 0.3 cm | 0.9 cm | 1.7 cm |
+| 1.0 deg | 0.5 cm | 1.7 cm | 3.5 cm |
+| 3.0 deg | 1.6 cm | 5.2 cm | 10.5 cm (below the mat) |
 
-Fuer 10-cm-Pylonen sind also nur Bruchteile eines Grades brauchbar. Und der
-harte Fall: sitzt die Linse **ueber** der Pylonenoberkante, gibt es gar keinen
-Winkel, der nah und fern gleichzeitig trifft -- bei 13 cm Linsenhoehe braucht
-0.3 m zwischen 5.7 und 23.4 Grad, 2.0 m aber zwischen 0.9 und 3.7 Grad. Die
-Fenster ueberlappen nicht. Dann hilft nur `height`.
+For 10 cm pylons only fractions of a degree are usable. And the
+hard case: if the lens sits **above** the pylon top, there is no
+angle at all that hits near and far at the same time -- at 13 cm lens height
+0.3 m needs between 5.7 and 23.4 degrees, but 2.0 m between 0.9 and 3.7 degrees. The
+windows do not overlap. Then only `height` helps.
 
-Deshalb: Linse in die Pylonenhoehe bringen ist die Loesung, nicht der Kippwinkel.
+Hence: bringing the lens to pylon height is the solution, not the tilt angle.
 
-### Mitteln statt ein Pixel: `sample_band_m`
+### Averaging instead of one pixel: `sample_band_m`
 
-Statt eines einzelnen Pixels werden `sample_band_count` Stuetzstellen entlang
-der **radialen** Linie durch den Punkt gelesen -- die liegt im Fisheye laengs
-der Pylone -- und davon der **Median** genommen (nicht der Mittelwert: der
-Median haelt stand, wenn ein Ende des Bandes ueber die Pylonenkante rutscht).
+Instead of a single pixel, `sample_band_count` samples are read along
+the **radial** line through the point -- which runs along the pylon in the fisheye
+-- and their **median** is taken (not the mean: the
+median holds out when one end of the band slips past the pylon edge).
 
-Die Bandbreite wird in Metern Pylonenhoehe angegeben und je Punkt aus der
-Entfernung in Pixel umgerechnet (`f*atan(band_m/rho)`). Fern schrumpft das Band
-also von selbst mit und bleibt automatisch innerhalb der Pylone.
+The band width is given in metres of pylon height and converted per point from the
+distance to pixels (`f*atan(band_m/rho)`). Far away the band therefore shrinks
+by itself and automatically stays inside the pylon.
 
 ```bash
-ros2 param set /lidar_pixel_mapper sample_band_m 0.03   # Default: +-3 cm
-ros2 param set /lidar_pixel_mapper sample_band_m 0.0    # aus, ein Pixel
+ros2 param set /lidar_pixel_mapper sample_band_m 0.03   # default: +-3 cm
+ros2 param set /lidar_pixel_mapper sample_band_m 0.0    # off, one pixel
 ros2 param set /lidar_pixel_mapper sample_band_count 5
 ```
 
-**Zur Rechenzeit:** `patch_px` filtert per `medianBlur` das *ganze* Bild und
-kostet auf 1280x960 rund 26 ms je Scan -- bei 15 Hz gut 40 Prozent eines Kerns.
-Solange das Band aktiv ist, ist das ueberfluessig, deshalb steht `patch_px` auf
-1. Nur hochsetzen, wenn du `sample_band_m` auf 0 stellst.
+**On compute time:** `patch_px` filters the *whole* image via `medianBlur` and
+costs about 26 ms per scan on 1280x960 -- a good 40 percent of a core at 15 Hz.
+As long as the band is active that is superfluous, which is why `patch_px` is set to
+1. Only raise it if you set `sample_band_m` to 0.
 
-| Schritt | Zeit je Scan (2200 Punkte) |
+| Step | Time per scan (2200 points) |
 | --- | --- |
 | `medianBlur` 1280x960 | 26.4 ms |
-| Bandabtastung, 5 Stuetzstellen | 1.8 ms |
-| Klassifikation | 0.7 ms |
-| Projektion | 0.4 ms |
+| band sampling, 5 samples | 1.8 ms |
+| classification | 0.7 ms |
+| projection | 0.4 ms |
 
-Siehe auch den Abschnitt **Rechenzeit im Betrieb** weiter unten -- dort stehen
-die Zahlen fuer Zone, Bandenerkennung und Debug-Bild.
+See also the section **Compute time in operation** further below -- it has
+the numbers for zone, wall band detection and debug image.
 
 ```bash
 ros2 param set /lidar_pixel_mapper sample_mode horizon
 ros2 param set /lidar_pixel_mapper sample_mode height
-ros2 param set /lidar_pixel_mapper sample_height_m 0.0   # nur bei height
+ros2 param set /lidar_pixel_mapper sample_height_m 0.0   # only with height
 ```
 
-Beide Parameter werden bei jedem Scan neu gelesen, wirken also sofort.
+Both parameters are read again on every scan, so they take effect immediately.
 
-### Die z-Hoehe
+### The z height
 
-`cam_z` (Kamera ueber der Lidar-Ebene) steckt in der Translation und ist damit
-voll eingerechnet -- sie bestimmt `theta` und damit den **Bildradius**. Yaw
-dagegen bestimmt nur den **Winkel**. Die beiden stehen senkrecht aufeinander und
-stoeren sich nicht.
+`cam_z` (camera above the lidar plane) is part of the translation and is therefore
+fully accounted for -- it determines `theta` and thus the **image radius**. Yaw,
+on the other hand, only determines the **angle**. The two are orthogonal and
+do not interfere with each other.
 
-Wie stark z wirkt, haengt an der Entfernung:
+How strongly z acts depends on the distance:
 
-| Fehler | 0.2 m | 0.5 m | 1.0 m | 2.0 m |
+| Error | 0.2 m | 0.5 m | 1.0 m | 2.0 m |
 | --- | --- | --- | --- | --- |
-| `cam_z` 1 cm daneben | 8.9 px | 3.8 px | 1.9 px | 1.0 px |
-| `cam_z` 2 cm daneben | 17.6 px | 7.6 px | 3.8 px | 1.9 px |
-| `yaw` 1 Grad daneben | 6.1 px | 5.6 px | 5.4 px | 5.3 px |
+| `cam_z` 1 cm off | 8.9 px | 3.8 px | 1.9 px | 1.0 px |
+| `cam_z` 2 cm off | 17.6 px | 7.6 px | 3.8 px | 1.9 px |
+| `yaw` 1 deg off | 6.1 px | 5.6 px | 5.4 px | 5.3 px |
 
-Also: nah zaehlt z, fern verschwindet es -- fuer Hindernisse beim Kurveneingang
-(also weit weg) ist yaw das, worauf es ankommt. Ein Zentimeter Messfehler beim
-Lineal kostet dich auf 1 m keine 2 Pixel.
+So: near, z counts, far away it vanishes -- for obstacles at the corner entry
+(i.e. far away) yaw is what matters. A centimetre of measurement error with the
+ruler costs you less than 2 pixels at 1 m.
 
-Das gilt fuer `sample_mode: height`. Bei `horizon` faellt der Einfluss von
-`cam_z` auf den Abgriff komplett weg -- dort wird `cam_z` nur noch gebraucht,
-um die Objektivhoehe zu treffen, und der Ring bleibt derselbe.
+That applies to `sample_mode: height`. With `horizon` the influence of
+`cam_z` on the sampling drops out completely -- there `cam_z` is only needed
+to hit the lens height, and the ring stays the same.
 
-Bestimmbar ist aus Bildern immer nur der **Hoehenunterschied** zwischen Kamera
-und Zielmarke, nie beides getrennt. `height` loest deshalb `cam_z` unter der
-Annahme, dass `target_height_m` (Hoehe des Farb-Blob-Schwerpunkts ueber der
-Lidar-Ebene) stimmt. Nachmessen mit dem Lineal ist genauer; `height` ist der
-Gegencheck.
+From images, only the **height difference** between camera and target mark can ever be
+determined, never both separately. `height` therefore solves `cam_z` under the
+assumption that `target_height_m` (height of the colour blob centroid above the
+lidar plane) is right. Measuring with a ruler is more accurate; `height` is the
+cross-check.
 
-### Der Nullpunkt der Farbkennzahl: `weisspunkt`
+### The zero point of the colour index: `white_point`
 
-`rg_kennzahl` setzt stillschweigend voraus, dass eine farblose Flaeche
-`z = (G-R)/max(B,G,R) = 0` ergibt. Das tut sie nur, wenn der Weissabgleich der
-Kamera zum Licht passt. Am 16.09.2026 nachgemessen (Bag `wb_test`, 266 Frames,
-`CAM_WB_TEMP=4600`): die **weisse Matte** liefert B=167 G=212 R=194, also
-**z = +0.084 statt 0**.
+`rg_index` silently assumes that a colourless surface gives
+`z = (G-R)/max(B,G,R) = 0`. It only does so if the white balance of the
+camera matches the light. Measured again on 16.09.2026 (bag `wb_test`, 266 frames,
+`CAM_WB_TEMP=4600`): the **white mat** gives B=167 G=212 R=194, i.e.
+**z = +0.084 instead of 0**.
 
-Damit sind die symmetrischen Schwellen `+-rg_z_min` in Wahrheit voellig
-unsymmetrisch:
+So the symmetric thresholds `+-rg_z_min` are in truth completely
+asymmetric:
 
-| Farbe | noetiger Farbhub |
+| Colour | required colour swing |
 | --- | --- |
-| gruen | 0.150 - 0.084 = **0.066** |
-| rot | 0.150 + 0.084 = **0.234** |
+| green | 0.150 - 0.084 = **0.066** |
+| red | 0.150 + 0.084 = **0.234** |
 
-Rot muss also dreieinhalbmal so kraeftig sein wie gruen. Nah faellt das nicht
-auf (eine rote Pylone liegt bei z = -0.58), aber je weiter weg, desto mehr
-mischen sich die wenigen Pylonenpixel mit dem Hintergrund -- und rot faellt
-zuerst unter die Schwelle. Genau das war die Rot-Gruen-Verwechslung auf
-Entfernung. Im Bag gefunden: eine rote Pylone bei Azimut 85 Grad misst
-z = -0.134 und wurde als `unbekannt` verworfen.
+Red therefore has to be three and a half times as strong as green. Near, this does not
+show (a red pylon is at z = -0.58), but the further away, the more
+the few pylon pixels mix with the background -- and red drops
+below the threshold first. That was exactly the red/green mix-up at
+distance. Found in the bag: a red pylon at azimuth 85 degrees measures
+z = -0.134 and was discarded as `unknown`.
 
-**Der Stich ist nicht rundum gleich.** Ueber 12 Sektoren gemessen laeuft er von
-+0.046 bis +0.121, Spanne 0.075 -- die halbe Schwelle. Ursache ist gerichtetes
-Licht plus der Farbgang des Fisheyes zum Rand. Eine einzelne globale Zahl (oder
-eine andere Kelvinzahl) kann das nicht treffen, deshalb wird **je Azimutsektor**
-gemessen.
+**The cast is not the same all round.** Measured over 12 sectors it runs from
++0.046 to +0.121, a span of 0.075 -- half the threshold. The cause is directional
+light plus the colour drift of the fisheye towards the edge. A single global number (or
+a different Kelvin value) cannot hit that, which is why it is measured **per azimuth sector**.
 
-Ueber die Zeit ist er dagegen bockstabil: Streuung je Sektor maximal 0.006 ueber
-14 Sekunden Fahrt. Es ist also kein Belichtungsproblem, sondern eine
-feststehende Fehleinstellung -- und damit sauber messbar.
+Over time, on the other hand, it is rock-stable: spread per sector at most 0.006 over
+14 seconds of driving. So it is not an exposure problem but a
+fixed misadjustment -- and therefore cleanly measurable.
 
-Abgetastet wird ein Pixelring auf der **Matte**, knapp ausserhalb der Bande
-(automatisch `zone_r0_out + 12` bis `radius_px - 15`, am Aufbau 408..446 px).
-Je Sektor werden daraus die hellen, nahezu farblosen Pixel genommen und ihr
-mittleres z gebildet -- **Mittelwert, nicht Median**: bei Median von Ganzzahlen
-bleibt das Ergebnis ganzzahlig.
+A ring of pixels on the **mat** is sampled, just outside the wall band
+(automatically `zone_r0_out + 12` to `radius_px - 15`, 408..446 px on the setup).
+Per sector the bright, almost colourless pixels are taken from it and their
+mean z is formed -- **mean, not median**: with a median of integers
+the result stays an integer.
 
-Warum nicht zusaetzlich die schwarze Bande als zweiter Stuetzpunkt: sie misst
-B=6 G=13 R=13. Bei so kleinen Zahlen kippt ein einziger Digit die Kennzahl um
-0.077; `z_bande` sprang in der Messung zwischen 0.000 und -0.077 hin und her.
-Die Matte bei rund 200 ist die belastbare Referenz.
+Why not use the black wall band as a second reference point as well: it measures
+B=6 G=13 R=13. With numbers this small a single digit flips the index by
+0.077; `z_band` jumped back and forth between 0.000 and -0.077 in the measurement.
+The mat at around 200 is the reliable reference.
 
-**Korrigiert wird die Messung, nicht das Bild.** Von `zz` wird `z0` abgezogen
-und von `dd` entsprechend `z0 * mx` (der Versatz in `G-R` waechst mit der
-Helligkeit, denn `z = (G-R)/mx`). `rg_z_min`, `rg_s_min` und `rg_d_min`
-behalten damit ihre Bedeutung und ihre eingefahrene Abstimmung, und es kostet
-kein Rauschen -- anders als ein Hochskalieren der Kanaele.
+**The measurement is corrected, not the image.** `z0` is subtracted from `zz`
+and correspondingly `z0 * mx` from `dd` (the offset in `G-R` grows with the
+brightness, because `z = (G-R)/mx`). `rg_z_min`, `rg_s_min` and `rg_d_min`
+thereby keep their meaning and their established tuning, and it costs
+no noise -- unlike scaling up the channels.
 
-Gegen `wb_test` geprueft, 219 Scans mit 2 roten und 3 gruenen Pylonen:
+Checked against `wb_test`, 219 scans with 2 red and 3 green pylons:
 
-| | vorher | nachher |
+| | before | after |
 | --- | --- | --- |
-| rote Pylonen, stabile Cluster | 3 | 3 (unveraendert) |
-| rote Pylone 2 m, faelschlich gruene Punkte | 13.1 | **5.7** |
-| rote Pylone 2 m, rote Punkte | 22.4 | 22.8 |
-| gruene Pylone 2.55 m | 11.5 | 12.5 |
-| gruene Pylone 0.56 m | 16.1 | 10.6 |
+| red pylons, stable clusters | 3 | 3 (unchanged) |
+| red pylon 2 m, wrongly green points | 13.1 | **5.7** |
+| red pylon 2 m, red points | 22.4 | 22.8 |
+| green pylon 2.55 m | 11.5 | 12.5 |
+| green pylon 0.56 m | 16.1 | 10.6 |
 
-Die letzte Zeile ist der Preis: eine nahe gruene Pylone verliert rund ein
-Drittel ihrer Punkte (bleibt mit 10.6 aber weit ueber jeder Clusterschwelle).
+The last row is the price: a near green pylon loses about a
+third of its points (but at 10.6 stays well above any cluster threshold).
 
 ```bash
-ros2 param set /lidar_pixel_mapper weisspunkt true
-ros2 param set /lidar_pixel_mapper weisspunkt_sektoren 12   # 30 Grad je Sektor
-ros2 param set /lidar_pixel_mapper weisspunkt_schritt 3     # Pixelausduennung
-ros2 param set /lidar_pixel_mapper weisspunkt_r_min 0       # 0 = automatisch
-ros2 param set /lidar_pixel_mapper weisspunkt_r_max 0
+ros2 param set /lidar_pixel_mapper white_point true
+ros2 param set /lidar_pixel_mapper white_point_sectors 12   # 30 deg per sector
+ros2 param set /lidar_pixel_mapper white_point_step 3       # pixel thinning
+ros2 param set /lidar_pixel_mapper white_point_r_min 0      # 0 = automatic
+ros2 param set /lidar_pixel_mapper white_point_r_max 0
 ```
 
-Der gemessene Wert steht im periodischen `Sync:`-Log (`Weisspunkt z0: ...`).
-Laeuft er weg oder wird die Spanne gross, sieht man es dort zuerst.
+The measured value is in the periodic `Sync:` log (`white point z0: ...`).
+If it drifts or the span gets large, you see it there first.
 
-Rechenzeit auf dem Jetson, 1280x960:
+Compute time on the Jetson, 1280x960:
 
-| `weisspunkt_schritt` | Pixel im Ring | Zeit je Frame | gemessenes z0 |
+| `white_point_step` | pixels in the ring | time per frame | measured z0 |
 | --- | --- | --- | --- |
 | 1 | 100596 | 18.07 ms | +0.105 |
-| **3** (Vorgabe) | **11196** | **5.18 ms** | **+0.106** |
+| **3** (default) | **11196** | **5.18 ms** | **+0.106** |
 | 4 | 6300 | 3.84 ms | +0.104 |
 
-Das Ergebnis haengt praktisch nicht an der Abtastdichte -- wer CPU braucht,
-kann bedenkenlos auf 4 gehen.
+The result practically does not depend on the sampling density -- if you need CPU,
+you can safely go to 4.
 
-## Warum ein Referenzscan noetig ist
+## Why a reference scan is needed
 
-Am S3 verdecken Kabel und Elektronik einen Teil des Sichtfelds. Dort misst der
-Scanner sich selbst -- ein paar Zentimeter -- und das sind damit IMMER die
-naechsten Punkte. Eine Suche nach dem naechstgelegenen Objekt findet so nie die
-Pylone.
+On the S3, cables and electronics cover part of the field of view. There the
+scanner measures itself -- a few centimetres -- and those are therefore ALWAYS the
+nearest points. A search for the nearest object thus never finds the
+pylon.
 
-Blindsektoren (``blind``) erwischen den Kern dieser Bereiche, aber nicht den
-Rand: dort streift der Strahl den Aufbau und liefert z.B. 0.23 m, also ueber der
-Schwelle. Deshalb ist der Referenzscan (``background``) das eigentliche
-Werkzeug -- er nimmt die leere Umgebung einmal auf, und danach gilt als Ziel nur
-noch, was NAEHER misst als diese Referenz. Kabel, Elektronik, Tischkanten und
-Waende fallen damit alle von selbst weg.
+Blind sectors (``blind``) catch the core of these regions, but not the
+edge: there the beam grazes the build and gives e.g. 0.23 m, i.e. above the
+threshold. That is why the reference scan (``background``) is the actual
+tool -- it records the empty surroundings once, and after that only
+what measures CLOSER than this reference counts as a target. Cables, electronics, table edges and
+walls all drop out by themselves that way.
 
-## Reihenfolge beim Einrichten
+## Order of setup
 
-`cam_z` (Hoehe der Kamera ueber der Lidar-Ebene) einmal nachmessen und in die
-Kalibrierdatei eintragen -- das ist der einzige Wert, den keine Node erraten kann.
+Measure `cam_z` (height of the camera above the lidar plane) once and enter it in the
+calibration file -- that is the only value no node can guess.
 
 ```bash
 ros2 run camera_lidar_fusion rotation_calibration
 
-# 0a. Verbaute Lidar-Sektoren ausmessen (zweimal senden: sammeln, auswerten)
+# 0a. Measure the blocked lidar sectors (send twice: collect, evaluate)
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: blind"
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: blind"
 
-# 0b. Referenzscan der LEEREN Umgebung -- Pylone wegnehmen! (ebenfalls zweimal)
+# 0b. Reference scan of the EMPTY surroundings -- remove the pylon! (also twice)
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: background"
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: background"
 
-# 0c. Farbe der Kalibrierpylone festnageln -- sonst gewinnt der groesste
-#     Farbfleck im Raum statt der Pylone.
-ros2 param set /camera_rotation_calibration target_label gruen
+# 0c. Pin the colour of the calibration pylon -- otherwise the largest
+#     colour blob in the room wins instead of the pylon.
+ros2 param set /camera_rotation_calibration target_label green
 
-# 1. Bildkreis automatisch vermessen
+# 1. Measure the image circle automatically
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: circle"
 
-# 2. Verdrehung messen: EINEN roten/gruenen Klotz hinstellen, sonst nichts im
-#    Nahbereich. Pro Position samplen, Klotz rundum versetzen (>= 3 Positionen).
+# 2. Measure the rotation: put down ONE red/green block, nothing else in the
+#    near range. Sample per position, move the block all round (>= 3 positions).
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: sample"
 
-# 3. Loesen, pruefen, speichern
+# 3. Solve, check, save
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: solve"
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: verify"
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: save"
 
-# 3b. Abgriffszone messen -- Pylone in 5 bis 6 Entfernungen von 0.3 bis 2.5 m
-#     aufstellen und je Position "zone" senden. target_range_max_m vorher
-#     hochsetzen, sonst sieht die Node nur bis 1.5 m.
+# 3b. Measure the sampling zone -- place the pylon at 5 to 6 distances from 0.3 to 2.5 m
+#     and send "zone" at each position. Raise target_range_max_m beforehand,
+#     otherwise the node only sees up to 1.5 m.
 ros2 param set /camera_rotation_calibration target_range_max_m 3.0
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: zone"
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: zonelist"
@@ -500,157 +497,157 @@ ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: zonefit
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: save"
 ros2 topic pub --once /camera_lidar/reload std_msgs/msg/Empty "{}"
 
-# 4. Optional: Kamerahoehe gegenpruefen (braucht nahe Samples, < 0.5 m)
+# 4. Optional: cross-check the camera height (needs near samples, < 0.5 m)
 ros2 param set /camera_rotation_calibration target_height_m 0.05
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: height"
 ```
 
-Kontrolle in Foxglove: `/camera_lidar/calib_debug`. Das orange X (projiziertes
-Lidar-Cluster) muss auf dem Farbring (Kamera-Blob) liegen. Weitere Kommandos:
-`list`, `clear`, `reload`, `auto` (sammelt selbststaendig, sobald der Klotz weit
-genug versetzt wurde).
+Check in Foxglove: `/camera_lidar/calib_debug`. The orange X (projected
+lidar cluster) must lie on the colour ring (camera blob). More commands:
+`list`, `clear`, `reload`, `auto` (collects by itself as soon as the block has been moved far
+enough).
 
-Alles laesst sich auch live von Hand nachziehen -- das Debug-Bild folgt sofort:
+Everything can also be adjusted live by hand -- the debug image follows immediately:
 
 ```bash
 ros2 param set /camera_rotation_calibration yaw_deg 12.5
 ros2 topic pub --once /camera_lidar/calib_cmd std_msgs/msg/String "data: save"
 ```
 
-## Farbe je Lidar-Punkt
+## Colour per lidar point
 
 ```bash
 ros2 run camera_lidar_fusion lidar_pixel_mapper
 ros2 topic pub --once /camera_lidar/capture std_msgs/msg/Empty "{}"
 ```
 
-Schreibt `/workspace/lidar_color_logs/lidar_pixels_<zeit>.csv` plus die
-verwendete Kalibrierung als `_calib.yaml` daneben. Spalten:
+Writes `/workspace/lidar_color_logs/lidar_pixels_<time>.csv` plus the
+calibration used as `_calib.yaml` next to it. Columns:
 
 ```
 stamp_sec, idx, angle_deg, range_m, x_m, y_m, z_m,
 u_px, v_px, theta_deg, phi_deg, b, g, r, h, s, v, label
 ```
 
-`label` ist `rot`, `gruen`, `magenta`, `schwarz` oder `unbekannt`.
+`label` is `red`, `green`, `magenta`, `black` or `unknown`.
 
-Welche Farben ueberhaupt gesucht werden, steuert `active_labels`. Der Parameter
-wird bei jedem Scan gelesen, laesst sich also im Betrieb umschalten -- anders
-als die Schwellen in `color.*`, die beim Start eingefroren werden:
-
-```bash
-ros2 param set /lidar_pixel_mapper active_labels "[rot,gruen]"
-ros2 param set /lidar_pixel_mapper active_labels "[rot,gruen,magenta]"
-```
-
-Magenta produziert in groesserer Entfernung leicht Fehltreffer und stoert nur,
-solange die Parkzone nicht gebraucht wird.
-`csv_mode:=continuous` haengt stattdessen jeden Scan an eine Datei an,
-`csv_mode:=off` schaltet die CSV ganz ab.
-
-## Debug-Ansicht in Foxglove
-
-Der Parameter `debug` (Default `true`) ist der Hauptschalter fuer die Anzeige:
+Which colours are searched for at all is controlled by `active_labels`. The parameter
+is read on every scan, so it can be switched while running -- unlike
+the thresholds in `color.*`, which are frozen at start-up:
 
 ```bash
-ros2 param set /lidar_pixel_mapper debug true    # an
-ros2 param set /lidar_pixel_mapper debug false   # aus, spart CPU im Lauf
+ros2 param set /lidar_pixel_mapper active_labels "[red,green]"
+ros2 param set /lidar_pixel_mapper active_labels "[red,green,magenta]"
 ```
 
-Ist er an, gehen zwei Topics raus:
+Magenta easily produces false hits at larger distances and only gets in the way
+as long as the parking zone is not needed.
+`csv_mode:=continuous` instead appends every scan to one file,
+`csv_mode:=off` switches the CSV off completely.
 
-* **`/camera_lidar/colored_scan`** -- `PointCloud2` mit RGB: jeder Lidar-Punkt an
-  seiner echten x/y-Position. Womit er eingefaerbt wird, entscheidet
+## Debug view in Foxglove
+
+The parameter `debug` (default `true`) is the main switch for the display:
+
+```bash
+ros2 param set /lidar_pixel_mapper debug true    # on
+ros2 param set /lidar_pixel_mapper debug false   # off, saves CPU in the run
+```
+
+If it is on, two topics go out:
+
+* **`/camera_lidar/colored_scan`** -- `PointCloud2` with RGB: every lidar point at
+  its real x/y position. What it is coloured with is decided by
   `cloud_color_mode`:
 
-  | Modus | Farbe | wofuer |
+  | Mode | Colour | what for |
   | --- | --- | --- |
-  | `label` (Default) | kraeftig je Label, Rest dunkelgrau | Pylonen finden |
-  | `raw` | die gemessene Pixelfarbe | Kalibrierung und Schwellen pruefen |
+  | `label` (default) | strong per label, rest dark grey | finding pylons |
+  | `raw` | the measured pixel colour | checking calibration and thresholds |
 
-  `label` nimmt die Palette `CLOUD_BGR` aus `colors.py`: rot `0xFF0000`, gruen
-  `0x00FF00`, magenta `0xFF00FF`, schwarz `0x2D2D2D`, unbekannt `0x555555`.
-  Die Werte sind exakt, ein Konsument kann also direkt darauf pruefen statt
-  Farbbereiche zu raten.
+  `label` uses the palette `CLOUD_BGR` from `colors.py`: red `0xFF0000`, green
+  `0x00FF00`, magenta `0xFF00FF`, black `0x2D2D2D`, unknown `0x555555`.
+  The values are exact, so a consumer can check for them directly instead of
+  guessing colour ranges.
 
-  Warum das noetig ist: am echten Aufbau gemessen liegen im `raw`-Modus
-  praktisch alle Punkte bei R/G/B um 20 bis 25 -- 1028 verschiedene Farbwerte,
-  aber allesamt dunkelgrauer Matsch, in dem sich rot und gruen kaum trennen
-  lassen. Im `label`-Modus sind es 4 eindeutige Werte.
+  Why this is needed: measured on the real setup, in `raw` mode
+  practically all points lie at R/G/B around 20 to 25 -- 1028 different colour values,
+  but all of them dark grey mush in which red and green can hardly be told
+  apart. In `label` mode there are 4 unambiguous values.
 
-  `raw` bleibt trotzdem die Ansicht, an der man sieht, ob die Kalibrierung
-  sitzt: stehen die roten Punkte auf dem roten Klotz, stimmt yaw.
+  `raw` still remains the view in which you see whether the calibration
+  is right: if the red points are on the red block, yaw is right.
 
-  In Foxglove ein 3D-Panel oeffnen, Topic abonnieren, Color-Mode auf `RGB`
-  stellen. Der Frame ist der des Lidars (bei `sllidar` = `laser`).
+  In Foxglove open a 3D panel, subscribe to the topic, set the colour mode to `RGB`.
+  The frame is the lidar's (for `sllidar` = `laser`).
 
   ```bash
   ros2 param set /lidar_pixel_mapper cloud_color_mode raw
   ros2 param set /lidar_pixel_mapper cloud_color_mode label
   ```
 
-  Der Parameter wird bei jedem Scan neu gelesen, wirkt also sofort -- anders
-  als die Farbschwellen `color.*`, die nur beim Start eingelesen werden.
-* **`/camera_lidar/debug_image`** -- dasselbe andersherum: das Fisheye-Bild mit
-  den eingezeichneten Projektionen, dem Bildkreis und einem Pfeil nach vorne.
+  The parameter is read again on every scan, so it takes effect immediately -- unlike
+  the colour thresholds `color.*`, which are only read at start-up.
+* **`/camera_lidar/debug_image`** -- the same the other way round: the fisheye image with
+  the projections drawn in, the image circle and an arrow to the front.
 
-Feiner steuerbar mit `publish_cloud`, `publish_debug_image` und `debug_rate_hz`
-(Default 5 Hz fuer das Bild; die PointCloud geht mit jedem Scan raus).
-`/camera_lidar/summary` zaehlt nur die Labels und laeuft immer.
+Finer control with `publish_cloud`, `publish_debug_image` and `debug_rate_hz`
+(default 5 Hz for the image; the PointCloud goes out with every scan).
+`/camera_lidar/summary` only counts the labels and always runs.
 
-Die Kalibrier-Node hat denselben Schalter fuer `/camera_lidar/calib_debug`.
+The calibration node has the same switch for `/camera_lidar/calib_debug`.
 
-### Das Debug-Bild: rund plus entzerrt
+### The debug image: round plus unwrapped
 
-`/camera_lidar/debug_image` liefert zwei Ansichten uebereinander. Oben das
-runde Fisheye mit Bildkreis, Horizontring, Zonengrenzen, den abgetasteten
-Segmenten in Label-Farbe und der gefundenen Bandenkante (magenta). Darunter ein
-**entzerrter Streifen**: Azimut waagerecht, Bildradius senkrecht.
+`/camera_lidar/debug_image` delivers two views on top of each other. At the top the
+round fisheye with image circle, horizon ring, zone limits, the sampled
+segments in label colour and the detected wall band edge (magenta). Below it an
+**unwrapped strip**: azimuth horizontal, image radius vertical.
 
-Der Streifen ist die nuetzlichere Ansicht. Im runden Bild liegt alles
-Interessante am aeusseren Rand und ist dort auf wenige Pixel
-zusammengedraengt; aufgerollt liegen die Schichten sauber uebereinander -- oben
-der Raum, darunter die schwarze Bande, ganz unten die helle Matte. Ob die
-Abgriffszone auf der Bande sitzt oder darueber hinweggreift, sieht man dort auf
-einen Blick, im runden Bild nicht.
+The strip is the more useful view. In the round image everything
+interesting lies at the outer edge and is squeezed into a few pixels
+there; unrolled, the layers sit cleanly on top of each other -- at the top
+the room, below it the black wall band, at the very bottom the bright mat. Whether the
+sampling zone sits on the wall band or reaches over it, you see there at
+a glance, in the round image you do not.
 
 ```bash
 ros2 param set /lidar_pixel_mapper debug_polar true
 ros2 param set /lidar_pixel_mapper debug_polar_height 150
 ```
 
-Die Kopfzeile nennt den Modus (`zone: Bande live` / `zone: kalibriert` /
-`zone: ... gerechnet`), den Stimmenanteil, die Punktzahl und wie viele Azimute
-die Bandensuche getroffen hat.
+The header line names the mode (`zone: wall band live` / `zone: calibrated` /
+`zone: ... computed`), the vote fraction, the point count and how many azimuths
+the band search has hit.
 
-## Rechenzeit im Betrieb
+## Compute time in operation
 
-Am Jetson gemessen (Momentanlast ueber /proc, 2100 Punkte je Scan, 15 Hz):
+Measured on the Jetson (instantaneous load via /proc, 2100 points per scan, 15 Hz):
 
-| Konfiguration | CPU |
+| Configuration | CPU |
 | --- | --- |
-| nur Klassifikation | 28 % eines Kerns |
-| + Bandenerkennung (`band_detect`, 15 Hz) | 56 % |
-| + Debug-Bild mit Polar-Streifen (5 Hz) | 94 % |
-| dasselbe mit `band_steps: 180` | 84 % |
+| classification only | 28 % of a core |
+| + wall band detection (`band_detect`, 15 Hz) | 56 % |
+| + debug image with polar strip (5 Hz) | 94 % |
+| the same with `band_steps: 180` | 84 % |
 
-Zwei Dinge sind daran bemerkenswert. Das **Debug-Bild ist der teuerste Posten**
-mit 38 Prozent, obwohl es nur mit 5 Hz laeuft -- Zeichnen und Polar-Entzerrung
-auf 1280x960 kosten. Im Wettkampflauf also `debug:=false`, das spart die 38
-Prozent sofort. Und die **Bandenerkennung kostet 28 Prozent**, weil sie bei
-jedem Scan laeuft; `band_steps: 180` statt 360 bringt davon 10 Prozent zurueck,
-bei 2 Grad Stuetzstellenabstand immer noch dicht genug fuer eine Bande.
+Two things are remarkable about this. The **debug image is the most expensive item**
+at 38 percent, although it only runs at 5 Hz -- drawing and polar unwrapping
+on 1280x960 cost. So in the competition run `debug:=false`, which saves the 38
+percent immediately. And the **wall band detection costs 28 percent**, because it runs on
+every scan; `band_steps: 180` instead of 360 gets 10 percent of that back,
+still dense enough for a wall band at 2 degrees between samples.
 
-Vorsicht bei der Messmethode: `ps -o pcpu` liefert den Durchschnitt ueber die
-gesamte Lebensdauer des Prozesses und taugt fuer einen Vorher/Nachher-Vergleich
-nicht. Die Zahlen oben stammen aus der Differenz von `utime + stime` in
-`/proc/<pid>/stat` ueber ein festes Intervall.
+Careful with the measuring method: `ps -o pcpu` gives the average over the
+whole lifetime of the process and is useless for a before/after comparison.
+The numbers above come from the difference of `utime + stime` in
+`/proc/<pid>/stat` over a fixed interval.
 
-Beim Optimieren war der groesste Brocken uebrigens nicht das, was man erwartet:
-der Medianfilter der Bandenerkennung kostete als Python-Schleife **17.7 von
-24 ms**; vektorisiert ueber ein Gleitfenster sind es 1.1 ms. Der V-Kanal
-dagegen bleibt bei `cv2.cvtColor` (3.8 ms) -- `img.max(axis=2)` liefert zwar
-dasselbe Ergebnis, braucht aber 34.9 ms.
+By the way, when optimising, the biggest chunk was not what you would expect:
+the median filter of the wall band detection cost **17.7 of
+24 ms** as a Python loop; vectorised over a sliding window it is 1.1 ms. The V channel,
+on the other hand, stays with `cv2.cvtColor` (3.8 ms) -- `img.max(axis=2)` does give
+the same result, but needs 34.9 ms.
 
 ## Launch
 
@@ -660,37 +657,37 @@ ros2 launch camera_lidar_fusion camera_lidar.launch.py mode:=calib
 ros2 launch camera_lidar_fusion camera_lidar.launch.py scan_topic:=/ldlidar_node/scan
 ```
 
-`scan_topic` steht auf `/scan` (was `sllidar_s3_launch.py` publiziert). Der
-aeltere Code in `robot_vision` haengt teils noch auf `/ldlidar_node/scan` --
-im Zweifel `ros2 topic list` fragen.
+`scan_topic` is set to `/scan` (what `sllidar_s3_launch.py` publishes). The
+older code in `robot_vision` partly still hangs on `/ldlidar_node/scan` --
+if in doubt, ask `ros2 topic list`.
 
-## Kalibrierdatei
+## Calibration file
 
-Gelesen und geschrieben wird `/workspace/config/fisheye_calib.yaml`
-(Parameter `calib_file`). Existiert sie nicht, greift die mitgelieferte Vorgabe
-aus `share/camera_lidar_fusion/config/fisheye_calib.yaml`.
+`/workspace/config/fisheye_calib.yaml` is read and written
+(parameter `calib_file`). If it does not exist, the default shipped in
+`share/camera_lidar_fusion/config/fisheye_calib.yaml` applies.
 
-Neben Bildkreis, Lage und Blindsektoren stehen dort die vier Koeffizienten der
-Abgriffszone:
+Besides image circle, pose and blind sectors it holds the four coefficients of the
+sampling zone:
 
 ```yaml
-zone_r0_in:  399.9    # r_innen(rho)  = zone_r0_in  + zone_k_in  / rho
+zone_r0_in:  399.9    # r_inner(rho) = zone_r0_in  + zone_k_in  / rho
 zone_k_in:    -2.31
-zone_r0_out: 400.1    # r_aussen(rho) = zone_r0_out + zone_k_out / rho
+zone_r0_out: 400.1    # r_outer(rho) = zone_r0_out + zone_k_out / rho
 zone_k_out:  +13.33
 ```
 
-Sind `zone_r0_out` und `zone_k_out` beide 0, gilt die Zone als nicht
-kalibriert und der Mapper faellt auf die gerechneten Hoehen zurueck. Die
-Startmeldung sagt `GEMESSEN` oder `GERECHNET`, damit man nicht raten muss.
+If `zone_r0_out` and `zone_k_out` are both 0, the zone counts as not
+calibrated and the mapper falls back to the computed heights. The
+start-up message says `MEASURED` or `COMPUTED`, so you do not have to guess.
 
 ## Tests
 
-Das Projektionsmodell laeuft ohne Hardware:
+The projection model runs without hardware:
 
 ```bash
 cd /workspace/src/camera_lidar_fusion && python3 -m pytest test/test_fisheye_model.py -q
 ```
 
-`test/fake_scan.py` publiziert einen synthetischen 360-Grad-Scan auf `/scan`,
-damit sich `lidar_pixel_mapper` auch ohne laufendes Lidar durchtesten laesst.
+`test/fake_scan.py` publishes a synthetic 360 degree scan on `/scan`,
+so that `lidar_pixel_mapper` can also be tested without a running lidar.

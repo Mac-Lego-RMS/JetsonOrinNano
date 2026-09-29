@@ -1,10 +1,10 @@
-"""Startet Lidar-Pixel-Mapping bzw. die Rotationskalibrierung.
+"""Starts the lidar pixel mapping or the rotation calibration.
 
     ros2 launch camera_lidar_fusion camera_lidar.launch.py
     ros2 launch camera_lidar_fusion camera_lidar.launch.py mode:=calib
     ros2 launch camera_lidar_fusion camera_lidar.launch.py scan_topic:=/ldlidar_node/scan
 
-Lidar und Kamera muessen bereits laufen (siehe start_robot.sh).
+Lidar and camera must already be running (see start_robot.sh).
 """
 
 from launch import LaunchDescription
@@ -31,7 +31,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('mode', default_value='map',
-                              description='map = Farbe je Lidar-Punkt, calib = Kalibrierung'),
+                              description='map = colour per lidar point, calib = calibration'),
         DeclareLaunchArgument('scan_topic', default_value='/scan'),
         DeclareLaunchArgument('image_topic', default_value='/video_source/raw'),
         DeclareLaunchArgument('calib_file', default_value=CALIB_FILE),
