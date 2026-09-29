@@ -502,7 +502,7 @@
       "internal_id": "",
       "mfg": "",
       "mpn": "",
-      "sch_revision": ""
+      "sch_revision": "6"
     },
     "layer_pairs": [],
     "layer_presets": [],
@@ -1044,7 +1044,7 @@
         "uuid": "7151ca28-a9e5-4f38-89bc-823cda88dfa4"
       }
     ],
-    "used_designators": "H1-4,#PWR90",
+    "used_designators": "",
     "variants": []
   },
   "sheets": [
