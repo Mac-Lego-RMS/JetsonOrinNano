@@ -1,4 +1,4 @@
-"""Hardware-freie Tests fuer Serialisierung und Parsing der ESP-Bridge."""
+"""Hardware-free tests for serialisation and parsing of the ESP bridge."""
 
 from esp_bridge.esp_serial_bridge import (
     CMD_BATTERY_WARN,
@@ -15,15 +15,15 @@ from esp_bridge.esp_serial_bridge import (
 )
 
 
-# --- Serialisierung: die *1000-Kodierung ist die Hauptfehlerquelle -----------
+# --- Serialisation: the *1000 encoding is the main source of errors ----------
 
 def test_pid_set_float_x1000():
-    # Kp = 4.5 -> 4500 als int32 big-endian
+    # Kp = 4.5 -> 4500 as int32 big-endian
     assert EspProtocol.pid_set(0, 4.5) == bytes([0xA5, 0x80, 0x00, 0x00, 0x00, 0x11, 0x94])
 
 
 def test_pid_set_integer_param_still_x1000():
-    # maxDuty = 700 MUSS als 700000 kodiert werden, nicht als 700.
+    # maxDuty = 700 MUST be encoded as 700000, not as 700.
     pkt = EspProtocol.pid_set(4, 700)
     assert pkt[:3] == bytes([0xA5, 0x80, 0x04])
     assert int.from_bytes(pkt[3:], 'big') == 700000
@@ -31,7 +31,7 @@ def test_pid_set_integer_param_still_x1000():
 
 def test_pid_set_timeout_large_value():
     # Timeout 15 s -> 15000000
-    pkt = EspProtocol.pid_set(7, 15000.0)  # ms als realer Wert
+    pkt = EspProtocol.pid_set(7, 15000.0)  # ms as a real value
     assert int.from_bytes(pkt[3:], 'big', signed=True) == 15000000
 
 
@@ -45,13 +45,13 @@ def test_motor_speed_clamped():
 
 
 def test_servo_negative_two_complement():
-    # -100 als int16 big-endian = 0xFF9C
+    # -100 as int16 big-endian = 0xFF9C
     assert EspProtocol.servo(1, -100) == bytes([0xA5, 0x20, 0x01, 0xFF, 0x9C])
     assert EspProtocol.servo(1, 100) == bytes([0xA5, 0x20, 0x01, 0x00, 0x64])
 
 
 def test_move_negative_target():
-    # -45.0 Grad -> -450 in 1/10 Grad
+    # -45.0 deg -> -450 in 1/10 deg
     pkt = EspProtocol.move(7, -450)
     assert pkt[:3] == bytes([0xA5, 0x90, 0x07])
     assert int.from_bytes(pkt[3:], 'big', signed=True) == -450
@@ -93,7 +93,7 @@ def test_ascii_text_between_packets():
 
 
 def test_unknown_cmd_resyncs():
-    # 0x99 ist unbekannt -> verwerfen, danach gueltiges Button-Paket erkennen.
+    # 0x99 is unknown -> drop it, then detect the valid button packet.
     stream = bytes([0xA5, 0x99, 0x12, 0xA5, CMD_BUTTON, 0x01])
     events = PacketParser().feed(stream)
     packets = [e for e in events if e[0] == EV_PACKET]
@@ -127,8 +127,8 @@ def test_progress_decode():
 
 def test_stale_partial_packet_is_dropped():
     parser = PacketParser(timeout=0.1)
-    # Angefangenes Paket bei t=0
+    # Partial packet at t=0
     parser.feed(bytes([0xA5, CMD_MOVE_DONE, 0x07]), now=0.0)
-    # Neuer, kompletter Button-Frame deutlich spaeter -> altes Teilpaket verworfen
+    # New, complete button frame much later -> old partial packet dropped
     events = parser.feed(bytes([0xA5, CMD_BUTTON, 0x01]), now=1.0)
     assert events == [(EV_PACKET, CMD_BUTTON, bytes([0x01]))]

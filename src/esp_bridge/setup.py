@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',
-    description='ROS-2-Bridge zum ESP32-S3-Controller.',
-    license='TODO: License declaration',
+    description='ROS 2 bridge to the ESP32-S3 controller.',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',

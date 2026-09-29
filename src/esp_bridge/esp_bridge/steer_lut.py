@@ -15,7 +15,7 @@ Sign convention: delta > 0 = left = servo > 0 ; delta < 0 = right = servo < 0.
 Usage in the bridge:
     self.steer_lut = SteerLUT(json_path, logger=self.get_logger())
     ...
-    servo = self.steer_lut.servo_for(omega, v_ist)   # returns servo in [-1, 1]
+    servo = self.steer_lut.servo_for(omega, v_actual)   # returns servo in [-1, 1]
 """
 
 import json
@@ -36,11 +36,11 @@ class SteerLUT:
         try:
             self._load(json_path)
             self.ok = True
-            self._info(f"SteerLUT geladen: {len(self._speeds)} Geschwindigkeiten "
+            self._info(f"SteerLUT loaded: {len(self._speeds)} speeds "
                        f"{[round(v,2) for v in self._speeds]}, L={self.wheelbase}")
         except Exception as e:
-            self._warn(f"SteerLUT konnte {json_path} nicht laden ({e}). "
-                       f"Fallback: lineare Notkennlinie.")
+            self._warn(f"SteerLUT could not load {json_path} ({e}). "
+                       f"Fallback: linear fallback curve.")
             self._build_fallback()
 
     # ---------------------------------------------------------------- loading
@@ -52,7 +52,7 @@ class SteerLUT:
         self.wheelbase = float(data.get("wheelbase", self.wheelbase))
         speeds = sorted(data["speeds"], key=lambda s: s["v"])
         if not speeds:
-            raise ValueError("keine Geschwindigkeiten in JSON")
+            raise ValueError("no speeds in JSON")
         for entry in speeds:
             v = float(entry["v"])
             left = sorted([(float(s), float(d)) for s, d in entry["left"]],  key=lambda p: p[1])
@@ -164,7 +164,7 @@ if __name__ == '__main__':
     import sys
     path = sys.argv[1] if len(sys.argv) > 1 else "steer_calib.json"
     lut = SteerLUT(path)
-    print("\nservo_for-Test (omega, v -> servo):")
+    print("\nservo_for test (omega, v -> servo):")
     for v in (0.35, 0.42, 0.50, 0.75):
         for omega in (-1.0, -0.5, 0.0, 0.5, 1.0):
             print(f"  v={v:.2f} omega={omega:+.2f} -> servo {lut.servo_for(omega, v):+.3f}")
