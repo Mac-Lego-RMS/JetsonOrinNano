@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
 """
-NUR ausparken -- eine der sechs Varianten, zum Einmessen und Anpassen.
+ONLY unpark -- one of the six variants, for calibrating and tuning.
 
-    python3 -m ekf.ausparken_varianten_node --ros-args -p lage:=mitte
-    python3 -m ekf.ausparken_varianten_node --ros-args -p lage:=innen -p richtung:=CW
-    python3 -m ekf.ausparken_varianten_node --ros-args -p lage:=aussen \\
-        -p schritte:="[0.0,0.0, 100.0,6.0, -100.0,-4.5, 100.0,9.6, 0.0,5.0, -100.0,24.0, 0.0,0.0]"
+    python3 -m ekf.unpark_variants_node --ros-args -p placement:=middle
+    python3 -m ekf.unpark_variants_node --ros-args -p placement:=inner -p direction:=CW
+    python3 -m ekf.unpark_variants_node --ros-args -p placement:=outer \\
+        -p steps:="[0.0,0.0, 100.0,6.0, -100.0,-4.5, 100.0,9.6, 0.0,5.0, -100.0,24.0, 0.0,0.0]"
 
-Die Varianten stehen in ausparken.py: SCHRITTE_{CW,CCW}_{INNEN,MITTE,AUSSEN}.
-Ablauf:
-  1. Fahrtrichtung aus dem Scan messen, so wie der Regler es tut (oder mit
-     richtung:=CW/CCW vorgeben). Damit ist die Variante festgelegt.
-  2. Trockenlauf gegen die Lueckenmasse: Kollision? Endlage laut Modell?
-  3. Countdown, dann die Zuege abfahren -- ueber denselben Zugfahrer wie der
-     Regler, also genau so, wie es spaeter im Lauf passiert.
-  4. Am Ende stehen bleiben und mit dem Lidar messen, wo er in der Spur steht:
-     Abstand zur Aussenbande und Kurs zur Bande.
-  5. Die gefahrene Liste zum Hineinkopieren nach ausparken.py ausgeben.
+The variants are in unpark.py: STEPS_{CW,CCW}_{INNER,MIDDLE,OUTER}.
+Sequence:
+  1. Measure the driving direction from the scan, the way the controller does it (or
+     preset it with direction:=CW/CCW). That fixes the variant.
+  2. Dry run against the bay dimensions: collision? Final pose according to the model?
+  3. Countdown, then drive the moves -- through the same move sequencer as the
+     controller, i.e. exactly the way it happens later in the run.
+  4. Stop at the end and measure with the lidar where it stands in the lane:
+     distance to the outer wall and heading to the wall.
+  5. Print the driven list for pasting into unpark.py.
 
-Mit schritte:=[...] faehrt er statt der Tabelle diese Liste -- zum Probieren,
-ohne ausparken.py anzufassen. Passt sie, kommt sie per Hand in die Tabelle.
+With steps:=[...] it drives this list instead of the table -- for trying things
+without touching unpark.py. If it fits, it goes into the table by hand.
 
-Zurueck in die Luecke stellt ihr ihn von Hand; es gibt keinen Rueckweg.
+You put it back into the bay by hand; there is no way back.
 
-Beim Start werden EKF und scan_processor frisch gestartet (Fenster 8/9, ueber
-den Neustart-Waechter in Fenster 11, siehe ekf/schaetzung_neustart.py) -- wie
-beim Regler. Abschalten: -p schaetzung_neustart:=false.
+At start-up the EKF and scan_processor are restarted fresh (windows 8/9, via
+the restart watchdog in window 11, see ekf/estimation_restart.py) -- as
+with the controller. To switch off: -p estimation_restart:=false.
 
-Laufen muessen esp_serial_bridge, IMU und Lidar (also start_robot.sh). Der
-Regler darf NICHT laufen: waehrend eines Zuges wirkt /cmd_vel nicht, und der
-Regler wuerde dazwischenfunken. Der Nothalt geht ueber
+esp_serial_bridge, IMU and lidar must be running (i.e. start_robot.sh). The
+controller must NOT be running: during a move /cmd_vel has no effect, and the
+controller would interfere. The emergency stop goes through
 /esp_serial_bridge/emergency.
 """
 import math
@@ -41,14 +41,14 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32, Float32MultiArray, Int32, Int32MultiArray
 
-from ekf.ausparken import (LAGEN, LENK_QUELLE, richtung_aus_scan,
-                           schritte_aus_flach, schritte_variante, simuliere,
-                           spiegeln, startpose, wenderadius)
-from ekf.schaetzung_neustart import neu_starten
+from ekf.unpark import (PLACEMENTS, STEER_SOURCE, direction_from_scan,
+                        steps_from_flat, steps_for_variant, simulate,
+                        mirror_steps, bay_start_pose, turn_radius_of)
+from ekf.estimation_restart import restart_estimation
 from ekf.wall_extraction import LIDAR_OFFSET_X, scan_to_points
-from ekf.zugfahrer import Fahrer, pose_text, wrap
+from ekf.move_sequencer import MoveSequencer, pose_text, wrap
 
-SPUR_BREITE = 1.00        # Aussenbande bis Innenbande auf der Startgeraden [m]
+LANE_WIDTH = 1.00        # outer wall to inner wall on the start straight [m]
 
 
 def yaw_from_quaternion(q):
@@ -56,39 +56,39 @@ def yaw_from_quaternion(q):
                       1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
 
-def im_startrahmen(start, pose):
-    """(laengs, quer, gier) von ``pose`` im Rahmen von ``start``."""
+def in_start_frame(start, pose):
+    """(long, lat, yaw) of ``pose`` in the frame of ``start``."""
     dx, dy = pose[0] - start[0], pose[1] - start[1]
     c, s = math.cos(start[2]), math.sin(start[2])
     return c * dx + s * dy, -s * dx + c * dy, wrap(pose[2] - start[2])
 
 
-def wand_messen(punkte, seite_links, max_abstand=0.9, halbwinkel_grad=55.0,
-                nur_vorn=True):
-    """Gerade durch die Wandpunkte auf einer Seite (Hauptachse).
+def measure_wall(points, side_left, max_dist=0.9, half_angle_deg=55.0,
+                 front_only=True):
+    """Line through the wall points on one side (principal axis).
 
-    ``punkte`` im base_link-Rahmen. Rueckgabe (Abstand von base_link [m],
-    Winkel der Wand gegen die Fahrzeuglaengsachse [rad], Punktzahl) oder None.
-    Der Winkel ist positiv, wenn die Wand nach vorn hin naeher kommt -- dann
-    zeigt die Nase auf die Wand zu.
+    ``points`` in the base_link frame. Returns (distance from base_link [m],
+    angle of the wall against the car's long axis [rad], point count) or None.
+    The angle is positive when the wall gets closer towards the front -- then
+    the nose points towards the wall.
     """
-    mitte = math.pi / 2.0 if seite_links else -math.pi / 2.0
-    w = np.arctan2(punkte[:, 1], punkte[:, 0])
-    r = np.hypot(punkte[:, 0], punkte[:, 1])
-    d = np.abs(np.arctan2(np.sin(w - mitte), np.cos(w - mitte)))
-    # Aussenbande nur vor der Hinterachse (nur_vorn): schraeg dahinter steht
-    # nach dem Ausparken die vordere Buchtwand, quer zur Bande -- sie wuerde
-    # die Gerade verdrehen. Die Innenbande dagegen endet oft schon knapp hinter
-    # dem Roboter (CCW: Inselecke bei x=0,25, er steht bei 0,29) und ist nur
-    # schraeg hinten zu sehen.
-    k = (d <= math.radians(halbwinkel_grad)) & (r <= max_abstand)
-    if nur_vorn:
-        k &= punkte[:, 0] >= 0.0
-    p = punkte[k]
+    middle = math.pi / 2.0 if side_left else -math.pi / 2.0
+    w = np.arctan2(points[:, 1], points[:, 0])
+    r = np.hypot(points[:, 0], points[:, 1])
+    d = np.abs(np.arctan2(np.sin(w - middle), np.cos(w - middle)))
+    # Outer wall only in front of the rear axle (front_only): diagonally behind
+    # it, after unparking, stands the front bay wall, perpendicular to the wall -- it would
+    # twist the line. The inner wall on the other hand often ends just behind
+    # the robot (CCW: island corner at x=0.25, it stands at 0.29) and can only be
+    # seen diagonally behind.
+    k = (d <= math.radians(half_angle_deg)) & (r <= max_dist)
+    if front_only:
+        k &= points[:, 0] >= 0.0
+    p = points[k]
     if len(p) < 8:
         return None
     for _ in range(2):
-        # zweimal: anpassen, Ausreisser (Pylone, Buchtreste) > 3 cm verwerfen
+        # twice: fit, drop outliers (pylons, bay remains) > 3 cm
         m = p.mean(axis=0)
         _u, _s, vt = np.linalg.svd(p - m)
         n = np.array([-vt[0][1], vt[0][0]])
@@ -98,56 +98,56 @@ def wand_messen(punkte, seite_links, max_abstand=0.9, halbwinkel_grad=55.0,
         p = p[rest <= 0.03]
     m = p.mean(axis=0)
     _u, _s, vt = np.linalg.svd(p - m)
-    richtung = vt[0]
-    if richtung[0] < 0:
-        richtung = -richtung
-    normale = np.array([-richtung[1], richtung[0]])
-    abstand = abs(float(normale @ m))
-    winkel = math.atan2(richtung[1], richtung[0])     # Wand gegen +x
-    # Rechts (y<0): kommt die Wand nach vorn naeher, steigt y -> winkel > 0.
-    # Links spiegelbildlich.
-    zu_wand = winkel if not seite_links else -winkel
-    return abstand, zu_wand, len(p)
+    direction = vt[0]
+    if direction[0] < 0:
+        direction = -direction
+    normal = np.array([-direction[1], direction[0]])
+    dist = abs(float(normal @ m))
+    angle = math.atan2(direction[1], direction[0])     # wall against +x
+    # Right (y<0): if the wall gets closer towards the front, y rises -> angle > 0.
+    # Left mirrored.
+    to_wall = angle if not side_left else -angle
+    return dist, to_wall, len(p)
 
 
-class AusparkVarianten(Node):
+class UnparkVariants(Node):
 
     def __init__(self):
-        super().__init__('ausparken_varianten')
+        super().__init__('unpark_variants')
         from rcl_interfaces.msg import ParameterDescriptor, ParameterType
         arr = ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE_ARRAY)
-        self.declare_parameter('lage', 'mitte')
-        self.declare_parameter('richtung', '')
-        self.declare_parameter('schritte', [0.0], arr)   # [0.0] = aus der Tabelle
+        self.declare_parameter('placement', 'middle')
+        self.declare_parameter('direction', '')
+        self.declare_parameter('steps', [0.0], arr)   # [0.0] = from the table
         self.declare_parameter('scans', 5)
-        self.declare_parameter('sektor_grad', 20.0)
-        self.declare_parameter('richtung_timeout', 8.0)
+        self.declare_parameter('sector_deg', 20.0)
+        self.declare_parameter('direction_timeout', 8.0)
         self.declare_parameter('countdown_s', 3.0)
-        self.declare_parameter('lenk_wartezeit', 0.6)
-        self.declare_parameter('zug_timeout', 15.0)
-        self.declare_parameter('weg_toleranz_cm', 1.0)
-        self.declare_parameter('mess_scans', 10)
+        self.declare_parameter('steer_wait_s', 0.6)
+        self.declare_parameter('move_timeout', 15.0)
+        self.declare_parameter('travel_tol_cm', 1.0)
+        self.declare_parameter('measure_scans', 10)
         self.declare_parameter('pid', [4.0, 140.0, 8.0, 90.0], arr)
-        self.declare_parameter('pid_nachher', [4.0, 1023.0], arr)
+        self.declare_parameter('pid_after', [4.0, 1023.0], arr)
 
-        self.lage = str(self.get_parameter('lage').value).strip().lower()
-        if self.lage not in LAGEN:
-            raise ValueError('lage muss %s sein, nicht "%s"'
-                             % (' / '.join(LAGEN), self.lage))
-        self.vorgabe = str(self.get_parameter('richtung').value).strip().upper()
-        if self.vorgabe not in ('', 'CW', 'CCW'):
-            raise ValueError('richtung muss leer, CW oder CCW sein')
-        eigene = [float(v) for v in self.get_parameter('schritte').value]
-        self.eigene = eigene if len(eigene) >= 2 else None
+        self.placement = str(self.get_parameter('placement').value).strip().lower()
+        if self.placement not in PLACEMENTS:
+            raise ValueError('placement must be %s, not "%s"'
+                             % (' / '.join(PLACEMENTS), self.placement))
+        self.preset_direction = str(self.get_parameter('direction').value).strip().upper()
+        if self.preset_direction not in ('', 'CW', 'CCW'):
+            raise ValueError('direction must be empty, CW or CCW')
+        custom = [float(v) for v in self.get_parameter('steps').value]
+        self.custom = custom if len(custom) >= 2 else None
 
         self.scans = max(1, int(self.get_parameter('scans').value))
-        self.sektor_grad = float(self.get_parameter('sektor_grad').value)
-        self.richtung_timeout = float(self.get_parameter('richtung_timeout').value)
+        self.sector_deg = float(self.get_parameter('sector_deg').value)
+        self.direction_timeout = float(self.get_parameter('direction_timeout').value)
         self.countdown_s = float(self.get_parameter('countdown_s').value)
-        self.lenk_wartezeit = float(self.get_parameter('lenk_wartezeit').value)
-        self.zug_timeout = float(self.get_parameter('zug_timeout').value)
-        self.weg_toleranz_cm = float(self.get_parameter('weg_toleranz_cm').value)
-        self.mess_scans = max(3, int(self.get_parameter('mess_scans').value))
+        self.steer_wait_s = float(self.get_parameter('steer_wait_s').value)
+        self.move_timeout = float(self.get_parameter('move_timeout').value)
+        self.travel_tol_cm = float(self.get_parameter('travel_tol_cm').value)
+        self.measure_scans = max(3, int(self.get_parameter('measure_scans').value))
 
         self.pub_steer = self.create_publisher(Float32, '/esp_serial_bridge/steer', 10)
         self.pub_move = self.create_publisher(Float32, '/esp_serial_bridge/move', 10)
@@ -160,30 +160,30 @@ class AusparkVarianten(Node):
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
 
         self.pose = None
-        self.zustand = 'WARTEN'
+        self.state = 'WAITING'
         self.t0 = self.now_s()
-        self.stimmen = []
-        self.letzter_grund = None
-        self.richtung = None
-        self.roh = None
+        self.votes = []
+        self.last_reason = None
+        self.direction = None
+        self.raw = None
         self.name = None
-        self.folge = None
-        self.fahrer = None
+        self.sequence = None
+        self.sequencer = None
         self.start_pose = None
-        self.messungen = []
-        self.modell_ende = None
+        self.measurements = []
+        self.model_end = None
 
         self.get_logger().info(
-            '>>> Ausparken, Variante "%s". Fahrtrichtung: %s <<<'
-            % (self.lage, self.vorgabe + ' (vorgegeben)' if self.vorgabe
-               else 'wird aus dem Scan gemessen'))
+            '>>> Unparking, variant "%s". Driving direction: %s <<<'
+            % (self.placement, self.preset_direction + ' (preset)' if self.preset_direction
+               else 'is measured from the scan'))
         self.get_logger().info(
-            'Lenkung: %s, Vollausschlag R = %.3f m.'
-            % (LENK_QUELLE or 'NOTNAGEL (steer_calib.json nicht gefunden!)',
-               wenderadius(100.0)))
+            'Steering: %s, full lock R = %.3f m.'
+            % (STEER_SOURCE or 'FALLBACK (steer_calib.json not found!)',
+               turn_radius_of(100.0)))
         self.create_timer(1.0 / 30.0, self.control_loop)
 
-    # ------------------------------------------------------------ Eingaenge
+    # --------------------------------------------------------------- Inputs
     def now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
 
@@ -192,193 +192,193 @@ class AusparkVarianten(Node):
         self.pose = (p.position.x, p.position.y, yaw_from_quaternion(p.orientation))
 
     def move_done_cb(self, msg):
-        if len(msg.data) >= 3 and self.fahrer is not None:
-            self.fahrer.quittung = (self.now_s(), int(msg.data[1]), msg.data[2] / 10.0)
+        if len(msg.data) >= 3 and self.sequencer is not None:
+            self.sequencer.ack = (self.now_s(), int(msg.data[1]), msg.data[2] / 10.0)
 
     def scan_cb(self, msg):
-        if self.zustand == 'RICHTUNG':
-            e = richtung_aus_scan(scan_to_points(msg), halbwinkel_grad=self.sektor_grad)
-            self.letzter_grund = e['grund']
-            if not e['sicher']:
-                self.stimmen = []
+        if self.state == 'DIRECTION':
+            e = direction_from_scan(scan_to_points(msg), half_angle_deg=self.sector_deg)
+            self.last_reason = e['reason']
+            if not e['confident']:
+                self.votes = []
                 return
-            if self.stimmen and self.stimmen[-1] != e['richtung']:
-                self.stimmen = []
-            self.stimmen.append(e['richtung'])
-        elif self.zustand == 'MESSEN':
+            if self.votes and self.votes[-1] != e['direction']:
+                self.votes = []
+            self.votes.append(e['direction'])
+        elif self.state == 'MEASURING':
             p = scan_to_points(msg)
             p = np.column_stack((p[:, 0] + LIDAR_OFFSET_X, p[:, 1]))   # -> base_link
-            self.messungen.append(p)
+            self.measurements.append(p)
 
-    def _pid(self, werte):
-        werte = list(werte)
-        for i in range(0, len(werte) - 1, 2):
-            self.pub_pid.publish(Float32MultiArray(data=[float(werte[i]), float(werte[i + 1])]))
+    def _pid(self, vals):
+        vals = list(vals)
+        for i in range(0, len(vals) - 1, 2):
+            self.pub_pid.publish(Float32MultiArray(data=[float(vals[i]), float(vals[i + 1])]))
 
-    def _abbruch(self, grund):
+    def _abort(self, reason):
         self.pub_motor.publish(Int32(data=0))
-        self._pid(self.get_parameter('pid_nachher').value)
-        self.get_logger().error('Abgebrochen: %s' % grund)
+        self._pid(self.get_parameter('pid_after').value)
+        self.get_logger().error('Aborted: %s' % reason)
         if self.pose is not None:
-            self.get_logger().error('           steht bei  %s' % pose_text(self.pose))
+            self.get_logger().error('           stands at  %s' % pose_text(self.pose))
         raise SystemExit(1)
 
-    # ---------------------------------------------------------- Vorbereitung
-    def _folge_festlegen(self, richtung, quelle):
-        self.richtung = richtung
-        if self.eigene:
-            self.roh, self.name = list(self.eigene), 'schritte:= (Kommandozeile)'
+    # ----------------------------------------------------------- Preparation
+    def _choose_sequence(self, direction, source):
+        self.direction = direction
+        if self.custom:
+            self.raw, self.name = list(self.custom), 'steps:= (command line)'
         else:
-            self.roh, self.name = schritte_variante(richtung, self.lage)
-        roh_paare = schritte_aus_flach(self.roh)
-        self.folge = spiegeln(roh_paare, richtung == 'CCW')
+            self.raw, self.name = steps_for_variant(direction, self.placement)
+        raw_pairs = steps_from_flat(self.raw)
+        self.sequence = mirror_steps(raw_pairs, direction == 'CCW')
         log = self.get_logger()
-        log.info('Fahrtrichtung %s (%s) -> %s, %d Zuege, %.0f cm Weg.'
-                 % (richtung, quelle, self.name, len(self.folge),
-                    sum(abs(cm) for _l, cm in self.folge)))
+        log.info('Driving direction %s (%s) -> %s, %d moves, %.0f cm travel.'
+                 % (direction, source, self.name, len(self.sequence),
+                    sum(abs(cm) for _l, cm in self.sequence)))
 
-        # Trockenlauf im Lueckenrahmen: Aussenbande y=0, offene Seite +y.
-        e = simuliere(spiegeln(roh_paare, True))
-        x0 = startpose()[0]
-        ende = e['endpose']
-        self.modell_ende = ende
-        log.info('Trockenlauf: %s, engster Abstand %.0f mm zu Magenta, %.0f mm '
-                 'zur Aussenbande, %s.'
-                 % ('KOLLISION in Zug %d' % e['bei_schritt'] if e['kollision']
-                    else 'keine Kollision',
-                    e['magenta_abstand_m'] * 1000, e['wand_abstand_m'] * 1000,
-                    'am Ende frei' if e['frei'] else 'am Ende NOCH IN DER LUECKE'))
-        log.info('Modell-Endlage: base_link %.1f cm von der Aussenbande (Spurmitte '
-                 '= %.0f cm), %.1f cm voraus, Kurs %+.1f grad.'
-                 % (ende[1] * 100, SPUR_BREITE * 50, (ende[0] - x0) * 100,
-                    math.degrees(ende[2])))
-        if e['kollision']:
-            log.warn('Die Folge geht rechnerisch nicht auf -- sie wird trotzdem '
-                     'gefahren, das Modell kann von der Luecke abweichen. '
-                     'Hand an den Nothalt.')
+        # Dry run in the bay frame: outer wall y=0, open side +y.
+        e = simulate(mirror_steps(raw_pairs, True))
+        x0 = bay_start_pose()[0]
+        end = e['end_pose']
+        self.model_end = end
+        log.info('Dry run: %s, closest distance %.0f mm to magenta, %.0f mm '
+                 'to the outer wall, %s.'
+                 % ('COLLISION in move %d' % e['at_step'] if e['collision']
+                    else 'no collision',
+                    e['magenta_dist_m'] * 1000, e['wall_dist_m'] * 1000,
+                    'clear at the end' if e['clear'] else 'STILL IN THE BAY at the end'))
+        log.info('Model final pose: base_link %.1f cm from the outer wall (lane centre '
+                 '= %.0f cm), %.1f cm ahead, heading %+.1f deg.'
+                 % (end[1] * 100, LANE_WIDTH * 50, (end[0] - x0) * 100,
+                    math.degrees(end[2])))
+        if e['collision']:
+            log.warn('The sequence does not work out on paper -- it is driven '
+                     'anyway, the model can differ from the bay. '
+                     'Hand on the emergency stop.')
 
-    # ---------------------------------------------------------------- Takt
+    # ------------------------------------------------------------------ Tick
     def control_loop(self):
         if self.pose is None:
-            self.get_logger().warn('warte auf /ekf/odom -- laeuft ekf_node?',
+            self.get_logger().warn('waiting for /ekf/odom -- is ekf_node running?',
                                    throttle_duration_sec=2.0)
             return
-        jetzt = self.now_s()
+        t_now = self.now_s()
 
-        if self.zustand == 'WARTEN':
-            fehlt = [n for n, pub in (('steer', self.pub_steer), ('move', self.pub_move),
-                                      ('pid_set', self.pub_pid), ('motor', self.pub_motor))
-                     if pub.get_subscription_count() == 0]
-            if fehlt:
-                self.get_logger().info('warte auf die Bruecke (%s)' % ', '.join(fehlt),
+        if self.state == 'WAITING':
+            missing = [n for n, pub in (('steer', self.pub_steer), ('move', self.pub_move),
+                                        ('pid_set', self.pub_pid), ('motor', self.pub_motor))
+                       if pub.get_subscription_count() == 0]
+            if missing:
+                self.get_logger().info('waiting for the bridge (%s)' % ', '.join(missing),
                                        throttle_duration_sec=1.0)
-                if jetzt - self.t0 > 15.0:
-                    self._abbruch('Bruecke hoert nicht zu (%s)' % ', '.join(fehlt))
+                if t_now - self.t0 > 15.0:
+                    self._abort('bridge is not listening (%s)' % ', '.join(missing))
                 return
-            self.t0 = jetzt
-            if self.vorgabe:
-                self._folge_festlegen(self.vorgabe, 'vorgegeben')
-                self.zustand = 'COUNTDOWN'
+            self.t0 = t_now
+            if self.preset_direction:
+                self._choose_sequence(self.preset_direction, 'preset')
+                self.state = 'COUNTDOWN'
             else:
-                self.zustand = 'RICHTUNG'
-                self.get_logger().info('suche die offene Seite, %d einige Scans noetig.'
+                self.state = 'DIRECTION'
+                self.get_logger().info('looking for the open side, %d agreeing scans needed.'
                                        % self.scans)
             return
 
-        if self.zustand == 'RICHTUNG':
-            if len(self.stimmen) < self.scans:
-                if jetzt - self.t0 > self.richtung_timeout:
-                    self._abbruch('keine eindeutige Fahrtrichtung in %.0f s -- zuletzt: %s. '
-                                  'Steht er in der Luecke? Sonst richtung:=CW oder CCW.'
-                                  % (self.richtung_timeout,
-                                     self.letzter_grund or 'kein /scan empfangen'))
+        if self.state == 'DIRECTION':
+            if len(self.votes) < self.scans:
+                if t_now - self.t0 > self.direction_timeout:
+                    self._abort('no clear driving direction in %.0f s -- last: %s. '
+                                'Is it standing in the bay? Otherwise direction:=CW or CCW.'
+                                % (self.direction_timeout,
+                                   self.last_reason or 'no /scan received'))
                 return
-            self._folge_festlegen(self.stimmen[-1], 'aus dem Scan gemessen')
-            self.zustand = 'COUNTDOWN'
-            self.t0 = jetzt
+            self._choose_sequence(self.votes[-1], 'measured from the scan')
+            self.state = 'COUNTDOWN'
+            self.t0 = t_now
             return
 
-        if self.zustand == 'COUNTDOWN':
-            rest = self.countdown_s - (jetzt - self.t0)
+        if self.state == 'COUNTDOWN':
+            rest = self.countdown_s - (t_now - self.t0)
             if rest > 0.0:
-                self.get_logger().warn('Start in %.0f s -- er FAEHRT gleich.' % math.ceil(rest),
+                self.get_logger().warn('Start in %.0f s -- it is about to DRIVE.' % math.ceil(rest),
                                        throttle_duration_sec=0.9)
                 return
             self._pid(self.get_parameter('pid').value)
             self.start_pose = self.pose
-            self.get_logger().info('Start bei  %s' % pose_text(self.pose))
-            self.fahrer = Fahrer(self, self.folge, 'AUSPARKEN')
-            self.zustand = 'FAHREN'
+            self.get_logger().info('Start at  %s' % pose_text(self.pose))
+            self.sequencer = MoveSequencer(self, self.sequence, 'UNPARK')
+            self.state = 'DRIVING'
             return
 
-        if self.zustand == 'FAHREN':
-            if self.fahrer.takt(jetzt, self.pose):
-                if self.fahrer.fehler:
-                    self._abbruch(self.fahrer.fehler)
-                self._pid(self.get_parameter('pid_nachher').value)
-                self.messungen = []
-                self.zustand = 'MESSEN'
-                self.t0 = jetzt
+        if self.state == 'DRIVING':
+            if self.sequencer.tick(t_now, self.pose):
+                if self.sequencer.error:
+                    self._abort(self.sequencer.error)
+                self._pid(self.get_parameter('pid_after').value)
+                self.measurements = []
+                self.state = 'MEASURING'
+                self.t0 = t_now
             return
 
-        if self.zustand == 'MESSEN':
-            # erst kurz ausruhen lassen, dann ein paar Scans sammeln
-            if jetzt - self.t0 < 0.5:
-                self.messungen = []
+        if self.state == 'MEASURING':
+            # first let it settle briefly, then collect a few scans
+            if t_now - self.t0 < 0.5:
+                self.measurements = []
                 return
-            if len(self.messungen) < self.mess_scans and jetzt - self.t0 < 4.0:
+            if len(self.measurements) < self.measure_scans and t_now - self.t0 < 4.0:
                 return
-            self._bericht()
+            self._report()
             raise SystemExit(0)
 
-    # -------------------------------------------------------------- Bericht
-    def _bericht(self):
+    # ---------------------------------------------------------------- Report
+    def _report(self):
         log = self.get_logger()
-        laengs, quer, gier = im_startrahmen(self.start_pose, self.pose)
-        ende = self.modell_ende
-        log.info('=== %s, Fahrtrichtung %s ===' % (self.name, self.richtung))
-        log.info('Odometrie ab Start: %.1f cm voraus, %.1f cm zur offenen Seite, '
-                 'Kurs %+.1f grad zur Startlage'
-                 % (laengs * 100, (quer if self.richtung == 'CCW' else -quer) * 100,
-                    math.degrees(gier if self.richtung == 'CCW' else -gier)))
-        log.info('           steht bei  %s' % pose_text(self.pose))
+        long, lat, yaw = in_start_frame(self.start_pose, self.pose)
+        end = self.model_end
+        log.info('=== %s, driving direction %s ===' % (self.name, self.direction))
+        log.info('Odometry from the start: %.1f cm ahead, %.1f cm to the open side, '
+                 'heading %+.1f deg to the start pose'
+                 % (long * 100, (lat if self.direction == 'CCW' else -lat) * 100,
+                    math.degrees(yaw if self.direction == 'CCW' else -yaw)))
+        log.info('           stands at  %s' % pose_text(self.pose))
 
-        offen_links = self.richtung == 'CCW'
-        if self.messungen:
-            p = np.vstack(self.messungen)
-            aussen = wand_messen(p, seite_links=not offen_links)
-            # Die Innenbande ist hier nicht verlaesslich zu messen: der Roboter
-            # steht nach dem Ausparken genau neben der Inselecke (Lauf 16:
-            # "Spur 1,28 m"). Die Spur ist im Hindernisrennen aber immer
-            # SPUR_BREITE breit -- die Lage folgt aus der Aussenbande allein.
-            if aussen:
-                a, w, n = aussen
-                log.info('Lidar: Aussenbande %.1f cm von base_link (Modell %.1f), '
-                         'Kurs %+.1f grad zur Bande (%s)  [%d Punkte]'
-                         % (a * 100, ende[1] * 100, math.degrees(w),
-                            'Nase zur Bande' if w > 0 else 'Nase zur Spurmitte', n))
-                log.info('Lage in der Spur: %.0f %% von aussen (0 = Aussenbande, '
-                         '50 = Mitte, 100 = Innenbande), bei %.2f m Spurbreite.'
-                         % (100 * a / SPUR_BREITE, SPUR_BREITE))
+        open_left = self.direction == 'CCW'
+        if self.measurements:
+            p = np.vstack(self.measurements)
+            outer = measure_wall(p, side_left=not open_left)
+            # The inner wall cannot be measured reliably here: after unparking the robot
+            # stands right next to the island corner (run 16:
+            # "lane 1.28 m"). In the obstacle race the lane is always
+            # LANE_WIDTH wide though -- the position follows from the outer wall alone.
+            if outer:
+                a, w, n = outer
+                log.info('Lidar: outer wall %.1f cm from base_link (model %.1f), '
+                         'heading %+.1f deg to the wall (%s)  [%d points]'
+                         % (a * 100, end[1] * 100, math.degrees(w),
+                            'nose towards the wall' if w > 0 else 'nose towards the lane centre', n))
+                log.info('Position in the lane: %.0f %% from the outside (0 = outer wall, '
+                         '50 = centre, 100 = inner wall), at %.2f m lane width.'
+                         % (100 * a / LANE_WIDTH, LANE_WIDTH))
             else:
-                log.warn('Lidar: Aussenbande nicht gefunden (zu nah oder verdeckt).')
+                log.warn('Lidar: outer wall not found (too close or hidden).')
         else:
-            log.warn('Keine Scans fuer die Endmessung empfangen.')
+            log.warn('No scans received for the final measurement.')
 
-        # zum Hineinkopieren
-        paare = ',\n'.join('    %6.1f, %5.1f' % (self.roh[i], self.roh[i + 1])
-                           for i in range(0, len(self.roh), 2))
-        tabelle = ('SCHRITTE_%s_%s' % (self.richtung, self.lage.upper())
-                   if not self.name.startswith('SCHRITTE') else self.name)
-        log.info('Gefahrene Liste fuer ausparken.py:\n%s = [\n%s,\n]' % (tabelle, paare))
+        # for pasting in
+        pairs = ',\n'.join('    %6.1f, %5.1f' % (self.raw[i], self.raw[i + 1])
+                           for i in range(0, len(self.raw), 2))
+        table = ('STEPS_%s_%s' % (self.direction, self.placement.upper())
+                 if not self.name.startswith('STEPS') else self.name)
+        log.info('Driven list for unpark.py:\n%s = [\n%s,\n]' % (table, pairs))
 
 
 def main(args=None):
     rclpy.init(args=args)
-    # Vor dem eigenen Knoten: sonst kaemen die gelatchten Topics noch vom
-    # alten scan_processor.
-    neu_starten('ausparken_varianten')
-    node = AusparkVarianten()
+    # Before our own node: otherwise the latched topics would still come from the
+    # old scan_processor.
+    restart_estimation('unpark_variants')
+    node = UnparkVariants()
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, SystemExit):

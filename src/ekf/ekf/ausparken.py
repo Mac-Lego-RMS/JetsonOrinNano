@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
 """
-Ausparken aus der Startluecke (ROS-frei, testbar).
+Unparking out of the start bay (ROS-free, testable).
 
-GEOMETRIE. Die beiden Magenta-Waende stehen SENKRECHT auf dem Aussenwall und
-ragen 20 cm ins Feld. Die Luecke ist der Spalt zwischen ihnen, 1,5 x
-Fahrzeuglaenge = 26,25 cm. Der Roboter steht laengs darin, seine Laengsachse
-also parallel zum Aussenwall. Er muss damit SEITLICH heraus -- und das geht
-bei Ackermann-Lenkung nur ueber Rangieren. Mit 17,5 cm Fahrzeuglaenge bleiben
-8,75 cm Laengsspiel; ein Zug dreht bei Vollausschlag rund 13 Grad.
+GEOMETRY. The two magenta walls stand PERPENDICULAR to the outer wall and
+reach 20 cm into the field. The bay is the gap between them, 1.5 x
+car length = 26.25 cm. The robot stands lengthwise in it, its long axis
+parallel to the outer wall. So it has to get out SIDEWAYS -- and with
+Ackermann steering that only works by manoeuvring. With a 17.5 cm car length
+there are 8.75 cm of long clearance; one move at full lock turns about 13 deg.
 
-Hier drin stecken drei Dinge:
+Three things live in here:
 
-  richtung_aus_scan()  Welche Seite ist offen? Die NAHE Seite ist der
-                       Aussenwall, die FERNE das Spielfeld. Feld rechts -> CW,
-                       Feld links -> CCW. Das folgt aus field_map.py:
-                       START_POSES_CW setzt den Roboter auf y=+1,0 mit Kurs
-                       +x, also Aussenwall (y=+1,5) links und Innenblock
-                       (y=+0,5) rechts; der Kommentar darunter sagt fuer CCW
-                       ausdruecklich "inner wall to the left".
+  direction_from_scan()  Which side is open? The NEAR side is the
+                         outer wall, the FAR side the playing field. Field right -> CW,
+                         field left -> CCW. This follows from field_map.py:
+                         START_POSES_CW puts the robot at y=+1.0 with heading
+                         +x, so outer wall (y=+1.5) on the left and inner block
+                         (y=+0.5) on the right; the comment below it says for CCW
+                         explicitly "inner wall to the left".
 
-  Ausparkplan          Die Schrittfolge in cm und Lenkprozent. Positive
-                       Lenkung heisst IMMER "zur offenen Seite" -- die Tabelle
-                       ist damit richtungsfrei, gespiegelt wird erst beim
-                       Ausfuehren.
+  Unpark plan            The step sequence in cm and steering percent. Positive
+                         steering ALWAYS means "towards the open side" -- so the table
+                         is direction-free, it is only mirrored when it is
+                         executed.
 
-  simuliere()          Trockenlauf: faehrt die Tabelle im Kopf und prueft jede
-                       Zwischenlage gegen die Lueckenmasse. Damit laesst sich
-                       eine neue Schrittfolge pruefen, ohne den Roboter gegen
-                       eine Wand zu setzen.
+  simulate()             Dry run: drives the table in its head and checks every
+                         intermediate pose against the bay dimensions. That way a
+                         new step sequence can be checked without driving the robot
+                         into a wall.
 
-Der Weg wird ueber den Encoder gemessen, nicht ueber den Lidar: unterhalb
-0,15 m (range_min) liefert der Lidar keine Punkte, und in der Luecke ist die
-naechste Wand genau dort.
+The travel is measured with the encoder, not with the lidar: below
+0.15 m (range_min) the lidar returns no points, and in the bay the
+nearest wall is exactly there.
 """
 import io
 import json
@@ -41,470 +41,469 @@ import os
 import numpy as np
 
 
-# --- Fahrzeug ------------------------------------------------------------
-# base_link sitzt auf der HINTERACHSE. Der Ueberhang nach hinten ist deshalb
-# nur 3,5 cm, was den Heckausschlag beim Einlenken auf 1,7 mm begrenzt.
-FZ_BREITE = 0.110
-FZ_LAENGE = 0.175
-FZ_NASE = 0.140                      # nose_offset aus round1_controller_node
-FZ_HECK = FZ_NASE - FZ_LAENGE        # = -0.035
+# --- Car -----------------------------------------------------------------
+# base_link sits on the REAR AXLE. The rear overhang is therefore only
+# 3.5 cm, which limits the tail swing when turning in to 1.7 mm.
+CAR_WIDTH = 0.110
+CAR_LENGTH = 0.175
+CAR_NOSE = 0.140                      # nose_offset from round1_controller_node
+CAR_REAR = CAR_NOSE - CAR_LENGTH        # = -0.035
 
-# --- Luecke --------------------------------------------------------------
-LUECKE_LAENGE = 1.5 * FZ_LAENGE      # 0.2625 m, Vorgabe aus dem Reglement
-LUECKE_TIEFE = 0.200                 # wie weit die Magenta-Waende ins Feld ragen
-# Dicke der Magenta-Waende. Entscheidend, auch wenn sie klein ist: die
-# Waende sind BALKEN, keine Mauern. Sobald der Roboter an einer vorbei
-# ist, ist er frei -- er muss sie nicht seitlich umfahren. Wer sie als
-# Halbebene rechnet, verbietet Folgen, die in Wirklichkeit passen.
-LUECKE_WANDDICKE = 0.020
+# --- Bay -----------------------------------------------------------------
+BAY_LENGTH = 1.5 * CAR_LENGTH      # 0.2625 m, given by the rules
+BAY_DEPTH = 0.200                 # how far the magenta walls reach into the field
+# Thickness of the magenta walls. It matters, even though it is small: the
+# walls are BARS, not solid walls. As soon as the robot is past one, it is
+# clear -- it does not have to drive around it sideways. Whoever treats them
+# as a half-plane forbids sequences that actually fit.
+BAY_WALL_THICKNESS = 0.020
 
-# --- Lenkung -------------------------------------------------------------
-# Kennlinie, Trimm und Radstand kommen aus der GEMESSENEN Kalibrierung,
-# esp_bridge/steer_calib.json -- derselben Datei, aus der auch die
-# Bruecke ihre Lenkung speist. Nichts davon wird hier abgeschrieben: wer neu
-# kalibriert, soll nicht daran denken muessen, es an zweiter Stelle
-# nachzutragen.
+# --- Steering ------------------------------------------------------------
+# Curve, trim and wheelbase come from the MEASURED calibration,
+# esp_bridge/steer_calib.json -- the same file the bridge feeds its
+# steering from. None of it is copied here: whoever recalibrates should
+# not have to remember to enter it in a second place.
 #
-# Nur wenn die Datei fehlt, greifen die Werte unten -- sie sind ein Abzug vom
-# 08.09.2026 und stehen ausdruecklich als Notnagel da. Der Trockenlauf sagt
-# dann auch, dass er raet.
-STEER_CALIB_UMGEBUNG = 'STEER_CALIB'     # Pfad per Umgebungsvariable
+# Only if the file is missing do the values below apply -- they are a copy from
+# 08.09.2026 and are there explicitly as a last-resort fallback. The dry run
+# then also says that it is guessing.
+STEER_CALIB_ENV = 'STEER_CALIB'     # path via environment variable
 
-NOT_KENNLINIE = [
+FALLBACK_CURVE = [
     (-100.0, -17.76), (-80.0, -14.29), (-65.0, -11.61),
     (-50.0, -9.42), (-35.0, -5.33), (-2.0, 0.0),
     (35.0, 7.60), (50.0, 10.07), (65.0, 12.66),
     (80.0, 14.56), (100.0, 18.10),
 ]
-NOT_MITTE = -2.0
-NOT_RADSTAND = 0.10
+FALLBACK_CENTER = -2.0
+FALLBACK_WHEELBASE = 0.10
 
 
-def steer_calib_pfade():
-    """Wo nach steer_calib.json gesucht wird, in dieser Reihenfolge."""
-    pfade = []
-    aus_umgebung = os.environ.get(STEER_CALIB_UMGEBUNG)
-    if aus_umgebung:
-        pfade.append(aus_umgebung)
-    # Nachbarpaket im selben Workspace. __file__ aufloesen, weil dieses Modul
-    # ueber den colcon-Symlink build/ekf/ekf/ geladen wird.
-    hier = os.path.dirname(os.path.realpath(__file__))
-    src = os.path.dirname(os.path.dirname(hier))          # .../src
-    pfade.append(os.path.join(src, 'esp_bridge', 'esp_bridge',
+def steer_calib_paths():
+    """Where steer_calib.json is searched for, in this order."""
+    paths = []
+    from_env = os.environ.get(STEER_CALIB_ENV)
+    if from_env:
+        paths.append(from_env)
+    # Neighbour package in the same workspace. Resolve __file__, because this
+    # module is loaded through the colcon symlink build/ekf/ekf/.
+    here = os.path.dirname(os.path.realpath(__file__))
+    src = os.path.dirname(os.path.dirname(here))          # .../src
+    paths.append(os.path.join(src, 'esp_bridge', 'esp_bridge',
                               'steer_calib.json'))
-    pfade.append('/workspace/src/esp_bridge/esp_bridge/steer_calib.json')
-    # Altlast: bis September 2026 lag die Datei im wall_follower_robot-Paket.
-    pfade.append(os.path.join(src, 'wall_follower_robot',
+    paths.append('/workspace/src/esp_bridge/esp_bridge/steer_calib.json')
+    # Legacy: until September 2026 the file lived in the wall_follower_robot package.
+    paths.append(os.path.join(src, 'wall_follower_robot',
                               'wall_follower_robot', 'steer_calib.json'))
-    pfade.append('/workspace/src/wall_follower_robot/wall_follower_robot/'
+    paths.append('/workspace/src/wall_follower_robot/wall_follower_robot/'
                  'steer_calib.json')
-    return pfade
+    return paths
 
 
-def lade_lenkkennlinie(pfad=None, tempo=None):
-    """steer_calib.json einlesen.
+def load_steer_curve(path=None, speed=None):
+    """Read steer_calib.json.
 
-    ``tempo`` waehlt die Geschwindigkeitsstufe; ohne Angabe die LANGSAMSTE.
-    Beim Ausparken kriecht der Roboter, und die Kennlinie haengt vom Tempo ab
-    (bei mehr Tempo schmiert der Reifen und der wirksame Lenkwinkel sinkt).
+    ``speed`` picks the speed step; without it the SLOWEST.
+    When unparking the robot creeps, and the curve depends on the speed
+    (at more speed the tyre slips and the effective steering angle drops).
 
-    Rueckgabe: (kennlinie, mitte, radstand, quelle) mit der Kennlinie als
-    aufsteigende Liste (prozent, grad). ``quelle`` ist der benutzte Pfad oder
-    None, wenn nichts gelesen werden konnte.
+    Returns: (curve, centre, wheelbase, source) with the curve as an
+    ascending list (percent, deg). ``source`` is the path used or
+    None if nothing could be read.
     """
-    versucht = []
-    for kandidat in ([pfad] if pfad else steer_calib_pfade()):
+    tried = []
+    for candidate in ([path] if path else steer_calib_paths()):
         try:
-            with io.open(kandidat, encoding='utf-8') as f:
-                daten = json.load(f)
-            stufen = sorted(daten['speeds'], key=lambda e: float(e['v']))
-            if not stufen:
-                raise ValueError('keine Geschwindigkeitsstufe enthalten')
-            if tempo is None:
-                stufe = stufen[0]
+            with io.open(candidate, encoding='utf-8') as f:
+                data = json.load(f)
+            speed_steps = sorted(data['speeds'], key=lambda e: float(e['v']))
+            if not speed_steps:
+                raise ValueError('no speed step contained')
+            if speed is None:
+                speed_step = speed_steps[0]
             else:
-                stufe = min(stufen, key=lambda e: abs(float(e['v']) - tempo))
-            punkte = {}
-            for seite in ('left', 'right'):
-                for servo, delta_rad in stufe[seite]:
-                    # servo -1..1 -> Prozent; die Mitte steht in beiden Seiten
-                    punkte[round(float(servo) * 100.0, 6)] = \
+                speed_step = min(speed_steps, key=lambda e: abs(float(e['v']) - speed))
+            points = {}
+            for side in ('left', 'right'):
+                for servo, delta_rad in speed_step[side]:
+                    # servo -1..1 -> percent; the centre point is in both sides
+                    points[round(float(servo) * 100.0, 6)] = \
                         math.degrees(float(delta_rad))
-            if len(punkte) < 3:
-                raise ValueError('zu wenige Stuetzpunkte')
-            kennlinie = sorted(punkte.items())
-            # Der Trimm ist der Punkt, an dem die Lenkung wirklich gerade
-            # steht -- nicht 0 Prozent.
-            mitte = min(kennlinie, key=lambda pd: abs(pd[1]))[0]
-            radstand = float(daten.get('wheelbase', NOT_RADSTAND))
-            return kennlinie, mitte, radstand, kandidat
-        except Exception as fehler:
-            versucht.append('%s: %s' % (kandidat, fehler))
+            if len(points) < 3:
+                raise ValueError('too few support points')
+            curve = sorted(points.items())
+            # The trim is the point where the steering really is straight
+            # -- not 0 percent.
+            middle = min(curve, key=lambda pd: abs(pd[1]))[0]
+            wheelbase = float(data.get('wheelbase', FALLBACK_WHEELBASE))
+            return curve, middle, wheelbase, candidate
+        except Exception as error:
+            tried.append('%s: %s' % (candidate, error))
 
-    lade_lenkkennlinie.versucht = versucht
-    return NOT_KENNLINIE, NOT_MITTE, NOT_RADSTAND, None
+    load_steer_curve.tried = tried
+    return FALLBACK_CURVE, FALLBACK_CENTER, FALLBACK_WHEELBASE, None
 
 
-LENK_KENNLINIE, LENK_MITTE, RADSTAND, LENK_QUELLE = lade_lenkkennlinie()
+STEER_CURVE, STEER_CENTER, WHEELBASE, STEER_SOURCE = load_steer_curve()
 
 
 # --- Encoder -------------------------------------------------------------
-# r_eff aus ekf.py: 0,0150 m pro rad der Ausgangswelle (Strecken-Kalibrierung
-# 2,41 m / 10431 Ticks). 1 cm sind damit 38,2 Grad Wellendrehung; die
-# Aufloesung auf der Leitung ist 0,1 Grad = 26 Mikrometer.
+# r_eff from ekf.py: 0.0150 m per rad of the output shaft (distance calibration
+# 2.41 m / 10431 ticks). 1 cm is therefore 38.2 deg of shaft rotation; the
+# resolution on the wire is 0.1 deg = 26 micrometres.
 R_EFF = 0.0150
 
 
-def cm_zu_grad(cm, r_eff=R_EFF):
-    """Fahrweg in cm -> Drehung der Ausgangswelle in Grad."""
+def cm_to_deg(cm, r_eff=R_EFF):
+    """Travel in cm -> rotation of the output shaft in deg."""
     return (cm / 100.0) / r_eff * 180.0 / math.pi
 
 
-def grad_zu_cm(grad, r_eff=R_EFF):
-    return grad * math.pi / 180.0 * r_eff * 100.0
+def deg_to_cm(deg, r_eff=R_EFF):
+    return deg * math.pi / 180.0 * r_eff * 100.0
 
 
-def lenkwinkel(prozent):
-    """Lenkprozent -> Lenkwinkel in rad, aus der gemessenen Kennlinie."""
-    xs = [p for p, _ in LENK_KENNLINIE]
-    ys = [math.radians(d) for _, d in LENK_KENNLINIE]
-    return float(np.interp(float(prozent), xs, ys))
+def steer_angle(percent):
+    """Steering percent -> steering angle in rad, from the measured curve."""
+    xs = [p for p, _ in STEER_CURVE]
+    ys = [math.radians(d) for _, d in STEER_CURVE]
+    return float(np.interp(float(percent), xs, ys))
 
 
-def wenderadius(prozent, radstand=RADSTAND):
-    """Wenderadius in m. Unendlich (None) bei Geradeausstellung."""
-    delta = lenkwinkel(prozent)
+def turn_radius_of(percent, wheelbase=WHEELBASE):
+    """Turn radius in m. Infinite (None) when steering straight."""
+    delta = steer_angle(percent)
     if abs(delta) < 1e-4:
         return None
-    return radstand / math.tan(abs(delta))
+    return wheelbase / math.tan(abs(delta))
 
 
 # =========================================================================
-# Fahrtrichtung aus einem einzelnen Scan
+# Driving direction from a single scan
 # =========================================================================
 
-def richtung_aus_scan(punkte, halbwinkel_grad=20.0, min_punkte=5,
-                      max_verhaeltnis=2.0):
-    """CW/CCW aus einem Scan in der Parkluecke.
+def direction_from_scan(points, half_angle_deg=20.0, min_points=5,
+                        max_ratio=2.0):
+    """CW/CCW from a scan in the parking bay.
 
-    ``punkte``: (N,2)-Feld im Roboterrahmen (REP-103, +x vorwaerts, +y links),
-    also genau das, was ``wall_extraction.scan_to_points`` liefert.
+    ``points``: (N,2) array in the robot frame (REP-103, +x forward, +y left),
+    i.e. exactly what ``wall_extraction.scan_to_points`` returns.
 
-    Verglichen werden zwei schmale Sektoren um +-90 Grad. Der Sektor bleibt
-    schmal, damit die beiden Magenta-Waende vorn und hinten nicht hineinragen.
+    Two narrow sectors around +-90 deg are compared. The sector stays
+    narrow so that the two magenta walls front and rear do not reach into it.
 
-    Die nahe Seite ist der Aussenwall. Sie liefert oft GAR KEINE Punkte, weil
-    der Lidar unter range_min (0,15 m) nichts zurueckgibt und die Wand in der
-    Luecke etwa 0,145 m entfernt steht -- knapp darunter. Eine leere Seite ist
-    deshalb kein Fehler, sondern das Signal "hier ist die Wand".
+    The near side is the outer wall. It often gives NO points AT ALL, because
+    the lidar returns nothing below range_min (0.15 m) and the wall in the
+    bay is about 0.145 m away -- just below. An empty side is
+    therefore not an error, but the signal "the wall is here".
 
-    Rueckgabe:
-        {'richtung': 'CW'|'CCW'|None, 'sicher': bool,
-         'links_m': float|None, 'rechts_m': float|None,
-         'links_n': int, 'rechts_n': int, 'grund': str}
+    Returns:
+        {'direction': 'CW'|'CCW'|None, 'confident': bool,
+         'left_m': float|None, 'right_m': float|None,
+         'left_n': int, 'right_n': int, 'reason': str}
     """
-    leer = {'richtung': None, 'sicher': False, 'links_m': None,
-            'rechts_m': None, 'links_n': 0, 'rechts_n': 0}
+    empty = {'direction': None, 'confident': False, 'left_m': None,
+             'right_m': None, 'left_n': 0, 'right_n': 0}
 
-    pts = np.asarray(punkte, dtype=float)
+    pts = np.asarray(points, dtype=float)
     if pts.ndim != 2 or pts.shape[0] == 0:
-        return dict(leer, grund='kein Punkt im Scan')
+        return dict(empty, reason='no point in the scan')
 
-    winkel = np.arctan2(pts[:, 1], pts[:, 0])
-    reichweite = np.hypot(pts[:, 0], pts[:, 1])
-    tol = math.radians(halbwinkel_grad)
+    angle = np.arctan2(pts[:, 1], pts[:, 0])
+    ranges = np.hypot(pts[:, 0], pts[:, 1])
+    tol = math.radians(half_angle_deg)
 
-    def seite(mitte):
-        d = np.abs(np.arctan2(np.sin(winkel - mitte), np.cos(winkel - mitte)))
-        treffer = reichweite[d <= tol]
-        if treffer.size == 0:
+    def side(middle):
+        d = np.abs(np.arctan2(np.sin(angle - middle), np.cos(angle - middle)))
+        hits = ranges[d <= tol]
+        if hits.size == 0:
             return None, 0
-        return float(np.median(treffer)), int(treffer.size)
+        return float(np.median(hits)), int(hits.size)
 
-    links_m, links_n = seite(math.pi / 2.0)
-    rechts_m, rechts_n = seite(-math.pi / 2.0)
-    mess = dict(leer, links_m=links_m, rechts_m=rechts_m,
-                links_n=links_n, rechts_n=rechts_n)
+    left_m, left_n = side(math.pi / 2.0)
+    right_m, right_n = side(-math.pi / 2.0)
+    meas = dict(empty, left_m=left_m, right_m=right_m,
+                left_n=left_n, right_n=right_n)
 
-    genug_l = links_n >= min_punkte
-    genug_r = rechts_n >= min_punkte
+    enough_l = left_n >= min_points
+    enough_r = right_n >= min_points
 
-    if not genug_l and not genug_r:
-        return dict(mess, grund='beide Seiten leer -- steht der Roboter frei?')
+    if not enough_l and not enough_r:
+        return dict(meas, reason='both sides empty -- is the robot standing in the open?')
 
-    # Genau eine Seite leer: die leere ist die Wand, die andere das Feld.
-    if genug_l != genug_r:
-        feld_links = genug_l
-        return dict(mess, richtung='CCW' if feld_links else 'CW', sicher=True,
-                    grund=('links %.2f m, rechts ohne Rueckgabe (Wand unter range_min)'
-                           % links_m) if feld_links else
-                          ('rechts %.2f m, links ohne Rueckgabe (Wand unter range_min)'
-                           % rechts_m))
+    # Exactly one side empty: the empty one is the wall, the other the field.
+    if enough_l != enough_r:
+        field_left = enough_l
+        return dict(meas, direction='CCW' if field_left else 'CW', confident=True,
+                    reason=('left %.2f m, right without return (wall below range_min)'
+                            % left_m) if field_left else
+                           ('right %.2f m, left without return (wall below range_min)'
+                            % right_m))
 
-    # Beide Seiten sichtbar: die deutlich fernere ist das Feld.
-    fern, nah = max(links_m, rechts_m), min(links_m, rechts_m)
-    feld_links = links_m > rechts_m
-    sicher = fern >= max_verhaeltnis * nah
-    return dict(mess, richtung=('CCW' if feld_links else 'CW') if sicher else None,
-                sicher=sicher,
-                grund='links %.2f m, rechts %.2f m%s'
-                      % (links_m, rechts_m,
-                         '' if sicher else ' -- zu aehnlich, keine Entscheidung'))
+    # Both sides visible: the clearly farther one is the field.
+    far, near = max(left_m, right_m), min(left_m, right_m)
+    field_left = left_m > right_m
+    confident = far >= max_ratio * near
+    return dict(meas, direction=('CCW' if field_left else 'CW') if confident else None,
+                confident=confident,
+                reason='left %.2f m, right %.2f m%s'
+                       % (left_m, right_m,
+                          '' if confident else ' -- too similar, no decision'))
 
 
 # =========================================================================
-# Schrittfolge
+# Step sequence
 # =========================================================================
 
-def schritte_aus_flach(flach):
-    """[lenk1, cm1, lenk2, cm2, ...] -> [(lenk, cm), ...].
+def steps_from_flat(flat):
+    """[steer1, cm1, steer2, cm2, ...] -> [(steer, cm), ...].
 
-    Eine flache Liste, weil ROS-Parameter nur homogene Felder koennen.
+    A flat list, because ROS parameters can only hold homogeneous arrays.
     """
-    werte = [float(v) for v in flach]
-    if len(werte) % 2 != 0:
-        raise ValueError('Schrittliste braucht Paare aus Lenkung und cm, '
-                         'bekam %d Werte' % len(werte))
-    schritte = []
-    for i in range(0, len(werte), 2):
-        lenk, cm = werte[i], werte[i + 1]
-        if not -100.0 <= lenk <= 100.0:
-            raise ValueError('Lenkung %.1f %% ausserhalb -100..100' % lenk)
-        schritte.append((lenk, cm))
-    return schritte
+    vals = [float(v) for v in flat]
+    if len(vals) % 2 != 0:
+        raise ValueError('step list needs pairs of steering and cm, '
+                         'got %d values' % len(vals))
+    steps = []
+    for i in range(0, len(vals), 2):
+        steer, cm = vals[i], vals[i + 1]
+        if not -100.0 <= steer <= 100.0:
+            raise ValueError('steering %.1f %% outside -100..100' % steer)
+        steps.append((steer, cm))
+    return steps
 
 
-def lenk_auf_leitung(anteil):
-    """Tabellenwert (-100..100, Anteil des Vollausschlags) -> Servoprozent.
+def steer_to_wire(fraction):
+    """Table value (-100..100, fraction of full lock) -> servo percent.
 
-    Der Trimm LENK_MITTE ist der NULLPUNKT der Lenkung, kein Versatz: 0 in der
-    Tabelle muss als -2 % rausgehen, +-100 aber als genau +-100, sonst
-    verlangen wir mehr als den Anschlag und der ESP klemmt stillschweigend.
-    Also linear vom Trimm zum jeweiligen Anschlag skalieren.
+    The trim STEER_CENTER is the ZERO POINT of the steering, not an offset: 0 in the
+    table must go out as -2 %, but +-100 as exactly +-100, otherwise
+    we ask for more than the end stop and the ESP clamps silently.
+    So scale linearly from the trim to the respective end stop.
     """
-    a = max(-100.0, min(100.0, float(anteil)))
-    spanne = (100.0 - LENK_MITTE) if a >= 0.0 else (100.0 + LENK_MITTE)
-    return LENK_MITTE + spanne * a / 100.0
+    a = max(-100.0, min(100.0, float(fraction)))
+    span = (100.0 - STEER_CENTER) if a >= 0.0 else (100.0 + STEER_CENTER)
+    return STEER_CENTER + span * a / 100.0
 
 
-def spiegeln(schritte, offen_links):
-    """Tabelle auf die tatsaechliche Seite drehen und auf die Leitung bringen.
+def mirror_steps(steps, open_left):
+    """Turn the table to the actual side and bring it onto the wire.
 
-    In der Tabelle heisst positive Lenkung "zur offenen Seite". Liegt die
-    offene Seite links (CCW), stimmt das Vorzeichen schon; liegt sie rechts
-    (CW), wird gespiegelt.
+    In the table positive steering means "towards the open side". If the
+    open side is on the left (CCW), the sign is already right; if it is on the
+    right (CW), it gets mirrored.
     """
-    vz = 1.0 if offen_links else -1.0
-    return [(lenk_auf_leitung(vz * lenk), cm) for lenk, cm in schritte]
+    sign = 1.0 if open_left else -1.0
+    return [(steer_to_wire(sign * steer), cm) for steer, cm in steps]
 
 
 # =========================================================================
-# Trockenlauf
+# Dry run
 # =========================================================================
 
-def ecken(pose, breite=FZ_BREITE, nase=FZ_NASE, heck=FZ_HECK):
-    """Die vier Fahrzeugecken in Weltkoordinaten."""
+def car_corners(pose, width=CAR_WIDTH, nose=CAR_NOSE, rear=CAR_REAR):
+    """The four car corners in world coordinates."""
     x, y, th = pose
     c, s = math.cos(th), math.sin(th)
-    halb = breite / 2.0
+    half = width / 2.0
     return [(x + c * lx - s * ly, y + s * lx + c * ly)
-            for lx, ly in ((nase, -halb), (nase, halb),
-                           (heck, halb), (heck, -halb))]
+            for lx, ly in ((nose, -half), (nose, half),
+                           (rear, half), (rear, -half))]
 
 
-def _bogen(pose, strecke, radius, links):
-    """Eine Teilstrecke fahren. ``radius`` None = geradeaus."""
+def _arc(pose, dist, radius, left):
+    """Drive one segment. ``radius`` None = straight."""
     x, y, th = pose
     if radius is None:
-        return (x + math.cos(th) * strecke, y + math.sin(th) * strecke, th)
-    vz = 1.0 if links else -1.0
-    dth = vz * strecke / radius
-    px = x - vz * radius * math.sin(th)
-    py = y + vz * radius * math.cos(th)
+        return (x + math.cos(th) * dist, y + math.sin(th) * dist, th)
+    sign = 1.0 if left else -1.0
+    dth = sign * dist / radius
+    px = x - sign * radius * math.sin(th)
+    py = y + sign * radius * math.cos(th)
     nth = th + dth
-    return (px + vz * radius * math.sin(nth),
-            py - vz * radius * math.cos(nth), nth)
+    return (px + sign * radius * math.sin(nth),
+            py - sign * radius * math.cos(nth), nth)
 
 
-def bahn(startpose, schritte, feinheit=0.002):
-    """Alle Zwischenlagen als [(pose, schritt_nr)]. schritt_nr zaehlt ab 1,
-    die Startpose bekommt 0."""
-    pose = tuple(startpose)
-    posen = [(pose, 0)]
-    for nr, (lenk, cm) in enumerate(schritte, 1):
-        strecke = cm / 100.0
-        R = wenderadius(lenk)
-        links = lenk > LENK_MITTE
-        n = max(1, int(abs(strecke) / feinheit))
+def trajectory(start, steps, resolution=0.002):
+    """All intermediate poses as [(pose, step_no)]. step_no counts from 1,
+    the start pose gets 0."""
+    pose = tuple(start)
+    poses = [(pose, 0)]
+    for step_no, (steer, cm) in enumerate(steps, 1):
+        dist = cm / 100.0
+        R = turn_radius_of(steer)
+        left = steer > STEER_CENTER
+        n = max(1, int(abs(dist) / resolution))
         for i in range(1, n + 1):
-            posen.append((_bogen(pose, strecke * i / n, R, links), nr))
-        pose = posen[-1][0]
-    return posen
+            poses.append((_arc(pose, dist * i / n, R, left), step_no))
+        pose = poses[-1][0]
+    return poses
 
 
-def startpose(rueckstand=0.0, laengsspiel=0.004,
-              tiefe=LUECKE_TIEFE, breite=FZ_BREITE):
-    """Abstellpose in der Luecke.
+def bay_start_pose(setback=0.0, long_clearance=0.004,
+                   depth=BAY_DEPTH, width=CAR_WIDTH):
+    """Parked pose in the bay.
 
-    Nullpunkt: Aussenwall bei y=0, INNENKANTE der hinteren Magenta-Wand bei
-    x=0, Kurs +x (also entlang der Bahn). ``rueckstand`` ist der Abstand der
-    Innenflanke von den Wandspitzen, ``laengsspiel`` die Luft zwischen Heck
-    und hinterer Wand.
+    Origin: outer wall at y=0, INNER EDGE of the rear magenta wall at
+    x=0, heading +x (i.e. along the lane). ``setback`` is the distance of the
+    inner flank from the wall tips, ``long_clearance`` the gap between rear
+    and rear wall.
     """
-    return (-FZ_HECK + laengsspiel, tiefe - breite / 2.0 - rueckstand, 0.0)
+    return (-CAR_REAR + long_clearance, depth - width / 2.0 - setback, 0.0)
 
 
-# --- Flaechen und ihre Ueberschneidung -----------------------------------
+# --- Areas and their overlap ---------------------------------------------
 
-def rechteck(x0, x1, y0, y1):
+def rectangle(x0, x1, y0, y1):
     return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
 
 
-def hindernisse(laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
-                dicke=LUECKE_WANDDICKE):
-    """Die beiden Magenta-Balken als Rechtecke, links und rechts der Luecke."""
-    return [rechteck(-dicke, 0.0, 0.0, tiefe),
-            rechteck(laenge, laenge + dicke, 0.0, tiefe)]
+def bay_walls(length=BAY_LENGTH, depth=BAY_DEPTH,
+              thickness=BAY_WALL_THICKNESS):
+    """The two magenta bars as rectangles, left and right of the bay."""
+    return [rectangle(-thickness, 0.0, 0.0, depth),
+            rectangle(length, length + thickness, 0.0, depth)]
 
 
-def schlitz(laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE):
-    """Der Raum ZWISCHEN den Waenden. Wer ihn verlassen hat, ist ausgeparkt."""
-    return rechteck(0.0, laenge, 0.0, tiefe)
+def bay_slot(length=BAY_LENGTH, depth=BAY_DEPTH):
+    """The space BETWEEN the walls. Whoever has left it is unparked."""
+    return rectangle(0.0, length, 0.0, depth)
 
 
-def ueberlappen(a, b):
-    """Schneiden sich zwei konvexe Vierecke? Trennachsensatz.
+def overlaps(a, b):
+    """Do two convex quadrilaterals intersect? Separating axis theorem.
 
-    Eckenvergleiche allein reichen hier NICHT: ein 2 cm dicker Balken kann
-    quer durch den Roboter gehen, ohne dass eine Ecke von beiden im jeweils
-    anderen liegt -- genau die Lage, die beim Ausparken entsteht.
+    Comparing corners alone is NOT enough here: a 2 cm thick bar can go
+    straight through the robot without a corner of either lying inside the
+    other -- exactly the situation that comes up when unparking.
     """
     for poly in (a, b):
         n = len(poly)
         for i in range(n):
             (x1, y1), (x2, y2) = poly[i], poly[(i + 1) % n]
-            achse = (-(y2 - y1), x2 - x1)
-            betrag = math.hypot(*achse)
-            if betrag < 1e-12:
+            axis = (-(y2 - y1), x2 - x1)
+            norm = math.hypot(*axis)
+            if norm < 1e-12:
                 continue
-            achse = (achse[0] / betrag, achse[1] / betrag)
-            amin = min(px * achse[0] + py * achse[1] for px, py in a)
-            amax = max(px * achse[0] + py * achse[1] for px, py in a)
-            bmin = min(px * achse[0] + py * achse[1] for px, py in b)
-            bmax = max(px * achse[0] + py * achse[1] for px, py in b)
+            axis = (axis[0] / norm, axis[1] / norm)
+            amin = min(px * axis[0] + py * axis[1] for px, py in a)
+            amax = max(px * axis[0] + py * axis[1] for px, py in a)
+            bmin = min(px * axis[0] + py * axis[1] for px, py in b)
+            bmax = max(px * axis[0] + py * axis[1] for px, py in b)
             if amax <= bmin + 1e-12 or bmax <= amin + 1e-12:
                 return False
     return True
 
 
-def _punkt_strecke(p, a, b):
+def _point_segment_dist(p, a, b):
     px, py = p
     ax, ay = a
     bx, by = b
     dx, dy = bx - ax, by - ay
-    laenge2 = dx * dx + dy * dy
-    if laenge2 < 1e-18:
+    length2 = dx * dx + dy * dy
+    if length2 < 1e-18:
         return math.hypot(px - ax, py - ay)
-    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / laenge2))
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length2))
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
-def abstand(a, b):
-    """Kleinster Abstand zweier konvexer Vierecke. 0 bei Ueberschneidung."""
-    if ueberlappen(a, b):
+def poly_distance(a, b):
+    """Smallest distance between two convex quadrilaterals. 0 if they overlap."""
+    if overlaps(a, b):
         return 0.0
-    kleinster = float('inf')
-    for erst, zweit in ((a, b), (b, a)):
-        n = len(zweit)
-        for punkt in erst:
+    smallest = float('inf')
+    for first, second in ((a, b), (b, a)):
+        n = len(second)
+        for point in first:
             for i in range(n):
-                kleinster = min(kleinster,
-                                _punkt_strecke(punkt, zweit[i], zweit[(i + 1) % n]))
-    return kleinster
+                smallest = min(smallest,
+                               _point_segment_dist(point, second[i], second[(i + 1) % n]))
+    return smallest
 
 
-def simuliere(schritte, start=None, tiefe=LUECKE_TIEFE,
-              laenge=LUECKE_LAENGE, rand=0.008, dicke=LUECKE_WANDDICKE):
-    """Trockenlauf gegen die Lueckenmasse.
+def simulate(steps, start=None, depth=BAY_DEPTH,
+             length=BAY_LENGTH, margin=0.008, thickness=BAY_WALL_THICKNESS):
+    """Dry run against the bay dimensions.
 
-    Die Magenta-Waende sind Rechtecke der Dicke ``dicke`` -- Balken, keine
-    Mauern. Der Aussenwall bei y=0 ist eine harte Grenze.
+    The magenta walls are rectangles of thickness ``thickness`` -- bars, not
+    solid walls. The outer wall at y=0 is a hard limit.
 
-    ``kollision`` meint ECHTES Ueberlappen, nicht "zu wenig Reserve". Die
-    Reserve steht getrennt in den Abstaenden: wer den Roboter mit dem Heck an
-    die hintere Wand stellt, faengt eben mit 0 mm an -- das ist knapp, aber
-    keine Kollision. ``rand`` ist nur die Schwelle, ab der ``knapp`` gesetzt
-    wird.
+    ``collision`` means REAL overlap, not "too little reserve". The
+    reserve is kept separately in the distances: whoever parks the robot with the
+    rear against the rear wall simply starts at 0 mm -- that is tight, but
+    not a collision. ``margin`` is only the threshold from which ``tight`` is
+    set.
 
-    Rueckgabe:
-        {'frei': bool, 'kollision': bool, 'knapp': bool, 'endpose',
-         'wand_abstand_m'    kleinster Abstand einer Ecke zum Aussenwall,
-         'magenta_abstand_m' kleinster Abstand zu einer Magenta-Wand,
-         'bei_schritt'       Nummer des Zuges, in dem es zuerst aufsetzt,
-         'posen'}
+    Returns:
+        {'clear': bool, 'collision': bool, 'tight': bool, 'end_pose',
+         'wall_dist_m'    smallest distance of a corner to the outer wall,
+         'magenta_dist_m' smallest distance to a magenta wall,
+         'at_step'       number of the move in which it first touches,
+         'poses'}
     """
     if start is None:
-        start = startpose(tiefe=tiefe)
-    posen = bahn(start, schritte)
-    balken = hindernisse(laenge, tiefe, dicke)
-    raum = schlitz(laenge, tiefe)
-    wand = float('inf')
+        start = bay_start_pose(depth=depth)
+    poses = trajectory(start, steps)
+    bars = bay_walls(length, depth, thickness)
+    space = bay_slot(length, depth)
+    wall = float('inf')
     magenta = float('inf')
-    bei = None
+    at = None
 
-    for pose, nr in posen:
-        auto = ecken(pose)
-        wand = min(wand, min(py for (_px, py) in auto))
-        d = min(abstand(auto, b) for b in balken)
+    for pose, step_no in poses:
+        car = car_corners(pose)
+        wall = min(wall, min(py for (_px, py) in car))
+        d = min(poly_distance(car, b) for b in bars)
         magenta = min(magenta, d)
-        if bei is None and (wand < 0.0 or d <= 0.0):
-            bei = nr
+        if at is None and (wall < 0.0 or d <= 0.0):
+            at = step_no
 
-    ende = posen[-1][0]
-    frei = not ueberlappen(ecken(ende), raum)
-    return {'frei': frei, 'kollision': bei is not None,
-            'knapp': magenta < rand or wand < rand, 'endpose': ende,
-            'wand_abstand_m': wand, 'magenta_abstand_m': magenta,
-            'bei_schritt': bei, 'posen': posen}
+    end = poses[-1][0]
+    clear = not overlaps(car_corners(end), space)
+    return {'clear': clear, 'collision': at is not None,
+            'tight': magenta < margin or wall < margin, 'end_pose': end,
+            'wall_dist_m': wall, 'magenta_dist_m': magenta,
+            'at_step': at, 'poses': poses}
 
 
-# --- Standardfolge -------------------------------------------------------
-# Ausgerechnet fuer 20 cm tiefe Waende, Innenflanke buendig mit den Spitzen,
-# 1 cm Luft zur hinteren Wand, 8 mm Reserve zu den Magenta-Waenden.
+# --- Default sequence ----------------------------------------------------
+# Worked out for 20 cm deep walls, inner flank flush with the tips,
+# 1 cm gap to the rear wall, 8 mm reserve to the magenta walls.
 #
-# Vier Rangierzuege drehen den Roboter auf 35 Grad -- mehr geht in 26,25 cm
-# Luecke nicht, weil er SEITLICH heraus muss und dafuer nur 8,75 cm
-# Laengsspiel hat. Dann traegt ihn ein Bogen aus der Luecke, und ein
-# Gegenbogen legt ihn wieder auf Bahnkurs. Er endet bei y = 0,47 m, also
-# fast auf der Spurmitte (Spur 1,00 m breit).
+# Four manoeuvring moves turn the robot to 35 deg -- more does not fit in a 26.25 cm
+# bay, because it has to get out SIDEWAYS and only has 8.75 cm of
+# long clearance for that. Then an arc carries it out of the bay, and a
+# counter-arc puts it back on the lane heading. It ends at y = 0.47 m, i.e.
+# almost on the lane centre (lane 1.00 m wide).
 #
-# Positive Lenkung heisst ZUR OFFENEN SEITE, negative Strecke rueckwaerts.
-SCHRITTE_STANDARD = [
+# Positive steering means TOWARDS THE OPEN SIDE, negative travel is reverse.
+STEPS_DEFAULT = [
      0.0,  0.0,
-     100.0,   6.0,     # vorwaerts, voll zur offenen Seite
-    -100.0,  -4.5,     # rueckwaerts, voll zur Wandseite
+     100.0,   6.0,     # forward, full towards the open side
+    -100.0,  -4.5,     # reverse, full towards the wall side
      100.0,   9.6,
      0.0, 5.0,
-    -100.0, 21.0,     # Bogen aus der Luecke heraus    # Gegenbogen zurueck auf Bahnkurs
+    -100.0, 21.0,     # arc out of the bay    # counter-arc back onto the lane heading
      0.0,  0.0,
 ]
 
 
-# Je Fahrtrichtung eine eigene Folge, wenn sie gebraucht wird.
+# One sequence of its own per driving direction, if it is needed.
 #
-# Gespiegelt wird ohnehin (positive Lenkung heisst "zur offenen Seite"), aber
-# das reicht nur, solange der Roboter in beiden Faellen GLEICH in der Luecke
-# steht. Tut er das nicht, sind es andere Wege, nicht nur andere Vorzeichen.
+# It is mirrored anyway (positive steering means "towards the open side"), but
+# that is only enough as long as the robot stands in the bay the SAME way in both
+# cases. If it does not, they are different paths, not just different signs.
 #
-# Leer heisst: SCHRITTE_STANDARD gilt. Wer nur eine Richtung anders braucht,
-# fuellt nur diese -- die andere bleibt leer und folgt weiter dem Standard.
-# Gemessen am 11.09.2026 (je 5-7 Laeufe, Handmessung an den Radnaben):
-# Die Rangierzuege 1-4 sind in beiden Richtungen gleich, nur der Schlussbogen
-# unterscheidet sich -- die Lenkung ist im Rangiertempo asymmetrisch, und das
-# Spiegeln allein gleicht das nicht aus. Beide Folgen enden bei 0 grad.
-#   CW : Schlussbogen 27,0 cm -> Kurs +0,6 grad, base_link 37,0 cm zur Aussenbande
-#   CCW: Schlussbogen 21,0 cm -> Kurs  0,0 grad, base_link 34,5 cm zur Aussenbande
-SCHRITTE_CW_AUSSEN  = [
+# Empty means: STEPS_DEFAULT applies. Whoever needs only one direction different
+# fills only that one -- the other stays empty and keeps following the default.
+# Measured on 11.09.2026 (5-7 runs each, hand measurement at the wheel hubs):
+# Manoeuvring moves 1-4 are the same in both directions, only the final arc
+# differs -- the steering is asymmetric at manoeuvring speed, and
+# mirroring alone does not make up for it. Both sequences end at 0 deg.
+#   CW : final arc 27.0 cm -> heading +0.6 deg, base_link 37.0 cm to the outer wall
+#   CCW: final arc 21.0 cm -> heading  0.0 deg, base_link 34.5 cm to the outer wall
+STEPS_CW_OUTER  = [
     0.0,  0.0,
      100.0,   6.0,
     -100.0,  -4.5,
@@ -514,7 +513,7 @@ SCHRITTE_CW_AUSSEN  = [
      0.0,  0.0,
 ]
 
-SCHRITTE_CW_INNEN = [
+STEPS_CW_INNER = [
     0.0,  0.0,
      100.0,   7.5,
     -100.0,  -4.5,
@@ -524,7 +523,7 @@ SCHRITTE_CW_INNEN = [
      0.0,  0.0,
 ]
 
-SCHRITTE_CW_MITTE = [
+STEPS_CW_MIDDLE = [
     0.0,  0.0,
      100.0,   7.5,
     -100.0,  -4.5,
@@ -534,7 +533,7 @@ SCHRITTE_CW_MITTE = [
      0.0,  0.0,
 ]
 
-SCHRITTE_CCW_INNEN = [
+STEPS_CCW_INNER = [
       0.0,  0.0,
      100.0,   6.0,
     -100.0,  -4.5,
@@ -544,7 +543,7 @@ SCHRITTE_CCW_INNEN = [
      0.0,  0.0,
 ]
 
-SCHRITTE_CCW_AUSSEN = [
+STEPS_CCW_OUTER = [
     0.0,  0.0,
      100.0,   6.0,
     -100.0,  -4.5,
@@ -554,28 +553,28 @@ SCHRITTE_CCW_AUSSEN = [
      0.0,  0.0,
 ]
 
-# Normale Folgen je Richtung. Sie sind die REFERENZ FUERS EINPARKEN (der
-# Regler parkt mit ihrer Umkehrung ein, egal welche Variante ausgeparkt hat)
-# und der Ersatz, wenn eine Variante leer ist. schritte_fuer() braucht sie.
-# CW = bisherige CW-Folge (Schlussbogen 27,0) = identisch mit CW_AUSSEN.
-# CCW = bisherige CCW-Folge (Schlussbogen 21,0), steht in SCHRITTE_STANDARD.
-SCHRITTE_CW = list(SCHRITTE_CW_AUSSEN)
-SCHRITTE_CCW = list(SCHRITTE_STANDARD)
+# Normal sequences per direction. They are the REFERENCE FOR PARKING (the
+# controller parks with their reversal, no matter which variant unparked)
+# and the replacement when a variant is empty. steps_for() needs them.
+# CW = previous CW sequence (final arc 27.0) = identical to CW_OUTER.
+# CCW = previous CCW sequence (final arc 21.0), is in STEPS_DEFAULT.
+STEPS_CW = list(STEPS_CW_OUTER)
+STEPS_CCW = list(STEPS_DEFAULT)
 
-# --- Einparken: eigene Folgen je Richtung --------------------------------
-# Bisher parkt der Regler mit der UMKEHRUNG der normalen Ausparkfolge ein
-# (SCHRITTE_CW / SCHRITTE_CCW: Zuege in umgekehrter Reihenfolge, Strecken mit
-# umgedrehtem Vorzeichen, Lenkung gleich). Kuenftig soll das Einparken eine
-# eigene Folge bekommen koennen -- sie steht hier, in FAHRREIHENFOLGE (erster
-# Zug zuerst), gleiche Konvention wie oben: positive Lenkung heisst zur
-# offenen Seite, negative Strecke rueckwaerts.
+# --- Parking: own sequences per direction --------------------------------
+# So far the controller parks with the REVERSAL of the normal unpark sequence
+# (STEPS_CW / STEPS_CCW: moves in reverse order, travel with
+# flipped sign, same steering). In future parking should be able to get its
+# own sequence -- it is here, in DRIVING ORDER (first
+# move first), same convention as above: positive steering means towards the
+# open side, negative travel is reverse.
 #
-# Vorerst sind es genau die Werte, die der Regler heute faehrt: die Umkehrung
-# von SCHRITTE_CW bzw. SCHRITTE_CCW, uebernommen am 26.09.2026. Der Regler
-# nutzt sie NOCH NICHT -- er bildet die Umkehrung weiter selbst. Vor dem
-# Umstellen beachten: die Kurskorrektur beim Einparken (_park_ziel_kurse)
-# nimmt an, dass Einparkzug k den Ausparkzug n-1-k rueckwaerts faehrt.
-SCHRITTE_EINPARKEN_CW = [
+# For now they are exactly the values the controller drives today: the reversal
+# of STEPS_CW and STEPS_CCW, taken over on 26.09.2026. The controller
+# does NOT use them YET -- it still builds the reversal itself. Before
+# switching over, note: the heading correction when parking (_park_target_headings)
+# assumes that park move k drives unpark move n-1-k in reverse.
+STEPS_PARK_CW = [
       0.0,   -0.0,
    -100.0,  -27.0,
       0.0,   -5.0,
@@ -584,7 +583,7 @@ SCHRITTE_EINPARKEN_CW = [
     100.0,   -5.0,
       0.0,   -0.0,
 ]
-SCHRITTE_EINPARKEN_CCW = [
+STEPS_PARK_CCW = [
       0.0,    0.0,
    -100.0,  -24.0,
     100.0,   -14.5,
@@ -594,177 +593,177 @@ SCHRITTE_EINPARKEN_CCW = [
 ]
 
 
-def einparkfolge(richtung):
-    """Flache Einparkliste fuer CW oder CCW (Kopie), dazu ihr Name."""
-    richtung = str(richtung).upper()
-    if richtung not in ('CW', 'CCW'):
-        raise ValueError('Fahrtrichtung "%s" ist weder CW noch CCW' % richtung)
-    name = 'SCHRITTE_EINPARKEN_%s' % richtung
-    liste = globals()[name]
-    if not liste:
-        raise ValueError('%s ist leer' % name)
-    return list(liste), name
+def park_sequence(direction):
+    """Flat park list for CW or CCW (copy), plus its name."""
+    direction = str(direction).upper()
+    if direction not in ('CW', 'CCW'):
+        raise ValueError('Direction "%s" is neither CW nor CCW' % direction)
+    name = 'STEPS_PARK_%s' % direction
+    seq = globals()[name]
+    if not seq:
+        raise ValueError('%s is empty' % name)
+    return list(seq), name
 
-# Bewusst leer: bei CCW mit freier mittlerer Reihe faehrt der Regler die
-# normale Folge. Der Name muss trotzdem existieren -- schritte_variante()
-# holt die Listen per globals()[name] und wuerde sonst mit KeyError abbrechen.
-SCHRITTE_CCW_MITTE = []
+# Empty on purpose: for CCW with a clear middle row the controller drives the
+# normal sequence. The name must exist anyway -- steps_for_variant()
+# fetches the lists via globals()[name] and would otherwise abort with KeyError.
+STEPS_CCW_MIDDLE = []
 
-LAGEN = ('innen', 'mitte', 'aussen')
+PLACEMENTS = ('inner', 'middle', 'outer')
 
 
-def schritte_variante(richtung, lage):
-    """Flache Schrittliste fuer eine der sechs Varianten.
+def steps_for_variant(direction, placement):
+    """Flat step list for one of the six variants.
 
-    Rueckgabe: (flache Liste, Name wie SCHRITTE_CCW_MITTE). Die Liste ist eine
-    Kopie; wer sie aendert, aendert nicht die Tabelle hier.
+    Returns: (flat list, name like STEPS_CCW_MIDDLE). The list is a
+    copy; whoever changes it does not change the table here.
     """
-    richtung = str(richtung).upper()
-    lage = str(lage).lower()
-    if richtung not in ('CW', 'CCW'):
-        raise ValueError('Fahrtrichtung "%s" ist weder CW noch CCW' % richtung)
-    if lage not in LAGEN:
-        raise ValueError('Lage "%s" -- erlaubt: %s' % (lage, ', '.join(LAGEN)))
-    name = 'SCHRITTE_%s_%s' % (richtung, lage.upper())
-    liste = globals()[name]
-    if not liste:
-        raise ValueError('%s ist leer' % name)
-    return list(liste), name
+    direction = str(direction).upper()
+    placement = str(placement).lower()
+    if direction not in ('CW', 'CCW'):
+        raise ValueError('Direction "%s" is neither CW nor CCW' % direction)
+    if placement not in PLACEMENTS:
+        raise ValueError('Placement "%s" -- allowed: %s' % (placement, ', '.join(PLACEMENTS)))
+    name = 'STEPS_%s_%s' % (direction, placement.upper())
+    seq = globals()[name]
+    if not seq:
+        raise ValueError('%s is empty' % name)
+    return list(seq), name
 
 
-def schritte_fuer(richtung, gemeinsam=None, cw=None, ccw=None):
-    """Welche Schrittfolge gilt fuer diese Fahrtrichtung?
+def steps_for(direction, shared=None, cw=None, ccw=None):
+    """Which step sequence applies to this driving direction?
 
-    Rueckgabe: (flache Liste, Herkunft als Text fuers Protokoll).
+    Returns: (flat list, origin as text for the log).
     """
-    if richtung not in ('CW', 'CCW'):
-        raise ValueError('Fahrtrichtung "%s" ist weder CW noch CCW' % richtung)
-    eigen = (cw if cw is not None else SCHRITTE_CW) if richtung == 'CW' \
-        else (ccw if ccw is not None else SCHRITTE_CCW)
-    if eigen:
-        return list(eigen), 'eigene Folge fuer %s' % richtung
-    geteilt = gemeinsam if gemeinsam is not None else SCHRITTE_STANDARD
-    if not geteilt:
-        raise ValueError('weder eine Folge fuer %s noch eine gemeinsame'
-                         % richtung)
-    return list(geteilt), 'gemeinsame Folge'
+    if direction not in ('CW', 'CCW'):
+        raise ValueError('Direction "%s" is neither CW nor CCW' % direction)
+    own = (cw if cw is not None else STEPS_CW) if direction == 'CW' \
+        else (ccw if ccw is not None else STEPS_CCW)
+    if own:
+        return list(own), 'own sequence for %s' % direction
+    common = shared if shared is not None else STEPS_DEFAULT
+    if not common:
+        raise ValueError('neither a sequence for %s nor a shared one'
+                         % direction)
+    return list(common), 'shared sequence'
 
 
-def _trockenlauf(flach=None, laenge=LUECKE_LAENGE, tiefe=LUECKE_TIEFE,
-                 spalt=0.004, dicke=LUECKE_WANDDICKE, richtung=None):
-    """Tabelle im Kopf fahren und das Ergebnis ausgeben.
+def _dry_run(flat=None, length=BAY_LENGTH, depth=BAY_DEPTH,
+             gap=0.004, thickness=BAY_WALL_THICKNESS, direction=None):
+    """Drive the table in the head and print the result.
 
-    laenge/tiefe sind die gemessenen Lueckenmasse, spalt die Luft zwischen
-    Heck und hinterer Wand beim Abstellen.
+    length/depth are the measured bay dimensions, gap the space between
+    rear and rear wall when parked.
     """
-    # Gespiegelt wird mit offen_links=True: das laesst die Vorzeichen, wie
-    # sie in der Tabelle stehen, addiert aber den Trimm -- der Trockenlauf
-    # faehrt damit genau die Lenkwerte, die spaeter auf die Leitung gehen.
-    if flach:
-        roh, herkunft = flach, 'Kommandozeile'
-    elif richtung:
-        roh, herkunft = schritte_fuer(richtung)
+    # Mirrored with open_left=True: that keeps the signs as they
+    # are in the table, but adds the trim -- so the dry run
+    # drives exactly the steering values that later go onto the wire.
+    if flat:
+        raw, origin = flat, 'command line'
+    elif direction:
+        raw, origin = steps_for(direction)
     else:
-        roh, herkunft = SCHRITTE_STANDARD, 'gemeinsame Folge'
-    schritte = spiegeln(schritte_aus_flach(roh), True)
-    start = startpose(laengsspiel=spalt, tiefe=tiefe)
-    balken = hindernisse(laenge, tiefe, dicke)
-    print('Luecke %.1f cm lang, Waende %.0f cm tief und %.1f cm dick, '
-          'Fahrzeug %.1f x %.1f cm.'
-          % (laenge * 100, tiefe * 100, dicke * 100,
-             FZ_BREITE * 100, FZ_LAENGE * 100))
-    print('Start base_link (%.3f, %.3f), %.0f mm Luft nach hinten.'
-          % (start[0], start[1], spalt * 1000))
-    print('Schrittfolge: %s%s.'
-          % (herkunft, ' (%s)' % richtung if richtung else ''))
-    if LENK_QUELLE:
-        print('Lenkung aus %s: Trimm %.1f %%, Radstand %.3f m, '
-              'Vollausschlag R = %.3f m.'
-              % (LENK_QUELLE, LENK_MITTE, RADSTAND, wenderadius(100.0)))
+        raw, origin = STEPS_DEFAULT, 'shared sequence'
+    steps = mirror_steps(steps_from_flat(raw), True)
+    start = bay_start_pose(long_clearance=gap, depth=depth)
+    bars = bay_walls(length, depth, thickness)
+    print('Bay %.1f cm long, walls %.0f cm deep and %.1f cm thick, '
+          'car %.1f x %.1f cm.'
+          % (length * 100, depth * 100, thickness * 100,
+             CAR_WIDTH * 100, CAR_LENGTH * 100))
+    print('Start base_link (%.3f, %.3f), %.0f mm gap to the rear.'
+          % (start[0], start[1], gap * 1000))
+    print('Step sequence: %s%s.'
+          % (origin, ' (%s)' % direction if direction else ''))
+    if STEER_SOURCE:
+        print('Steering from %s: trim %.1f %%, wheelbase %.3f m, '
+              'full lock R = %.3f m.'
+              % (STEER_SOURCE, STEER_CENTER, WHEELBASE, turn_radius_of(100.0)))
     else:
-        print('ACHTUNG: steer_calib.json nicht gefunden -- gerechnet wird mit '
-              'dem Notnagel vom 08.09.2026, nicht mit eurer Kalibrierung.')
-        for zeile in getattr(lade_lenkkennlinie, 'versucht', []):
-            print('  versucht: %s' % zeile)
+        print('WARNING: steer_calib.json not found -- calculating with '
+              'the fallback from 08.09.2026, not with your calibration.')
+        for line in getattr(load_steer_curve, 'tried', []):
+            print('  tried: %s' % line)
     print()
     pose = start
-    for i, (lenk, cm) in enumerate(schritte, 1):
-        # Engste Stelle NUR in diesem Zug -- so sieht man, welcher Zug die
-        # Grenze setzt und wo noch Luft ist.
-        eng = min(abstand(ecken(p), b)
-                  for (p, _nr) in bahn(pose, [(lenk, cm)])
-                  for b in balken)
-        pose = bahn(pose, [(lenk, cm)])[-1][0]
-        R = wenderadius(lenk)
-        print('  %d. Lenkung %+6.1f %% (R %s)  %+6.1f cm = %+7.0f grad Welle'
-              '  -> Kurs %+6.1f grad, y=%.3f   Rand %s'
-              % (i, lenk, '%.2f m' % R if R else 'gerade', cm, cm_zu_grad(cm),
+    for i, (steer, cm) in enumerate(steps, 1):
+        # Tightest spot ONLY in this move -- that shows which move sets the
+        # limit and where there is still room.
+        tightest = min(poly_distance(car_corners(p), b)
+                       for (p, _step_no) in trajectory(pose, [(steer, cm)])
+                       for b in bars)
+        pose = trajectory(pose, [(steer, cm)])[-1][0]
+        R = turn_radius_of(steer)
+        print('  %d. steering %+6.1f %% (R %s)  %+6.1f cm = %+7.0f deg shaft'
+              '  -> heading %+6.1f deg, y=%.3f   margin %s'
+              % (i, steer, '%.2f m' % R if R else 'straight', cm, cm_to_deg(cm),
                  math.degrees(pose[2]), pose[1],
-                 'beruehrt' if eng <= 0.0 else '%3.0f mm' % (eng * 1000)))
-    e = simuliere(schritte, start, tiefe=tiefe, laenge=laenge, dicke=dicke)
+                 'touches' if tightest <= 0.0 else '%3.0f mm' % (tightest * 1000)))
+    e = simulate(steps, start, depth=depth, length=length, thickness=thickness)
     print()
-    print('  Gesamtweg %.1f cm, %d Positionsfahrten.'
-          % (sum(abs(cm) for _l, cm in schritte), len(schritte)))
-    print('  Engster Abstand zu einer Magenta-Wand: %.0f mm.'
-          % (e['magenta_abstand_m'] * 1000))
-    print('  Engster Abstand zum Aussenwall:         %.0f mm.'
-          % (e['wand_abstand_m'] * 1000))
-    if e['kollision']:
-        print('  KOLLISION in Zug %s' % e['bei_schritt'])
-    elif e['knapp']:
-        print('  kollisionsfrei, aber knapp (unter 8 mm Reserve)')
+    print('  Total travel %.1f cm, %d position moves.'
+          % (sum(abs(cm) for _l, cm in steps), len(steps)))
+    print('  Closest distance to a magenta wall: %.0f mm.'
+          % (e['magenta_dist_m'] * 1000))
+    print('  Closest distance to the outer wall:  %.0f mm.'
+          % (e['wall_dist_m'] * 1000))
+    if e['collision']:
+        print('  COLLISION in move %s' % e['at_step'])
+    elif e['tight']:
+        print('  collision-free, but tight (under 8 mm reserve)')
     else:
-        print('  kollisionsfrei')
-    print('  %s' % ('aus der Luecke heraus' if e['frei']
-                    else 'ACHTUNG: am Ende noch in der Luecke'))
-    return 0 if (e['frei'] and not e['kollision']) else 1
+        print('  collision-free')
+    print('  %s' % ('out of the bay' if e['clear']
+                    else 'WARNING: still in the bay at the end'))
+    return 0 if (e['clear'] and not e['collision']) else 1
 
 
 if __name__ == '__main__':
     import sys
 
-    HILFE = """Trockenlauf einer Ausparkfolge.
+    HELP = """Dry run of an unpark sequence.
 
-  python3 ausparken.py [cw|ccw] [luecke=CM] [tiefe=CM] [dicke=CM] [spalt=MM]
-                       [lenk cm lenk cm ...]
+  python3 unpark.py [cw|ccw] [bay=CM] [depth=CM] [thickness=CM] [gap=MM]
+                    [steer cm steer cm ...]
 
-Ohne Zahlen wird SCHRITTE_STANDARD gefahren. Die Masse sind die GEMESSENEN
-der echten Luecke -- stimmen sie nicht, sagt der Trockenlauf das Falsche.
+Without numbers STEPS_DEFAULT is driven. The dimensions are the MEASURED ones
+of the real bay -- if they are wrong, the dry run tells you the wrong thing.
 
-  luecke  Abstand zwischen den beiden Magenta-Waenden (Standard %.2f cm)
-  tiefe   wie weit sie vom Aussenwall ins Feld ragen (Standard %.0f cm)
-  dicke   Dicke der Balken laengs der Bahn (Standard %.1f cm) -- sie sind
-          BALKEN, keine Mauern: hinter ihnen ist wieder frei
-  spalt   Luft zwischen Heck und hinterer Wand beim Abstellen (Standard 4 mm)
-  cw/ccw  die fuer diese Fahrtrichtung hinterlegte Folge fahren (SCHRITTE_CW
-          bzw. SCHRITTE_CCW, sonst SCHRITTE_STANDARD)
+  bay        distance between the two magenta walls (default %.2f cm)
+  depth      how far they reach from the outer wall into the field (default %.0f cm)
+  thickness  thickness of the bars along the lane (default %.1f cm) -- they are
+             BARS, not solid walls: behind them it is clear again
+  gap        space between rear and rear wall when parked (default 4 mm)
+  cw/ccw     drive the sequence stored for this direction (STEPS_CW
+             or STEPS_CCW, otherwise STEPS_DEFAULT)
 
-Beispiel:
-  python3 ausparken.py luecke=32 100 9 -100 -6 100 7 -100 -5 100 18 -100 37
-""" % (LUECKE_LAENGE * 100, LUECKE_TIEFE * 100, LUECKE_WANDDICKE * 100)
+Example:
+  python3 unpark.py bay=32 100 9 -100 -6 100 7 -100 -5 100 18 -100 37
+""" % (BAY_LENGTH * 100, BAY_DEPTH * 100, BAY_WALL_THICKNESS * 100)
 
     if '-h' in sys.argv or '--help' in sys.argv:
-        print(HILFE)
+        print(HELP)
         raise SystemExit(0)
 
-    masse = {'luecke': LUECKE_LAENGE, 'tiefe': LUECKE_TIEFE,
-             'dicke': LUECKE_WANDDICKE, 'spalt': 0.004}
-    zahlen = []
-    richtung = None
+    dims = {'bay': BAY_LENGTH, 'depth': BAY_DEPTH,
+            'thickness': BAY_WALL_THICKNESS, 'gap': 0.004}
+    numbers = []
+    direction = None
     for arg in sys.argv[1:]:
         if arg.upper() in ('CW', 'CCW'):
-            richtung = arg.upper()
+            direction = arg.upper()
         elif '=' in arg:
-            name, _, wert = arg.partition('=')
-            if name not in masse:
-                print('Unbekanntes Mass "%s".\n' % name)
-                print(HILFE)
+            name, _, val = arg.partition('=')
+            if name not in dims:
+                print('Unknown dimension "%s".\n' % name)
+                print(HELP)
                 raise SystemExit(2)
-            teiler = 1000.0 if name == 'spalt' else 100.0
-            masse[name] = float(wert) / teiler
+            divisor = 1000.0 if name == 'gap' else 100.0
+            dims[name] = float(val) / divisor
         else:
-            zahlen.append(float(arg))
+            numbers.append(float(arg))
 
-    raise SystemExit(_trockenlauf(zahlen or None, laenge=masse['luecke'],
-                                  tiefe=masse['tiefe'], spalt=masse['spalt'],
-                                  dicke=masse['dicke'], richtung=richtung))
+    raise SystemExit(_dry_run(numbers or None, length=dims['bay'],
+                              depth=dims['depth'], gap=dims['gap'],
+                              thickness=dims['thickness'], direction=direction))
