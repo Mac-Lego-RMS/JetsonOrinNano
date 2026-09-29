@@ -7,7 +7,7 @@
 
 The chapters in docs/journal/ are plain Markdown so GitHub renders them as
 they are. For the PDF they are joined in file-name order, mermaid blocks are
-rendered to SVG (needs mermaid-cli, see docs/README.md; without it the block
+rendered to images (needs mermaid-cli, see docs/README.md; without it the block
 stays as code), Pandoc turns the result into Typst and Typst makes the PDF.
 """
 
@@ -30,9 +30,10 @@ README_MIN_CHARS = 5000        # rule 7 of the WRO FE general rules
 
 MERMAID_BLOCK = re.compile(r'^```mermaid\s*\n(.*?)^```\s*$', re.S | re.M)
 CHAPTER_LINK = re.compile(r'\[([^\]]+)\]\((\d\d-[\w-]+\.md)(#[\w-]+)?\)')
-# Typst renders SVG without foreignObject, so mermaid must draw plain SVG text.
-MERMAID_CONFIG = {'htmlLabels': False, 'flowchart': {'htmlLabels': False},
-                  'state': {'htmlLabels': False}, 'theme': 'neutral'}
+# Rendered as PNG by the browser inside mermaid-cli: typst cannot draw the
+# HTML labels of mermaid's SVG, and plain SVG text gets wrapped mid-word.
+MERMAID_CONFIG = {'theme': 'neutral'}
+MERMAID_SCALE = '3'
 # Words that almost never show up in English text. Used to find paragraphs
 # that still have to be translated before the submission.
 GERMAN_HINT = re.compile(
@@ -55,16 +56,17 @@ def mmdc_command():
 
 
 def render_mermaid(source, mmdc, out_dir):
-    """Render one mermaid block to SVG, cached by content hash."""
+    """Render one mermaid block to PNG, cached by content hash."""
     digest = hashlib.sha1(source.encode()).hexdigest()[:12]
-    svg = out_dir / ('mermaid-%s.svg' % digest)
-    if svg.exists():
-        return svg
+    img = out_dir / ('mermaid-%s.png' % digest)
+    if img.exists():
+        return img
     src = out_dir / ('mermaid-%s.mmd' % digest)
     src.write_text(source)
     cfg = out_dir / 'mermaid-config.json'
     cfg.write_text(json.dumps(MERMAID_CONFIG))
-    cmd = mmdc + ['-i', str(src), '-o', str(svg), '-c', str(cfg), '-b', 'white']
+    cmd = mmdc + ['-i', str(src), '-o', str(img), '-c', str(cfg), '-b', 'white',
+                  '-s', MERMAID_SCALE]
     chromium = os.environ.get('PUPPETEER_EXECUTABLE_PATH')
     if chromium:
         pp = out_dir / 'puppeteer.json'
@@ -72,7 +74,7 @@ def render_mermaid(source, mmdc, out_dir):
                                   'args': ['--no-sandbox']}))
         cmd += ['-p', str(pp)]
     subprocess.run(cmd, check=True, capture_output=True)
-    return svg
+    return img
 
 
 def join_chapters(mmdc):
@@ -85,8 +87,8 @@ def join_chapters(mmdc):
         def replace(match):
             if mmdc is None:
                 return match.group(0)
-            svg = render_mermaid(match.group(1), mmdc, mermaid_dir)
-            return '![](%s)\n' % os.path.relpath(svg, BUILD)
+            img = render_mermaid(match.group(1), mmdc, mermaid_dir)
+            return '![](%s){width=75%%}\n' % os.path.relpath(img, BUILD)
 
         text = MERMAID_BLOCK.sub(replace, text)
         # Links between chapter files only make sense on GitHub.
@@ -115,7 +117,10 @@ def build_pdf():
         markdown, 'typst', format='markdown', outputfile=str(typ),
         extra_args=['--standalone',
                     '--metadata-file=%s' % (JOURNAL / 'metadata.yaml'),
-                    '--resource-path=%s' % JOURNAL])
+                    '--resource-path=%s' % JOURNAL,
+                    # otherwise pandoc gives every column of a wide table
+                    # the same width
+                    '--columns=10000'])
     pdf = BUILD / 'journal.pdf'
     typst.compile(str(typ), output=str(pdf), root=str(REPO))
     print('wrote %s' % pdf.relative_to(REPO))
