@@ -1,4 +1,4 @@
-"""Selbsttest der Blindsektoren (verbaute Lidar-Bereiche)."""
+"""Self-test of the blind sectors (blocked lidar regions)."""
 
 import math
 
@@ -8,7 +8,7 @@ from camera_lidar_fusion.fisheye_model import find_blind_sectors, visible_mask
 
 
 def _scan(count=3240, blocked=(), value=0.08, far=2.5):
-    """Ein Scan: ueberall ``far``, in den Sektoren ``blocked`` nur ``value``."""
+    """A scan: ``far`` everywhere, only ``value`` in the ``blocked`` sectors."""
     angles = np.degrees(-math.pi + np.arange(count) * (2 * math.pi / count))
     ranges = np.full(count, far)
     for lo, hi in blocked:
@@ -40,7 +40,7 @@ def test_visible_mask_without_sectors_keeps_everything():
 
 
 def test_find_blind_sectors_recovers_the_real_measurement():
-    """Die drei Sektoren, die am S3 tatsaechlich gemessen wurden."""
+    """The three sectors that were actually measured on the S3."""
     truth = [(135.2, -153.4), (-133.8, -119.1), (-17.8, -8.2)]
     ranges, _ = _scan(blocked=truth)
     scans = [ranges + np.random.default_rng(i).normal(0, 0.002, ranges.size)
@@ -48,34 +48,34 @@ def test_find_blind_sectors_recovers_the_real_measurement():
 
     found = find_blind_sectors(scans, -math.pi, 2 * math.pi / ranges.size)
 
-    assert len(found) == 6                       # drei Paare
-    # Breitester Sektor zuerst -- das ist der ueber +-180.
+    assert len(found) == 6                       # three pairs
+    # Widest sector first -- that is the one across +-180.
     assert abs(found[0] - 135.2) < 0.5 and abs(found[1] - (-153.4)) < 0.5
-    breiten = [(found[i + 1] - found[i]) % 360.0 for i in range(0, 6, 2)]
-    assert breiten == sorted(breiten, reverse=True)
-    assert abs(breiten[0] - 71.4) < 1.0
+    widths = [(found[i + 1] - found[i]) % 360.0 for i in range(0, 6, 2)]
+    assert widths == sorted(widths, reverse=True)
+    assert abs(widths[0] - 71.4) < 1.0
 
 
 def test_found_sectors_actually_mask_the_short_returns():
-    """Der Kreis schliesst sich: messen -> maskieren -> nur noch echte Ziele."""
+    """The loop closes: measure -> mask -> only real targets left."""
     truth = [(135.2, -153.4), (-17.8, -8.2)]
     ranges, angles = _scan(blocked=truth)
-    # Eine Pylone bei +40 Grad, 0.35 m -- weiter weg als die Kurz-Returns.
+    # A pylon at +40 deg, 0.35 m -- further away than the short returns.
     ranges[(angles > 37) & (angles < 43)] = 0.35
 
     scans = [ranges] * 25
     found = find_blind_sectors(scans, -math.pi, 2 * math.pi / ranges.size)
     keep = visible_mask(np.radians(angles), found)
 
-    # Ohne Maske ist der naechste Punkt der eigene Aufbau ...
+    # Without the mask the nearest point is our own build ...
     assert ranges.min() < 0.1
-    # ... mit Maske ist es die Pylone.
+    # ... with the mask it is the pylon.
     assert math.isclose(ranges[keep].min(), 0.35, abs_tol=1e-6)
     assert abs(angles[keep][np.argmin(ranges[keep])] - 40.0) < 3.0
 
 
 def test_narrow_glitches_are_ignored():
-    """Einzelne Ausreisser duerfen keinen Sektor erzeugen."""
+    """Single outliers must not create a sector."""
     ranges, _ = _scan()
     ranges[100] = 0.05
     ranges[2000:2003] = 0.05

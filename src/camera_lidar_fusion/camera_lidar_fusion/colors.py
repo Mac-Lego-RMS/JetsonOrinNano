@@ -1,169 +1,169 @@
-"""Farbklassifikation fuer die WRO-Klotzfarben (HSV, OpenCV-Wertebereiche).
+"""Colour classification for the WRO block colours (HSV, OpenCV value ranges).
 
-OpenCV-HSV: H in 0..179, S und V in 0..255. Rot liegt um H=0 herum und
-braucht deshalb zwei Intervalle.
+OpenCV HSV: H in 0..179, S and V in 0..255. Red sits around H=0 and
+therefore needs two intervals.
 """
 
 import cv2
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
-# name -> Liste von (h_lo, h_hi) plus gemeinsame S/V-Untergrenzen
+# name -> list of (h_lo, h_hi) plus shared S/V lower bounds
 #
-# Zu den v_min-Werten: die Pylonen sind im Randbereich des Fisheye deutlich
-# dunkler als in der Bildmitte. An einer gruenen Pylone bei 0.99 m gemessen
-# (21 Lidar-Punkte) lag V zwischen 39 und 106, der Median bei 44 -- die alte
-# Schwelle von 45 schnitt also mitten durch die Pylone und erkannte nur 8 der
-# 21 Punkte. Der Farbton war dabei bei ALLEN 21 sauber gruen (H 44..68).
+# On the v_min values: the pylons are clearly darker at the edge of the fisheye
+# than in the image centre. Measured on a green pylon at 0.99 m
+# (21 lidar points), V was between 39 and 106, median 44 -- the old
+# threshold of 45 cut right through the pylon and only detected 8 of the
+# 21 points. The hue was cleanly green for ALL 21 (H 44..68).
 #
-# GRUEN GEGEN AUSGEBRANNTE WAND. Der Hue-Bereich hiess frueher (40, 90) und
-# fing damit ueberbelichtete weisse Flaechen mit ein. Brennt eine Wand aus
-# (V=255), bekommt sie einen Cyanstich und landet bei H 85 bis 94 -- also
-# mitten im alten Bereich. Im Horizontring gemessen:
-#     H 35..79 ->   59 Wandpixel, 4572 Pylonenpixel
-#     H 85..94 -> 3811 Wandpixel,  309 Pylonenpixel
-# Die Pylonen liegen bei H 56 bis 82, die ausgebrannten Waende bei 85 bis 94.
+# GREEN VERSUS BLOWN-OUT WALL. The hue range used to be (40, 90) and
+# thereby caught overexposed white surfaces as well. When a wall blows out
+# (V=255) it gets a cyan cast and lands at H 85 to 94 -- right in the
+# middle of the old range. Measured in the horizon ring:
+#     H 35..79 ->   59 wall pixels, 4572 pylon pixels
+#     H 85..94 -> 3811 wall pixels,  309 pylon pixels
+# The pylons sit at H 56 to 82, the blown-out walls at 85 to 94.
 #
-# Das war auch der Grund, warum s_min nicht weiter runter konnte: die Waende
-# haben S 52 bis 58, die dunklen Pylonen S 62 bis 73 -- kaum Abstand. Ueber den
-# Farbton getrennt geht es dagegen sauber, bei gleichem s_min=50:
-#     hue (40,90) -> 72 Prozent der Pylonenpixel, 63 Prozent der Wandpixel
-#     hue (35,85) -> 74 Prozent der Pylonenpixel,  4 Prozent der Wandpixel
-# Deshalb zunaechst 85 statt 90 oben. Seit die Zone sitzt und v_min tief darf,
-# musste der Bereich aber noch enger: bei H 80 bis 94 tauchten 45 Punkte auf,
-# ueber Entfernungen von 0.60 bis 2.41 m verteilt -- das ist TUERKIS (H 83
-# entspricht 166 Grad im Farbkreis), also Reflexe auf der Wand, kein Gruen.
-# Die echten Pylonen liegen kompakt bei H 45 bis 64 und jeweils in EINER
-# Entfernung. Am unteren Ende dasselbe Bild: H 30 bis 39 streute ueber 0.16
-# bis 2.50 m, das sind gelbliche Holztoene.
+# That was also why s_min could not go any lower: the walls have
+# S 52 to 58, the dark pylons S 62 to 73 -- hardly any gap. Separated by
+# hue, on the other hand, it works cleanly, with the same s_min=50:
+#     hue (40,90) -> 72 percent of the pylon pixels, 63 percent of the wall pixels
+#     hue (35,85) -> 74 percent of the pylon pixels,  4 percent of the wall pixels
+# Hence 85 instead of 90 at the top at first. Since the zone is right and v_min
+# may go low, the range had to get narrower still: at H 80 to 94, 45 points showed up,
+# spread over distances from 0.60 to 2.41 m -- that is TURQUOISE (H 83
+# corresponds to 166 degrees on the colour wheel), i.e. reflections on the wall, not green.
+# The real pylons sit compactly at H 45 to 64 and each at ONE
+# distance. The same picture at the lower end: H 30 to 39 scattered over 0.16
+# to 2.50 m, those are yellowish wood tones.
 #
-# Deshalb jetzt 40 bis 72. Die Faustregel dahinter: echte Pylonenpunkte
-# klumpen in Farbton UND Entfernung, Fehltreffer streuen in beidem.
+# Hence 40 to 72 now. The rule of thumb behind it: real pylon points
+# cluster in hue AND distance, false hits scatter in both.
 #
-# ENTFERNUNG ist der zweite grosse Faktor, und sie wirkt ueber die Saettigung,
-# nicht ueber die Helligkeit. An vier gruenen Pylonen gemessen:
-#     0.70 m -> S 101, 90 Prozent der Punkte erkannt
-#     0.99 m -> S  76, 43 Prozent
-#     2.08 m -> S  36,  9 Prozent
-# V lag dabei ueberall bei 53 bis 74, war also nie das Problem. Bei 2 m ist die
-# Pylone im Bild so klein, dass der Band-Median sie mit dem Hintergrund
-# verwaschet -- dagegen hilft keine Schwelle. Rot hat das Problem nicht, dort
-# liegt S bei 200 und mehr.
+# DISTANCE is the second big factor, and it acts through saturation,
+# not through brightness. Measured on four green pylons:
+#     0.70 m -> S 101, 90 percent of the points detected
+#     0.99 m -> S  76, 43 percent
+#     2.08 m -> S  36,  9 percent
+# V was 53 to 74 everywhere, so it was never the problem. At 2 m the
+# pylon is so small in the image that the band median blurs it with the
+# background -- no threshold helps against that. Red does not have the problem,
+# its S is 200 and more.
 #
-# SEIT DIE ZONE SITZT darf v_min noch viel tiefer. Solange der Abgriff quer
-# ueber Bande, Matte und Wand lief, war v_min die einzige Bremse gegen dunkles
-# Rauschen. Mit der kalibrierten Zone (siehe README) wird nur noch die Bande
-# angeschnitten -- und die hat, ueber die Zone gemittelt, eine Saettigung von
-# glatt NULL. Eine Pylone davor kommt im selben Mass auf 90 bis 113. s_min
-# allein trennt das also sauber, und v_min darf so tief, dass auch eine Pylone
-# im Schatten (dort gemessen: V=15) noch durchkommt.
+# SINCE THE ZONE IS RIGHT v_min may go much lower. As long as the sampling ran across
+# wall band, mat and room wall, v_min was the only brake against dark
+# noise. With the calibrated zone (see README) only the wall band is
+# cut -- and averaged over the zone it has a saturation of
+# flat ZERO. A pylon in front of it reaches 90 to 113 on the same measure. s_min
+# alone separates that cleanly, and v_min may go so low that even a pylon
+# in the shadow (measured there: V=15) still gets through.
 #
-# Und die Helligkeit ist nicht stabil: dieselbe Pylone, vier Minuten spaeter,
-# hatte einen V-Median von 32 statt 44 -- Wolken reichen dafuer. Der Farbton
-# blieb bei 51, die Saettigung stieg sogar auf 136. V ist also der wackelige
-# Kanal, S der belastbare. Deshalb steht v_min bewusst tief bei 20: gemessen
-# 18 der 21 Pylonenpunkte bei NULL Fehltreffern im ganzen Scan. Die drei
-# fehlenden scheitern nicht an V, sondern am Farbton (H 27, 39, 39 -- knapp
-# unter dem Bereich 40..90).
+# And the brightness is not stable: the same pylon, four minutes later,
+# had a V median of 32 instead of 44 -- clouds are enough for that. The hue
+# stayed at 51, the saturation even rose to 136. So V is the shaky
+# channel, S the reliable one. That is why v_min is deliberately low at 20: measured
+# 18 of the 21 pylon points with ZERO false hits in the whole scan. The three
+# missing ones fail not on V but on hue (H 27, 39, 39 -- just
+# below the range 40..90).
 #
-# Dass v_min so tief gefahrlos ist, liegt allein an s_min: die Pylonenpunkte
-# haben S zwischen 114 und 165, alles Stoerende scheitert vorher an der
-# Saettigung. v_min ist hier kein Rauschfilter, das ist s_min.
+# That v_min can be this low safely is down to s_min alone: the pylon points
+# have S between 114 and 165, everything disturbing fails earlier on
+# saturation. v_min is not a noise filter here, s_min is.
 #
-# s_min ist der eigentliche Rauschfilter, deshalb faellt es nicht beliebig
-# tief. Die Stoerungen im Scan sind naemlich nicht dunkel, sondern HELL
-# (Waende und Decke bei 2 bis 3 m, V ueber 200) mit leichtem Farbstich und
-# geringer Saettigung -- dagegen hilft nur s_min.
+# s_min is the actual noise filter, which is why it cannot drop arbitrarily
+# low. The disturbances in the scan are not dark, they are BRIGHT
+# (walls and ceiling at 2 to 3 m, V above 200) with a slight colour cast and
+# low saturation -- only s_min helps against that.
 #
-# Wie tief es darf, an vier gruenen Pylonen in 0.70 bis 2.08 m gemessen
-# (162 Punkte Ground Truth, v_min 20):
-#     s_min 80 ->  64 erkannt,  0 Fehltreffer
-#     s_min 70 ->  83 erkannt,  0 Fehltreffer
-#     s_min 65 ->  92 erkannt,  1 Fehltreffer
-#     s_min 60 ->  93 erkannt,  3 Fehltreffer
-#     s_min 40 -> 102 erkannt, 29 Fehltreffer   <- Knick, ab hier unbrauchbar
-# Diese Messung galt noch fuer den alten Hue-Bereich (40, 90). Seit der oben
-# auf (35, 85) eingeengt ist, fallen die ausgebrannten Waende schon am Farbton
-# raus und s_min darf auf 50 -- das holt rund 15 Prozent mehr Pylonenpixel bei
-# 4 statt 63 Prozent Wandkontamination.
+# How low it may go, measured on four green pylons at 0.70 to 2.08 m
+# (162 points ground truth, v_min 20):
+#     s_min 80 ->  64 detected,  0 false hits
+#     s_min 70 ->  83 detected,  0 false hits
+#     s_min 65 ->  92 detected,  1 false hit
+#     s_min 60 ->  93 detected,  3 false hits
+#     s_min 40 -> 102 detected, 29 false hits   <- knee, unusable from here on
+# This measurement was still for the old hue range (40, 90). Since that was
+# narrowed to (35, 85) above, the blown-out walls already drop out on hue
+# and s_min may go to 50 -- that gains around 15 percent more pylon pixels at
+# 4 instead of 63 percent wall contamination.
 #
-# Die restlichen zwei Pylonenpunkte scheitern an s_min -- es sind ausgerechnet
-# die hellsten (V 82 und 106) am ueberstrahlten Rand, wo Ueberbelichtung die
-# Saettigung frisst (S faellt dort auf 51 und 65). Das ist ein Belichtungs-,
-# kein Schwellenproblem.
+# The remaining two pylon points fail on s_min -- they are of all things
+# the brightest ones (V 82 and 106) at the glaring edge, where overexposure eats
+# the saturation (S drops to 51 and 65 there). That is an exposure problem,
+# not a threshold problem.
 #
-# ROT ist bewusst konservativer als gruen. OpenCV liefert fuer entsaettigte
-# Pixel H=0, und das faellt genau in den Rot-Bereich -- dunkles Grau kann also
-# als Rot durchgehen. Gemessen stieg die Zahl roter Punkte von 34 (v_min 25)
-# auf 78 (v_min 15), ohne dass mehr rote Flaeche da war. Deshalb v_min 25 und
-# das strengere s_min 110. Bei gruen gibt es diesen Effekt nicht.
+# RED is deliberately more conservative than green. OpenCV returns H=0 for
+# desaturated pixels, and that falls right into the red range -- so dark grey can
+# pass as red. Measured, the number of red points rose from 34 (v_min 25)
+# to 78 (v_min 15) without any more red area being there. Hence v_min 25 and
+# the stricter s_min 110. Green does not have this effect.
 #
-# ROT GEGEN MAGENTA. Der obere Rot-Ast hiess frueher (170, 179) und hat damit
-# eine magenta Wand eingefangen: die misst H 172 bis 176 (Median 174) bei
-# S 114 bis 184, lag also mittendrin. 130 Wandpunkte wurden rot.
+# RED VERSUS MAGENTA. The upper red branch used to be (170, 179) and thereby
+# caught a magenta wall: it measures H 172 to 176 (median 174) at
+# S 114 to 184, so it sat right inside. 130 wall points became red.
 #
-# Echtes Rot liegt weit davon entfernt. An zwei roten Pylonen gemessen:
-# H 0 bis 7, Median 4 bis 5. Zwischen H 23 und H 160 ist im ganzen Scan
-# ueberhaupt nichts -- die Luecke ist also breit und die Trennung eindeutig:
-#     H   0.. 7  ->  59 Pylonenpunkte,   0 Wandpunkte
-#     H 172..175 ->   0 Pylonenpunkte, 129 Wandpunkte
-# Deshalb reicht der obere Ast nur noch von 177 bis 179 und magenta bis 176.
-# Ergebnis: rot 140 -> 4 Fehltreffer, magenta 15 -> 150 erkannte Wandpunkte.
+# Real red is far away from that. Measured on two red pylons:
+# H 0 to 7, median 4 to 5. Between H 23 and H 160 there is nothing at all
+# in the whole scan -- so the gap is wide and the separation unambiguous:
+#     H   0.. 7  ->  59 pylon points,   0 wall points
+#     H 172..175 ->   0 pylon points, 129 wall points
+# Hence the upper branch now only runs from 177 to 179 and magenta up to 176.
+# Result: red 140 -> 4 false hits, magenta 15 -> 150 detected wall points.
 #
-# Der untere Ast bleibt bei 10, obwohl alle Pylonenpunkte unter 8 liegen --
-# das sind drei Stufen Reserve gegen Weissabgleich-Drift und kostet nur 6
-# zusaetzliche Fehltreffer (Holztoene ab H 8, siehe Tisch im Testaufbau).
+# The lower branch stays at 10, although all pylon points are below 8 --
+# that is three steps of reserve against white balance drift and costs only 6
+# extra false hits (wood tones from H 8, see the table in the test setup).
 #
-# Die Reihenfolge im Dict ist nicht egal: classify_hsv laeuft sie der Reihe
-# nach durch und ueberschreibt, bei Ueberlappung gewinnt also der letzte
-# Eintrag (magenta). Aktuell ueberlappen die Bereiche nicht.
+# The order in the dict matters: classify_hsv walks through it in
+# order and overwrites, so on overlap the last entry wins
+# (magenta). Currently the ranges do not overlap.
 DEFAULT_RANGES = {
-    'rot':     {'hue': [(0, 10), (177, 179)], 's_min': 110, 'v_min': 12},
-    'gruen':   {'hue': [(40, 72)],            's_min': 50,  'v_min': 12},
+    'red':     {'hue': [(0, 10), (177, 179)], 's_min': 110, 'v_min': 12},
+    'green':   {'hue': [(40, 72)],            's_min': 50,  'v_min': 12},
     'magenta': {'hue': [(140, 176)],          's_min': 90,  'v_min': 15},
 }
 
-# BGR-Farben fuer Debug-Overlays
+# BGR colours for debug overlays
 LABEL_BGR = {
-    'rot': (0, 0, 255),
-    'gruen': (0, 220, 0),
+    'red': (0, 0, 255),
+    'green': (0, 220, 0),
     'magenta': (200, 0, 200),
-    'schwarz': (60, 60, 60),
-    'unbekannt': (180, 180, 180),
+    'black': (60, 60, 60),
+    'unknown': (180, 180, 180),
 }
 
-# Kraeftige BGR-Farben fuer die PointCloud (/camera_lidar/colored_scan).
-# LABEL_BGR zeichnet im Debug-Bild nur einen duennen Rand um einen Punkt, der
-# innen die gemessene Farbe behaelt -- da darf es dezent sein. Hier wird der
-# ganze Punkt eingefaerbt, also sind die erkannten Farben voll ausgesteuert und
-# alles Unklassifizierte bewusst dunkelgrau: rot und gruen sollen im 3D-Panel
-# sofort ins Auge springen. Die Werte sind exakt, ein Konsument kann also auf
-# 0x0000FF / 0x00FF00 / 0xFF00FF pruefen statt Farbbereiche zu raten.
+# Strong BGR colours for the PointCloud (/camera_lidar/colored_scan).
+# In the debug image LABEL_BGR only draws a thin ring around a point that
+# keeps the measured colour inside -- it may be subtle there. Here the
+# whole point is coloured, so the detected colours are fully saturated and
+# everything unclassified is deliberately dark grey: red and green should
+# jump out immediately in the 3D panel. The values are exact, so a consumer can
+# check for 0x0000FF / 0x00FF00 / 0xFF00FF instead of guessing colour ranges.
 CLOUD_BGR = {
-    'rot': (0, 0, 255),
-    'gruen': (0, 255, 0),
+    'red': (0, 0, 255),
+    'green': (0, 255, 0),
     'magenta': (255, 0, 255),
-    'schwarz': (45, 45, 45),
-    'unbekannt': (85, 85, 85),
+    'black': (45, 45, 45),
+    'unknown': (85, 85, 85),
 }
 
 
 def label_colors(labels, palette: dict = None) -> np.ndarray:
-    """Labels -> (N,3)-BGR-uint8 in den kraeftigen Farben aus CLOUD_BGR."""
+    """Labels -> (N,3) BGR uint8 in the strong colours from CLOUD_BGR."""
     palette = palette or CLOUD_BGR
-    fallback = palette.get('unbekannt', (85, 85, 85))
+    fallback = palette.get('unknown', (85, 85, 85))
     return np.array([palette.get(l, fallback) for l in labels],
                     dtype=np.uint8).reshape(-1, 3)
 
 
 def classify_hsv(hsv: np.ndarray, ranges: dict = None, black_v_max: int = 45) -> list:
-    """Klassifiziert ein (N,3)-HSV-Array zu Labels wie 'rot'/'gruen'/'unbekannt'."""
+    """Classifies an (N,3) HSV array into labels like 'red'/'green'/'unknown'."""
     ranges = ranges or DEFAULT_RANGES
     hsv = np.asarray(hsv).reshape(-1, 3).astype(np.int16)
     h, s, v = hsv[:, 0], hsv[:, 1], hsv[:, 2]
 
-    labels = np.full(hsv.shape[0], 'unbekannt', dtype=object)
-    labels[v <= black_v_max] = 'schwarz'
+    labels = np.full(hsv.shape[0], 'unknown', dtype=object)
+    labels[v <= black_v_max] = 'black'
 
     for name, spec in ranges.items():
         hit = np.zeros(hsv.shape[0], dtype=bool)
@@ -176,23 +176,23 @@ def classify_hsv(hsv: np.ndarray, ranges: dict = None, black_v_max: int = 45) ->
 
 def sample_colors(image_bgr: np.ndarray, u: np.ndarray, v: np.ndarray, patch: int = 5,
                   center=None, band_px=None, band_count: int = 5):
-    """Liest an den Pixeln (u,v) Farbe aus. Gibt (bgr, hsv) als (N,3)-uint8 zurueck.
+    """Reads the colour at the pixels (u,v). Returns (bgr, hsv) as (N,3) uint8.
 
-    Vorher wird das ganze Bild einmal median-gefiltert -- das ist deutlich
-    schneller als pro Punkt ein Patch auszuschneiden und faengt Glanzlichter
-    und Rauschen genauso weg.
+    The whole image is median-filtered once beforehand -- that is much
+    faster than cutting out a patch per point and removes highlights
+    and noise just as well.
 
-    Sind ``center`` (cx, cy) und ``band_px`` gesetzt, wird nicht ein einzelnes
-    Pixel gelesen, sondern ``band_count`` Stuetzstellen entlang der RADIALEN
-    Linie durch (u,v) -- und davon der Median genommen. Radial nach aussen heisst
-    im Fisheye "nach unten", die Linie liegt also laengs der Pylone. Der Median
-    (nicht der Mittelwert) haelt das Ergebnis stabil, wenn ein Ende des Bandes
-    ueber die Pylonenkante hinausrutscht.
+    If ``center`` (cx, cy) and ``band_px`` are set, not a single
+    pixel is read but ``band_count`` samples along the RADIAL
+    line through (u,v) -- and the median of those is taken. Radially outwards means
+    "downwards" in the fisheye, so the line runs along the pylon. The median
+    (not the mean) keeps the result stable when one end of the band
+    slips past the edge of the pylon.
     """
     if patch > 1:
-        smooth = cv2.medianBlur(image_bgr, patch if patch % 2 else patch + 1)
+        blurred = cv2.medianBlur(image_bgr, patch if patch % 2 else patch + 1)
     else:
-        smooth = image_bgr
+        blurred = image_bgr
 
     height, width = image_bgr.shape[:2]
     u = np.asarray(u, dtype=float)
@@ -215,37 +215,37 @@ def sample_colors(image_bgr: np.ndarray, u: np.ndarray, v: np.ndarray, patch: in
     for k in range(offsets.shape[0]):
         ui = np.clip(np.rint(u + offsets[k] * dir_u).astype(int), 0, width - 1)
         vi = np.clip(np.rint(v + offsets[k] * dir_v).astype(int), 0, height - 1)
-        stack[k] = smooth[vi, ui]
+        stack[k] = blurred[vi, ui]
 
     bgr = np.median(stack, axis=0).astype(np.uint8)
     hsv = cv2.cvtColor(bgr.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
     return bgr, hsv
 
 
-def rg_kennzahl(stack: np.ndarray):
-    """(G-R)/max(B,G,R) je Pixel, dazu max(B,G,R).
+def rg_index(stack: np.ndarray):
+    """(G-R)/max(B,G,R) per pixel, plus max(B,G,R).
 
-    Positiv heisst gruenlich, negativ roetlich, um null herum farblos.
+    Positive means greenish, negative reddish, around zero colourless.
 
-    Warum nicht ueber den Farbton: am Aufbau gemessen (Rohbild + CSV, beide
-    Pylonen auf 0.85 m) liegt die ROTE Pylone bei H 5..9 mit S 156..219 --
-    bilderbuchmaessig. Die GRUENE dagegen bei H 33..67 mit S nur 64..133, also
-    quer ueber die untere Fenstergrenze (H=40) und dicht an der oberen (H=72).
-    Das ist kein Zufall: der Farbton wird bei niedriger Saettigung numerisch
-    instabil, und genau dort lebt gruen. Deshalb verliert ein Farbton-Fenster
-    gruen reihenweise und nimmt dafuer die dunkle Bande mit.
+    Why not via the hue: measured on the setup (raw image + CSV, both
+    pylons at 0.85 m) the RED pylon sits at H 5..9 with S 156..219 --
+    textbook. The GREEN one, however, at H 33..67 with S only 64..133, i.e.
+    right across the lower window limit (H=40) and close to the upper one (H=72).
+    That is no coincidence: the hue becomes numerically unstable at low
+    saturation, and that is exactly where green lives. That is why a hue window
+    loses green in droves and picks up the dark wall band instead.
 
-    Das Verhaeltnis von Gruen- zu Rotkanal ist dagegen eindeutig getrennt
-    (Median, 5..95 Perzentil, dieselbe Messung):
+    The ratio of the green to the red channel, on the other hand, is clearly separated
+    (median, 5..95 percentile, same measurement):
 
-        rote Pylone     -0.60   (-0.63 .. -0.48)
-        gruene Pylone   +0.44   (+0.17 .. +0.52)
-        Holz und Moebel -0.08   (-0.16 .. +0.01)
-        Bande und Rest   0.00   (-0.07 .. +0.16)
+        red pylon       -0.60   (-0.63 .. -0.48)
+        green pylon     +0.44   (+0.17 .. +0.52)
+        wood, furniture -0.08   (-0.16 .. +0.01)
+        wall band, rest  0.00   (-0.07 .. +0.16)
 
-    Die Normierung auf den hellsten Kanal macht die Kennzahl unabhaengig von
-    Helligkeit und Belichtung -- eine im Schatten stehende Pylone hat dieselbe
-    Kennzahl wie eine in der Sonne, nur mit mehr Rauschen.
+    Normalising to the brightest channel makes the index independent of
+    brightness and exposure -- a pylon standing in the shadow has the same
+    index as one in the sun, just with more noise.
     """
     b = stack[..., 0].astype(np.int16)
     g = stack[..., 1].astype(np.int16)
@@ -255,207 +255,207 @@ def rg_kennzahl(stack: np.ndarray):
 
 
 # ---------------------------------------------------------------------------
-# Neutralpunkt (Weissabgleich am Spielfeld)
+# Neutral point (white balance on the field)
 # ---------------------------------------------------------------------------
-# rg_kennzahl setzt stillschweigend voraus, dass eine farblose Flaeche z=0
-# ergibt. Das tut sie nur, wenn der Weissabgleich der Kamera zum Licht passt.
-# Am Aufbau gemessen (Bag wb_test, 266 Frames): die WEISSE Matte liefert
-# B=167 G=212 R=194, also z=+0.084 statt 0. Damit sind die symmetrischen
-# Schwellen +-rg_z_min in Wahrheit voellig unsymmetrisch:
+# rg_index silently assumes that a colourless surface gives z=0. It only
+# does so if the camera white balance matches the light.
+# Measured on the setup (bag wb_test, 266 frames): the WHITE mat gives
+# B=167 G=212 R=194, i.e. z=+0.084 instead of 0. So the symmetric
+# thresholds +-rg_z_min are in truth completely asymmetric:
 #
-#     gruen braucht einen Farbhub von 0.150 - 0.084 = 0.066
-#     rot   braucht einen Farbhub von 0.150 + 0.084 = 0.234   (3.5-mal so viel)
+#     green needs a colour swing of 0.150 - 0.084 = 0.066
+#     red   needs a colour swing of 0.150 + 0.084 = 0.234   (3.5 times as much)
 #
-# Deshalb sieht der Roboter ueberall gruen und verliert rot als erstes, sobald
-# die Pylone klein wird und ihre Farbe sich mit dem Hintergrund mischt. Im Bag
-# gefunden: eine rote Pylone bei Azimut 85 Grad misst z=-0.134 und faellt damit
-# unter die Schwelle -- sie wurde als 'unbekannt' verworfen.
+# That is why the robot sees green everywhere and loses red first as soon as
+# the pylon gets small and its colour mixes with the background. Found in the
+# bag: a red pylon at azimuth 85 degrees measures z=-0.134 and so falls
+# below the threshold -- it was discarded as 'unknown'.
 #
-# DER STICH IST NICHT RUNDUM GLEICH. Ueber 12 Sektoren gemessen laeuft er von
-# +0.046 bis +0.121, Spanne 0.075 -- die halbe Schwelle. Ursache ist das
-# gerichtete Licht im Raum plus der Farbgang des Fisheyes zum Rand hin. Eine
-# einzelne globale Zahl wuerde also die halbe Korrektur verschenken, deshalb
-# wird je Azimutsektor gemessen.
+# THE CAST IS NOT THE SAME ALL AROUND. Measured over 12 sectors it runs from
+# +0.046 to +0.121, a span of 0.075 -- half the threshold. The cause is the
+# directional light in the room plus the colour drift of the fisheye towards the edge. A
+# single global number would therefore give away half the correction, so it
+# is measured per azimuth sector.
 #
-# Ueber die Zeit ist der Stich dagegen bockstabil (Streuung je Sektor maximal
-# 0.006 ueber 14 Sekunden Fahrt). Er ist also kein Belichtungsproblem, sondern
-# eine feststehende Fehleinstellung -- und damit sauber messbar.
+# Over time, on the other hand, the cast is rock-stable (spread per sector at most
+# 0.006 over 14 seconds of driving). So it is not an exposure problem but
+# a fixed misadjustment -- and therefore cleanly measurable.
 #
-# Warum nicht die schwarze Bande als zweite Referenz: sie misst B=6 G=13 R=13.
-# Bei so kleinen Zahlen kippt ein einziger Digit die Kennzahl um 0.077, und der
-# Median von Ganzzahlen ist selbst wieder ganzzahlig -- z_bande sprang in der
-# Messung zwischen 0.000 und -0.077 hin und her. Die Matte bei rund 200 ist die
-# belastbare Referenz, deshalb nur ein Punkt und der MITTELWERT statt des
-# Medians (mittelt das Digit-Rauschen ueber tausende Pixel weg).
+# Why not use the black wall band as a second reference: it measures B=6 G=13 R=13.
+# With numbers this small a single digit flips the index by 0.077, and the
+# median of integers is itself an integer again -- z_band jumped back and forth
+# between 0.000 and -0.077 in the measurement. The mat at around 200 is the
+# reliable reference, hence only one point and the MEAN instead of the
+# median (averages the digit noise away over thousands of pixels).
 _RING_CACHE = {}
 
 
-def _ring_index(shape, center, r_min, r_max, sektoren, schritt):
-    """Pixelindizes eines Kreisrings, nach Azimutsektor sortiert.
+def _ring_index(shape, center, r_min, r_max, sectors, step):
+    """Pixel indices of an annulus, sorted by azimuth sector.
 
-    Wird je Geometrie EINMAL gebaut und danach wiederverwendet -- pro Frame
-    bleibt reines Indizieren uebrig. Mit ``schritt`` wird ausgeduennt; fuer den
-    Mittelwert ueber tausende Pixel ist jedes dritte Pixel mehr als genug.
+    Built ONCE per geometry and reused afterwards -- per frame
+    only plain indexing is left. ``step`` thins it out; for the
+    mean over thousands of pixels every third pixel is more than enough.
     """
     key = (tuple(shape), (round(float(center[0]), 1), round(float(center[1]), 1)),
-           float(r_min), float(r_max), int(sektoren), int(schritt))
-    treffer = _RING_CACHE.get(key)
-    if treffer is not None:
-        return treffer
-    hoehe, breite = shape[:2]
-    ys = np.arange(0, hoehe, schritt)
-    xs = np.arange(0, breite, schritt)
+           float(r_min), float(r_max), int(sectors), int(step))
+    cached = _RING_CACHE.get(key)
+    if cached is not None:
+        return cached
+    img_h, span = shape[:2]
+    ys = np.arange(0, img_h, step)
+    xs = np.arange(0, span, step)
     YY, XX = np.meshgrid(ys, xs, indexing='ij')
     dx = XX - float(center[0])
     dy = YY - float(center[1])
     rad = np.hypot(dx, dy)
-    drin = (rad >= float(r_min)) & (rad <= float(r_max))
-    sek = ((np.degrees(np.arctan2(dy, dx)) % 360.0) //
-           (360.0 / int(sektoren))).astype(np.int32)
-    treffer = (YY[drin], XX[drin], np.clip(sek[drin], 0, int(sektoren) - 1))
-    _RING_CACHE[key] = treffer
-    return treffer
+    inside = (rad >= float(r_min)) & (rad <= float(r_max))
+    sec = ((np.degrees(np.arctan2(dy, dx)) % 360.0) //
+           (360.0 / int(sectors))).astype(np.int32)
+    cached = (YY[inside], XX[inside], np.clip(sec[inside], 0, int(sectors) - 1))
+    _RING_CACHE[key] = cached
+    return cached
 
 
-def neutralpunkt(image_bgr, center, r_min, r_max, sektoren=12, schritt=3,
-                 max_chroma=30, hell_perzentil=55.0, min_pixel=150,
-                 glaetten=True):
-    """Neutralpunkt z0 der Kamera je Azimutsektor, gemessen an der Matte.
+def neutral_point(image_bgr, center, r_min, r_max, sectors=12, step=3,
+                  max_chroma=30, bright_percentile=55.0, min_pixel=150,
+                  smooth=True):
+    """Neutral point z0 of the camera per azimuth sector, measured on the mat.
 
-    Abgetastet wird ein Kreisring zwischen ``r_min`` und ``r_max``; der soll auf
-    der hellen Matte liegen, also knapp AUSSERHALB der Bande (radial nach aussen
-    heisst im Fisheye nach unten). Je Sektor werden daraus die hellen, nahezu
-    farblosen Pixel genommen -- das ist die Matte -- und ihr mittleres
-    (G-R)/max(B,G,R) gebildet.
+    An annulus between ``r_min`` and ``r_max`` is sampled; it should lie on
+    the bright mat, i.e. just OUTSIDE the wall band (radially outwards
+    means downwards in the fisheye). Per sector the bright, almost
+    colourless pixels are taken from it -- that is the mat -- and their mean
+    (G-R)/max(B,G,R) is formed.
 
-    Rueckgabe: Array der Laenge ``sektoren``. Sektor i deckt die Azimutwinkel
-    [i*360/n, (i+1)*360/n) ab, gemessen im BILD (arctan2(y-cy, x-cx)), also in
-    derselben Konvention wie ``phi`` in ``classify_zone``.
+    Returns: array of length ``sectors``. Sector i covers the azimuth angles
+    [i*360/n, (i+1)*360/n), measured in the IMAGE (arctan2(y-cy, x-cx)), i.e. in
+    the same convention as ``phi`` in ``classify_zone``.
 
-    Sektoren mit zu wenig brauchbaren Pixeln (etwas steht davor, die Matte ist
-    verdeckt) bekommen den Mittelwert der uebrigen -- eine Fehlstelle kann die
-    Korrektur also nicht verreissen.
+    Sectors with too few usable pixels (something stands in front, the mat is
+    covered) get the mean of the others -- so a gap cannot throw
+    the correction off.
     """
-    sektoren = max(int(sektoren), 1)
-    ys, xs, sek = _ring_index(image_bgr.shape, center, r_min, r_max,
-                              sektoren, max(int(schritt), 1))
+    sectors = max(int(sectors), 1)
+    ys, xs, sec = _ring_index(image_bgr.shape, center, r_min, r_max,
+                              sectors, max(int(step), 1))
     if ys.size == 0:
-        return np.zeros(sektoren, dtype=np.float32)
+        return np.zeros(sectors, dtype=np.float32)
 
     px = image_bgr[ys, xs].astype(np.float32)
     b, g, r = px[:, 0], px[:, 1], px[:, 2]
     mx = np.maximum(np.maximum(b, g), r)
     lum = (b + g + r) / 3.0
-    farblos = np.abs(g - r) < float(max_chroma)
+    neutral = np.abs(g - r) < float(max_chroma)
 
-    werte = np.full(sektoren, np.nan, dtype=np.float32)
-    for i in range(sektoren):
-        m = (sek == i) & farblos
+    vals = np.full(sectors, np.nan, dtype=np.float32)
+    for i in range(sectors):
+        m = (sec == i) & neutral
         if m.sum() < int(min_pixel):
             continue
-        grenze = np.percentile(lum[m], float(hell_perzentil))
-        m = m & (lum >= grenze)          # nur die helle Haelfte = Matte
+        cutoff = np.percentile(lum[m], float(bright_percentile))
+        m = m & (lum >= cutoff)          # only the bright half = mat
         if m.sum() < int(min_pixel) // 2:
             continue
-        # Mittelwert, nicht Median: der mittelt das Digit-Rauschen weg.
-        werte[i] = (g[m].mean() - r[m].mean()) / max(mx[m].mean(), 1.0)
+        # Mean, not median: it averages the digit noise away.
+        vals[i] = (g[m].mean() - r[m].mean()) / max(mx[m].mean(), 1.0)
 
-    gut = np.isfinite(werte)
-    if not gut.any():
-        return np.zeros(sektoren, dtype=np.float32)
-    werte[~gut] = float(werte[gut].mean())
+    ok = np.isfinite(vals)
+    if not ok.any():
+        return np.zeros(sectors, dtype=np.float32)
+    vals[~ok] = float(vals[ok].mean())
 
-    if glaetten and sektoren >= 5:
-        # zyklischer 3-Punkt-Mittelwert, der Stich springt nicht von Sektor
-        # zu Sektor
-        werte = (np.roll(werte, 1) + werte + np.roll(werte, -1)) / 3.0
-    return werte.astype(np.float32)
+    if smooth and sectors >= 5:
+        # cyclic 3-point mean, the cast does not jump from sector
+        # to sector
+        vals = (np.roll(vals, 1) + vals + np.roll(vals, -1)) / 3.0
+    return vals.astype(np.float32)
 
 
-def z0_je_punkt(phi, z0_sektoren):
-    """Sektorwerte zyklisch auf beliebige Azimutwinkel interpolieren.
+def z0_per_point(phi, z0_sectors):
+    """Interpolate the sector values cyclically to arbitrary azimuth angles.
 
-    Gestuetzt wird auf die Sektormitten, damit an den Sektorgrenzen keine
-    Treppe entsteht.
+    The support points are the sector centres, so that no staircase
+    appears at the sector boundaries.
     """
-    z0 = np.asarray(z0_sektoren, dtype=np.float32).ravel()
+    z0 = np.asarray(z0_sectors, dtype=np.float32).ravel()
     if z0.size == 0:
         return np.zeros(np.asarray(phi).shape, dtype=np.float32)
     if z0.size == 1:
         return np.full(np.asarray(phi).shape, float(z0[0]), dtype=np.float32)
-    zwei_pi = 2.0 * np.pi
-    mitten = (np.arange(z0.size) + 0.5) * (zwei_pi / z0.size)
-    stuetz_x = np.concatenate([mitten - zwei_pi, mitten, mitten + zwei_pi])
-    stuetz_y = np.tile(z0, 3)
-    return np.interp(np.asarray(phi, dtype=np.float32) % zwei_pi,
-                     stuetz_x, stuetz_y).astype(np.float32)
+    two_pi = 2.0 * np.pi
+    mids = (np.arange(z0.size) + 0.5) * (two_pi / z0.size)
+    knots_x = np.concatenate([mids - two_pi, mids, mids + two_pi])
+    knots_y = np.tile(z0, 3)
+    return np.interp(np.asarray(phi, dtype=np.float32) % two_pi,
+                     knots_x, knots_y).astype(np.float32)
 
 
-def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
-                  r_aussen: np.ndarray, center, min_frac: float = 0.20,
+def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_inner: np.ndarray,
+                  r_outer: np.ndarray, center, min_frac: float = 0.20,
                   ranges: dict = None, steps: int = 13, black_v_max: int = 45,
-                  nutz_anteil: float = 1.0, adaptiv_faktor: float = 0.0,
-                  adaptiv_grad: float = 20.0,
+                  use_frac: float = 1.0, adaptive_factor: float = 0.0,
+                  adaptive_deg: float = 20.0,
                   rg_z_min: float = 0.15, rg_s_min: int = 60,
                   rg_d_min: int = 20, z0=None):
-    """Farbe je Punkt per Abstimmung ueber ein radiales Segment.
+    """Colour per point by voting over a radial segment.
 
-    Das Segment ist NICHT konstant breit, sondern wird je Punkt aus zwei
-    Hoehen berechnet und in Bildradien uebergeben (``r_innen`` = obere Kante,
-    ``r_aussen`` = untere Kante; radial nach aussen heisst im Fisheye "nach
-    unten"). Genau das ist der Punkt: eine Bande fester Hoehe erscheint im
-    Fisheye nicht als Kreisband konstanter Dicke.
+    The segment is NOT of constant width; it is computed per point from two
+    heights and passed in as image radii (``r_inner`` = upper edge,
+    ``r_outer`` = lower edge; radially outwards means "downwards" in the
+    fisheye). That is exactly the point: a wall band of fixed height does not
+    appear in the fisheye as a circular band of constant thickness.
 
-    Sitzt das Objektiv auf Hoehe der Bandenoberkante, dann ist fuer die
-    Oberkante die Hoehendifferenz null, theta also exakt 90 Grad und der
-    Bildradius konstant -- die Oberkante laeuft als gerade Linie. Die
-    Unterkante liegt die Bandenhoehe tiefer und wandert mit der Entfernung
-    nach oben, weil theta sich von unten an 90 Grad annaehert:
+    If the lens sits at the height of the top edge of the wall band, the height
+    difference for the top edge is zero, theta is therefore exactly 90 degrees and the
+    image radius constant -- the top edge runs as a straight line. The
+    bottom edge is one band height lower and moves up with distance,
+    because theta approaches 90 degrees from below:
 
-        Bandenhoehe 9 cm, f=262 px/rad:
-        0.3 m -> Unterkante bei r=489   (Zone 77 px dick)
-        1.0 m -> r=436                  (Zone 24 px)
-        3.0 m -> r=420                  (Zone  8 px)
+        band height 9 cm, f=262 px/rad:
+        0.3 m -> bottom edge at r=489   (zone 77 px thick)
+        1.0 m -> r=436                  (zone 24 px)
+        3.0 m -> r=420                  (zone  8 px)
 
-    Eine konstante Pixelbreite ist deshalb nah viel zu schmal und fern zu
-    breit -- fern ragt sie ueber die Bande hinaus und sammelt die helle Wand
-    dahinter mit ein, was die Punkte faelschlich auf "unbekannt" zieht.
+    A constant pixel width is therefore much too narrow near and too
+    wide far away -- far away it sticks out above the wall band and also collects the bright wall
+    behind it, which wrongly pulls the points to "unknown".
 
-    Abgestimmt statt gemittelt: gezaehlt wird, welcher Anteil der Pixel im
-    Segment zu welcher Farbe passt; ab ``min_frac`` gewinnt eine Farbe. Ein
-    Median ueber ein Segment, das halb auf der Pylone und halb auf der Wand
-    liegt, ergaebe dagegen Mischmasch. (Gegenprobe am Aufbau: nimmt man statt
-    der Abstimmung das gesaettigtste Pixel, findet man in fast jeder Linie
-    irgendwas und erzeugt Cluster von 30 Grad Breite, wo eine Pylone 5 Grad
-    haette.)
+    Voted instead of averaged: it counts which fraction of the pixels in the
+    segment matches which colour; from ``min_frac`` on a colour wins. A
+    median over a segment that lies half on the pylon and half on the wall
+    would give a mishmash instead. (Cross-check on the setup: taking the
+    most saturated pixel instead of the vote finds something in almost every line
+    and produces clusters 30 degrees wide where a pylon would have
+    5 degrees.)
 
-    Rueckgabe: ``(labels, bgr, hsv)``. Die Farbe ist der Median der Pixel, die
-    fuer das Gewinnerlabel gestimmt haben (sonst der Median des ganzen
-    Segments), damit CSV und der raw-Modus der PointCloud etwas Sinnvolles
-    zeigen.
+    Returns: ``(labels, bgr, hsv)``. The colour is the median of the pixels that
+    voted for the winning label (otherwise the median of the whole
+    segment), so that the CSV and the raw mode of the PointCloud show something
+    sensible.
     """
     ranges = ranges or DEFAULT_RANGES
     height, width = image_bgr.shape[:2]
     cx, cy = center
     phi = np.asarray(phi, dtype=float)
-    r_innen = np.asarray(r_innen, dtype=float)
-    r_aussen = np.asarray(r_aussen, dtype=float)
+    r_inner = np.asarray(r_inner, dtype=float)
+    r_outer = np.asarray(r_outer, dtype=float)
     steps = max(int(steps), 2)
 
     cos_p, sin_p = np.cos(phi), np.sin(phi)
-    # Nur den mittleren Teil der Zone abtasten. Sitzen die Zonengrenzen sauber,
-    # ist die Mitte die beste Stelle: maximaler Abstand zur hellen Matte unten
-    # und zur Wand oben. Die Raender tragen dann nur noch Mischpixel bei.
-    # 1.0 = ganze Zone, 0.33 = mittleres Drittel. Ganz auf eine Linie zu gehen
-    # ist allerdings riskant -- dann haengt alles daran, dass die Zone auf ein
-    # paar Pixel genau sitzt, und genau das war vorher das Problem.
-    nutz = min(max(float(nutz_anteil), 0.02), 1.0)
-    rand = (1.0 - nutz) / 2.0
-    anteile = np.linspace(rand, 1.0 - rand, steps)
+    # Only sample the middle part of the zone. If the zone limits sit right,
+    # the middle is the best spot: maximum distance to the bright mat below
+    # and to the wall above. The edges then only contribute mixed pixels.
+    # 1.0 = whole zone, 0.33 = middle third. Going all the way down to one line
+    # is risky though -- then everything depends on the zone sitting right to a
+    # few pixels, and exactly that was the problem before.
+    use = min(max(float(use_frac), 0.02), 1.0)
+    margin = (1.0 - use) / 2.0
+    fracs = np.linspace(margin, 1.0 - margin, steps)
 
     stack = np.empty((steps, phi.size, 3), dtype=np.uint8)
-    for k, t in enumerate(anteile):
-        r = r_innen + t * (r_aussen - r_innen)
+    for k, t in enumerate(fracs):
+        r = r_inner + t * (r_outer - r_inner)
         ui = np.clip(np.rint(cx + r * cos_p).astype(int), 0, width - 1)
         vi = np.clip(np.rint(cy + r * sin_p).astype(int), 0, height - 1)
         stack[k] = image_bgr[vi, ui]
@@ -466,100 +466,100 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
     ss = hsv_stack[..., 1].astype(np.int16)
     vv = hsv_stack[..., 2].astype(np.int16)
 
-    # --- Saettigungsschwelle: absolut oder relativ zur Umgebung -------- #
-    # Absolute Schwellen scheitern an dunklen Pylonen: am Aufbau hatte eine im
-    # Schatten S=66 bei V=15, die schwarze Bande daneben S=28 bei V=17 -- in
-    # BEIDEN Kanaelen ueberlappend, also mit keiner festen Schwelle trennbar.
-    # Im Verhaeltnis ist die Sache dagegen eindeutig: die Pylone ist 2.4- bis
-    # 2.9-mal so gesaettigt wie die Bande neben ihr, und das gilt im Schatten
-    # wie in der Sonne. Deshalb kann die Schwelle mitwandern.
+    # --- saturation threshold: absolute or relative to the surroundings -- #
+    # Absolute thresholds fail on dark pylons: on the setup one in the
+    # shadow had S=66 at V=15, the black wall band next to it S=28 at V=17 -- overlapping in
+    # BOTH channels, so not separable with any fixed threshold.
+    # As a ratio, on the other hand, the matter is clear: the pylon is 2.4 to
+    # 2.9 times as saturated as the wall band next to it, and that holds in the shadow
+    # as in the sun. That is why the threshold can move along.
     #
-    # Der Hintergrund ist der gleitende Median der Saettigung ueber ein
-    # Azimutfenster. Es muss deutlich breiter sein als eine Pylone, sonst
-    # hebt sie ihre eigene Schwelle an: bei 0.8 m ist eine Pylone rund 7 Grad
-    # breit, mit 20 Grad Fenster macht sie also gut ein Sechstel aus und der
-    # Median bleibt fest bei der Bande.
-    schwellen = {name: float(spec['s_min']) for name, spec in ranges.items()}
-    if adaptiv_faktor > 0.0 and phi.size >= 16:
-        sat_pkt = np.median(ss, axis=0)
-        ordnung = np.argsort(phi)
-        sortiert = sat_pkt[ordnung]
-        breite = max(int(round(phi.size * adaptiv_grad / 360.0)), 3)
-        if breite % 2 == 0:
-            breite += 1
-        halb = breite // 2
-        # zyklisch, der Azimut laeuft rundum
-        lang = np.concatenate([sortiert[-halb:], sortiert, sortiert[:halb]])
-        grund_sortiert = np.median(sliding_window_view(lang, breite), axis=1)
-        grund = np.empty_like(grund_sortiert)
-        grund[ordnung] = grund_sortiert
+    # The background is the sliding median of the saturation over an
+    # azimuth window. It has to be clearly wider than a pylon, otherwise
+    # the pylon raises its own threshold: at 0.8 m a pylon is about 7 degrees
+    # wide, so with a 20 degree window it makes up a good sixth and the
+    # median stays firmly on the wall band.
+    thresholds = {name: float(spec['s_min']) for name, spec in ranges.items()}
+    if adaptive_factor > 0.0 and phi.size >= 16:
+        sat_pt = np.median(ss, axis=0)
+        order = np.argsort(phi)
+        sat_sorted = sat_pt[order]
+        span = max(int(round(phi.size * adaptive_deg / 360.0)), 3)
+        if span % 2 == 0:
+            span += 1
+        half = span // 2
+        # cyclic, the azimuth runs all the way round
+        padded = np.concatenate([sat_sorted[-half:], sat_sorted, sat_sorted[:half]])
+        bg_sorted = np.median(sliding_window_view(padded, span), axis=1)
+        bg = np.empty_like(bg_sorted)
+        bg[order] = bg_sorted
         for name, spec in ranges.items():
-            # Absolute Untergrenze bleibt als Rauschsperre bestehen, sie ist
-            # aber unkritisch, weil die relative Schwelle meist hoeher liegt.
-            schwellen[name] = np.maximum(grund * adaptiv_faktor,
-                                         float(spec['s_min']) * 0.5)
+            # The absolute lower bound stays as a noise lock, but it
+            # is uncritical because the relative threshold is usually higher.
+            thresholds[name] = np.maximum(bg * adaptive_factor,
+                                          float(spec['s_min']) * 0.5)
 
-    zz, mxs, dd = rg_kennzahl(stack)
+    zz, mxs, dd = rg_index(stack)
 
-    # Neutralpunkt abziehen. Eine farblose Flaeche soll z=0 ergeben; tut sie
-    # wegen des Weissabgleichs nicht, verschieben wir die Messung statt der
-    # Schwellen -- dann behalten rg_z_min und rg_d_min ihre bisherige Bedeutung
-    # und ihre eingefahrene Abstimmung.
+    # Subtract the neutral point. A colourless surface should give z=0; if it
+    # does not because of the white balance, we shift the measurement instead of the
+    # thresholds -- then rg_z_min and rg_d_min keep their previous meaning
+    # and their established tuning.
     #
-    # dd wird mit mx skaliert mitgezogen: der Versatz in (G-R) waechst mit der
-    # Helligkeit, denn z = (G-R)/mx heisst (G-R) = z*mx. Ein fester Abzug waere
-    # auf der hellen Matte zu klein und auf der dunklen Bande zu gross.
+    # dd is carried along scaled with mx: the offset in (G-R) grows with the
+    # brightness, because z = (G-R)/mx means (G-R) = z*mx. A fixed subtraction would be
+    # too small on the bright mat and too large on the dark wall band.
     if z0 is not None:
-        versatz = np.asarray(z0, dtype=np.float32)
-        if versatz.ndim:
-            versatz = versatz.reshape(1, -1)
-        zz = zz - versatz
-        dd = dd - versatz * mxs
+        offset = np.asarray(z0, dtype=np.float32)
+        if offset.ndim:
+            offset = offset.reshape(1, -1)
+        zz = zz - offset
+        dd = dd - offset * mxs
 
-    labels = np.full(phi.size, 'unbekannt', dtype=object)
+    labels = np.full(phi.size, 'unknown', dtype=object)
     best = np.full(phi.size, float(min_frac) - 1e-9)
     hits = {}
     for name, spec in ranges.items():
-        if rg_z_min > 0.0 and name in ('rot', 'gruen'):
-            # Rot und Gruen ueber das Kanalverhaeltnis (siehe rg_kennzahl).
-            hit = (zz >= rg_z_min) if name == 'gruen' else (zz <= -rg_z_min)
+        if rg_z_min > 0.0 and name in ('red', 'green'):
+            # Red and green via the channel ratio (see rg_index).
+            hit = (zz >= rg_z_min) if name == 'green' else (zz <= -rg_z_min)
             hit &= ss >= rg_s_min
-            # ABSOLUTES Tor. Ohne das reicht ein Farbstich: ein dunkles,
-            # fast neutrales Bandenpixel BGR(30,35,25) hat S=73 und z=+0.29 --
-            # beide relativen Tore offen, obwohl der Kanalunterschied nur 10
-            # Zaehlwerte betraegt. Am Aufbau gemessen liegt die Bande bei
-            # |G-R| = 0 (5..95 Perzentil -2..+9), die gruene Pylone bei 38,
-            # die rote bei 110.
+            # ABSOLUTE gate. Without it a colour cast is enough: a dark,
+            # almost neutral wall band pixel BGR(30,35,25) has S=73 and z=+0.29 --
+            # both relative gates open, although the channel difference is only 10
+            # counts. Measured on the setup the wall band sits at
+            # |G-R| = 0 (5..95 percentile -2..+9), the green pylon at 38,
+            # the red one at 110.
             hit &= np.abs(dd) >= rg_d_min
         else:
-            # magenta (Parkzone) bleibt auf dem Farbton-Weg: dort ist der
-            # Farbton eindeutig und es gibt keine Messreihe fuer eine bessere
-            # Kennzahl.
+            # magenta (parking zone) stays on the hue path: the hue is
+            # unambiguous there and there is no measurement series for a better
+            # index.
             hit = np.zeros(hh.shape, dtype=bool)
             for lo, hi in spec['hue']:
                 hit |= (hh >= lo) & (hh <= hi)
-            hit &= (ss >= np.asarray(schwellen[name])) & (vv >= spec['v_min'])
+            hit &= (ss >= np.asarray(thresholds[name])) & (vv >= spec['v_min'])
         hits[name] = hit
         frac = hit.mean(0)
         take = frac > best
         labels[take] = name
         best[take] = frac[take]
 
-    # Keine Farbe hat die Mehrheit: schwarz, wenn das Segment ueberwiegend
-    # dunkel ist (Bande, Schatten), sonst unbekannt.
-    offen = best < float(min_frac)
-    labels[offen & ((vv <= black_v_max).mean(0) >= 0.5)] = 'schwarz'
+    # No colour has the majority: black if the segment is mostly
+    # dark (wall band, shadow), otherwise unknown.
+    undecided = best < float(min_frac)
+    labels[undecided & ((vv <= black_v_max).mean(0) >= 0.5)] = 'black'
 
-    gewinner = np.zeros(hh.shape, dtype=bool)
+    winner = np.zeros(hh.shape, dtype=bool)
     for name, hit in hits.items():
-        gewinner |= hit & (labels == name)[None, :]
+        winner |= hit & (labels == name)[None, :]
 
     arr = stack.astype(float)
     med = np.median(arr, axis=0)
-    hat = gewinner.any(0)
-    if hat.any():
-        maskiert = np.where(gewinner[..., None], arr, np.nan)
-        med[hat] = np.nanmedian(maskiert[:, hat], axis=0)
+    has_winner = winner.any(0)
+    if has_winner.any():
+        masked = np.where(winner[..., None], arr, np.nan)
+        med[has_winner] = np.nanmedian(masked[:, has_winner], axis=0)
     bgr = med.astype(np.uint8)
     hsv = cv2.cvtColor(bgr.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
     return labels.tolist(), bgr, hsv
@@ -567,17 +567,17 @@ def classify_zone(image_bgr: np.ndarray, phi: np.ndarray, r_innen: np.ndarray,
 
 def find_color_blob(image_bgr: np.ndarray, ranges: dict = None, min_area: int = 300,
                     mask_circle=None, only_label: str = '', max_area: int = 0):
-    """Sucht den groessten rot/gruen/magenta-Blob im Bild.
+    """Looks for the largest red/green/magenta blob in the image.
 
-    ``mask_circle`` ist optional (cx, cy, radius) und blendet alles ausserhalb
-    des Fisheye-Bildkreises aus.
+    ``mask_circle`` is optional (cx, cy, radius) and masks out everything outside
+    the fisheye image circle.
 
-    Rueckgabe: (u, v, label, area, r_innen, r_aussen) oder None. Die beiden
-    Radien sind der kleinste und groesste Abstand der Blob-Kontur zum
-    Bildkreismittelpunkt. Bei einer stehenden Pylone entspricht ``r_aussen``
-    dem Fusspunkt auf der Matte und ``r_innen`` der Oberkante -- radial nach
-    aussen heisst im Fisheye ja "nach unten". Daraus kalibriert
-    ``rotation_calibration`` die Brennweite.
+    Returns: (u, v, label, area, r_inner, r_outer) or None. The two
+    radii are the smallest and largest distance of the blob contour from the
+    image circle centre. For a standing pylon ``r_outer`` corresponds to
+    the foot point on the mat and ``r_inner`` to the top edge -- radially
+    outwards means "downwards" in the fisheye after all. From this
+    ``rotation_calibration`` calibrates the focal length.
     """
     ranges = ranges or DEFAULT_RANGES
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
@@ -590,9 +590,9 @@ def find_color_blob(image_bgr: np.ndarray, ranges: dict = None, min_area: int = 
 
     best = None
     for name, spec in ranges.items():
-        # Auf eine Farbe festnageln, wenn gewuenscht -- sonst gewinnt der
-        # groesste Fleck im Bild, und das ist oft irgendein Gegenstand im Raum
-        # statt der Kalibrierpylone.
+        # Pin it to one colour if requested -- otherwise the largest
+        # blob in the image wins, and that is often some object in the room
+        # instead of the calibration pylon.
         if only_label and name != only_label:
             continue
         mask = np.zeros(image_bgr.shape[:2], np.uint8)
@@ -620,17 +620,17 @@ def find_color_blob(image_bgr: np.ndarray, ranges: dict = None, min_area: int = 
             if mask_circle is not None:
                 points = contour.reshape(-1, 2).astype(float)
                 radii = np.hypot(points[:, 0] - mask_circle[0], points[:, 1] - mask_circle[1])
-                r_innen, r_aussen = float(radii.min()), float(radii.max())
+                r_inner, r_outer = float(radii.min()), float(radii.max())
             else:
-                r_innen = r_aussen = float('nan')
+                r_inner = r_outer = float('nan')
 
             best = (moments['m10'] / moments['m00'], moments['m01'] / moments['m00'],
-                    name, area, r_innen, r_aussen)
+                    name, area, r_inner, r_outer)
     return best
 
 
 def ranges_from_params(node, prefix: str = 'color') -> dict:
-    """Baut DEFAULT_RANGES aus ROS-Parametern, damit die Schwellen live passen."""
+    """Builds DEFAULT_RANGES from ROS parameters so the thresholds can be tuned live."""
     ranges = {}
     for name, spec in DEFAULT_RANGES.items():
         flat = [bound for pair in spec['hue'] for bound in pair]
