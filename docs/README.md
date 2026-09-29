@@ -20,7 +20,7 @@ and the printed copy are generated from the same files.
 - Images relative to the chapter: `![Caption](../figures/name.svg)`. Prefer
   SVG for plots and diagrams, JPG for photos.
 - Diagrams as ` ```mermaid ` blocks (flowcharts, state machines, sequence
-  diagrams). GitHub renders them; the build turns them into SVG.
+  diagrams). GitHub renders them; the build turns them into images for the PDF.
 - Notes for the authors go into `<!-- ... -->`, they show up nowhere.
 - Every claim that has a number needs a source: a figure, a table, a bag or
   a commit.
