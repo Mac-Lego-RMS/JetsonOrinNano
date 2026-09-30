@@ -1,0 +1,16 @@
+[Unit]
+Description=Robot bringup (docker + tmux)
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=macjetson
+WorkingDirectory=/home/macjetson/ros2_ws
+ExecStart=/home/macjetson/ros2_ws/start_robot.sh
+ExecStop=/usr/bin/docker rm -f yolo_dev
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

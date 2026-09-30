@@ -1,0 +1,10 @@
+bno055:
+  ros__parameters:
+    connection_type: "i2c"
+    i2c_bus: 7
+    i2c_addr: 0x28
+    data_query_frequency: 100
+    calib_status_frequency: 0.1
+    frame_id: "bno055"
+    placement_axis_remap: "P1"
+    publish_only_imu: true    # only /bno055/imu (saves CPU, needs the patched driver)

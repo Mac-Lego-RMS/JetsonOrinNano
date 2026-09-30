@@ -1,0 +1,4 @@
+# PiCam 360 (HD USB Camera, 32e4:8830) -- fixed name /dev/picam, like the rplidar.
+# ATTR{index}=="0" selects the IMAGE node; index 1 is the metadata node of the
+# same camera and delivers no video.
+KERNEL=="video*", ATTRS{idVendor}=="32e4", ATTRS{idProduct}=="8830", ATTR{index}=="0", MODE:="0666", SYMLINK+="picam"
