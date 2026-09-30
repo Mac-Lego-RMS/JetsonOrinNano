@@ -242,7 +242,7 @@ rail (`15Vin`).
 The reason this became possible is not an electrical one. Earlier revisions had no
 wheel encoder, so a given PWM duty cycle produced a different speed at a different
 battery voltage, and a regulated motor rail was the only way to make the vehicle's
-behaviour repeatable. With **encoder feedback (508 pulses per wheel revolution)**
+behaviour repeatable. With **encoder feedback (408 counts per wheel revolution)**
 closing the speed loop, the motor supply voltage no longer needs to be constant —
 the controller compensates for it.
 
@@ -496,7 +496,7 @@ condition:
 
 - **LiDAR** detects obstacles before contact and the planner avoids them.
 - **Wheel encoder** detects a stall after contact: duty is commanded, but the
-  508-pulse-per-revolution encoder reports no corresponding motion. This is
+  408-count-per-revolution encoder reports no corresponding motion. This is
   independent of supply voltage, of load and of sense-resistor tolerance.
 
 The current sense remains on the board as instrumentation and is published in
@@ -515,7 +515,7 @@ and a working vehicle is not modified two weeks before an event.
 
 #### Encoder interface
 
-Hall-effect encoder, **508 pulses per wheel revolution**, both channels evaluated.
+Hall-effect encoder, **408 counts per wheel revolution**, both channels evaluated.
 Each channel passes through a calculated RC low-pass filter:
 
 $$
@@ -526,7 +526,7 @@ with 4.7 kΩ pull-ups to 3.3 V. Motor power, ground, encoder supply and both
 encoder channels share a single 6-pin JST connector (J5), so the drivetrain
 attaches with one cable.
 
-<!-- TODO: highest expected pulse rate 508 * v / (pi * d_wheel) - needs the wheel diameter, compare against the 15.9 kHz corner frequency. -->
+<!-- TODO: highest expected count rate 408 * v / (pi * d_wheel) - needs the wheel diameter, compare against the 15.9 kHz corner frequency. -->
 
 ## Wiring
 
