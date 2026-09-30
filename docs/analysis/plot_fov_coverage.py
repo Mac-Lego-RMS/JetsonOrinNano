@@ -9,7 +9,8 @@ The robot drives along the centre of a 1 m lane towards the corner. For every
 distance to the front wall it counts the 6 seats of the next straight that
 are inside the horizontal field of view AND not hidden behind the 1 x 1 m
 inner block, once for the old forward camera (120 deg) and once for the
-fisheye (270 deg; the rear 90 deg are blocked by the LiDAR mount). A second
+fisheye (240 deg; a board blocks the rear for LiDAR and camera, and the
+software cuts +-60 deg around the rear, wall_extraction.BLOCK_ANGLE). A second
 pair of curves only counts seats within the range the colour is trusted
 (obstacle_map.py, 1.60 m).
 
@@ -26,7 +27,7 @@ import style
 from robot_constants import INNER_HALF, OUTER_HALF, seats_field, square
 
 FOV_OLD = 120.0
-FOV_NEW = 270.0
+FOV_NEW = 240.0     # 360 - 2 * wall_extraction.BLOCK_ANGLE
 COLOUR_RANGE = 1.60     # obstacle_map.py: colour only trusted up to here
 SCAN_HALT_FRONT = 1.10  # round1_controller: scan halt in front of the wall
 LOOKAHEAD_HALT_FRONT = 1.85
@@ -113,7 +114,7 @@ def main():
         sp.set_visible(False)
     ax_map.set_title(f'View at the scan halt ({SCAN_HALT_FRONT:.2f} m)')
     ax_map.plot([], [], 's', ms=6, mfc=style.CAT[1], mec=style.INK_2, label='seen with both')
-    ax_map.plot([], [], 's', ms=6, mfc=style.CAT[0], mec=style.INK_2, label='seen with 270 deg only')
+    ax_map.plot([], [], 's', ms=6, mfc=style.CAT[0], mec=style.INK_2, label=f'seen with {FOV_NEW:.0f} deg only')
     ax_map.legend(loc='upper center', bbox_to_anchor=(0.5, -0.02), ncol=2, fontsize=7, frameon=False)
 
     # --- right: count over the approach ------------------------------------
@@ -139,7 +140,7 @@ def main():
     for f in (SCAN_HALT_FRONT, LOOKAHEAD_HALT_FRONT):
         print(f'front wall {f:.2f} m: 120 deg sees {count_visible(f, FOV_OLD)}/6 '
               f'({count_visible(f, FOV_OLD, COLOUR_RANGE)} within {COLOUR_RANGE} m), '
-              f'270 deg sees {count_visible(f, FOV_NEW)}/6 '
+              f'{FOV_NEW:.0f} deg sees {count_visible(f, FOV_NEW)}/6 '
               f'({count_visible(f, FOV_NEW, COLOUR_RANGE)} within {COLOUR_RANGE} m)')
 
 

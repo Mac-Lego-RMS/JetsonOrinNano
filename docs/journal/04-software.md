@@ -312,9 +312,10 @@ is switched to the full field at the latest 0.40 m before the front wall.
 
 [`lidar_pixel_mapper.py`](../../src/camera_lidar_fusion/camera_lidar_fusion/lidar_pixel_mapper.py):
 the fisheye camera sits above the LiDAR with its lens facing the ceiling
-(opening angle 197°, calibrated; see chapter 3). It sees the full circle around
-the car except the rear 90°, which the LiDAR mount blocks for the camera and the
-LiDAR alike, so both sensors cover the same 270°. Instead of detecting
+(opening angle 197°, calibrated; see chapter 3). At the rear a circuit board
+blocks the view of the LiDAR and the camera alike (measured from −33° to +59°
+around the rear). The software cuts this sector symmetrically at ±60° and uses
+only the front 240° for walls, pillars and colour. Instead of detecting
 pillars in the image, every LiDAR point is projected into the image
 (equidistant fisheye model $r = f\theta$, image circle found by a least-squares
 circle fit) and the pixels around it vote for a colour label. Before the
@@ -356,10 +357,14 @@ mask pillars before the wall extraction.
 
 Why the fisheye instead of the old 120° camera: at the scan halt 1.10 m
 before the front wall, the 120° camera sees 3 of the 6 seats of the next
-straight, the fisheye with its 270° horizontal view all 6. The robot can plan the next straight before it
+straight, the fisheye with the 240° it uses all 6. The robot can plan the next straight before it
 turns.
 
-![Seats of the next straight in view before the corner, 120° vs. 270° horizontal field of view (geometry only).](../figures/fov_coverage.svg)
+![Seats of the next straight in view before the corner, 120° vs. 240° horizontal field of view (geometry only).](../figures/fov_coverage.svg)
+
+<!-- TODO (Jannik): regenerate the figure with FOV_NEW = 240
+(python3 docs/analysis/plot_fov_coverage.py); it still shows 270 deg. At the
+scan halt the result is the same: 6 of 6 seats with 220, 240 and 270 deg. -->
 
 Pooled over 59 bags (1.15 million points on red, 0.96 million on green pillars,
 reference: the robot's own final map), red is classified correctly for 48–63 %
