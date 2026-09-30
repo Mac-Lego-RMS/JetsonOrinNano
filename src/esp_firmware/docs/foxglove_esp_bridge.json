@@ -1,0 +1,718 @@
+{
+  "configById": {
+    "Tab!haupt": {
+      "activeTabIdx": 0,
+      "tabs": [
+        {
+          "title": "Fahren",
+          "layout": {
+            "direction": "row",
+            "splitPercentage": 26,
+            "first": {
+              "direction": "column",
+              "splitPercentage": 58,
+              "first": "Teleop!drive",
+              "second": {
+                "direction": "column",
+                "splitPercentage": 50,
+                "first": "Publish!stop",
+                "second": "Publish!move"
+              }
+            },
+            "second": {
+              "direction": "column",
+              "splitPercentage": 55,
+              "first": "Plot!tempo",
+              "second": {
+                "direction": "row",
+                "splitPercentage": 62,
+                "first": "Plot!stellung",
+                "second": "Gauge!strom"
+              }
+            }
+          }
+        },
+        {
+          "title": "Zeit & Link",
+          "layout": {
+            "direction": "row",
+            "splitPercentage": 58,
+            "first": {
+              "direction": "column",
+              "splitPercentage": 55,
+              "first": "Plot!latenz",
+              "second": "Plot!umlauf"
+            },
+            "second": {
+              "direction": "column",
+              "splitPercentage": 34,
+              "first": "Plot!drift",
+              "second": {
+                "direction": "column",
+                "splitPercentage": 58,
+                "first": "Plot!versatz",
+                "second": "CallService!resync"
+              }
+            }
+          }
+        },
+        {
+          "title": "Akku & Zustand",
+          "layout": {
+            "direction": "row",
+            "splitPercentage": 58,
+            "first": {
+              "direction": "column",
+              "splitPercentage": 68,
+              "first": "Plot!akku",
+              "second": "Indicator!akkuwarn"
+            },
+            "second": {
+              "direction": "column",
+              "splitPercentage": 34,
+              "first": "Gauge!fortschritt",
+              "second": {
+                "direction": "column",
+                "splitPercentage": 50,
+                "first": "RawMessages!movedone",
+                "second": "RawMessages!button"
+              }
+            }
+          }
+        },
+        {
+          "title": "Diagnose & Konsole",
+          "layout": {
+            "direction": "row",
+            "splitPercentage": 50,
+            "first": {
+              "direction": "column",
+              "splitPercentage": 60,
+              "first": "DiagnosticStatusPanel!link",
+              "second": "DiagnosticSummary!alle"
+            },
+            "second": {
+              "direction": "column",
+              "splitPercentage": 45,
+              "first": "RawMessages!konsole",
+              "second": "Log!rosout"
+            }
+          }
+        },
+        {
+          "title": "Kalibrieren",
+          "layout": {
+            "direction": "row",
+            "splitPercentage": 34,
+            "first": {
+              "direction": "column",
+              "splitPercentage": 46,
+              "first": "Publish!calaction",
+              "second": "RawMessages!calstate"
+            },
+            "second": {
+              "direction": "row",
+              "splitPercentage": 50,
+              "first": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "CallService!calstart",
+                "second": "CallService!torquefree"
+              },
+              "second": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "CallService!calsave",
+                "second": "CallService!trimsave"
+              }
+            }
+          }
+        },
+        {
+          "title": "Service",
+          "layout": {
+            "direction": "row",
+            "splitPercentage": 50,
+            "first": {
+              "direction": "column",
+              "splitPercentage": 50.0,
+              "first": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "CallService!estop",
+                "second": "CallService!moveabort"
+              },
+              "second": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "CallService!pidget",
+                "second": "CallService!pidsave"
+              }
+            },
+            "second": {
+              "direction": "column",
+              "splitPercentage": 50.0,
+              "first": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "CallService!stampon",
+                "second": "CallService!setled"
+              },
+              "second": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "CallService!torque",
+                "second": "RawMessages!pid"
+              }
+            }
+          }
+        },
+        {
+          "title": "Befehle",
+          "layout": {
+            "direction": "row",
+            "splitPercentage": 50,
+            "first": {
+              "direction": "column",
+              "splitPercentage": 66.67,
+              "first": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "Publish!motor",
+                "second": "Publish!steer"
+              },
+              "second": "Publish!trim"
+            },
+            "second": {
+              "direction": "column",
+              "splitPercentage": 66.67,
+              "first": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "Publish!led",
+                "second": "Publish!pidset"
+              },
+              "second": "Publish!cal"
+            }
+          }
+        }
+      ]
+    },
+    "Teleop!drive": {
+      "topic": "/cmd_vel",
+      "publishRate": 10,
+      "upButton": {
+        "field": "linear-x",
+        "value": 0.5
+      },
+      "downButton": {
+        "field": "linear-x",
+        "value": -0.5
+      },
+      "leftButton": {
+        "field": "angular-z",
+        "value": 1
+      },
+      "rightButton": {
+        "field": "angular-z",
+        "value": -1
+      }
+    },
+    "Publish!stop": {
+      "topicName": "/esp_serial_bridge/emergency",
+      "datatype": "std_msgs/msg/Empty",
+      "schemaName": "std_msgs/msg/Empty",
+      "buttonText": "NOTHALT",
+      "buttonTooltip": "Bremse aktiv, bricht auch eine Positionsfahrt ab",
+      "buttonColor": "#d9534f",
+      "advancedView": false,
+      "value": "{}"
+    },
+    "Publish!move": {
+      "topicName": "/esp_serial_bridge/move",
+      "datatype": "std_msgs/msg/Float32",
+      "schemaName": "std_msgs/msg/Float32",
+      "buttonText": "Fahrt starten",
+      "buttonTooltip": "Grad RELATIV zur jetzigen Stellung",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": 90.0\n}"
+    },
+    "Plot!tempo": {
+      "title": "Tempo & Duty",
+      "paths": [
+        {
+          "value": "/esp_serial_bridge/speed.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "Tempo [Grad/s]",
+          "color": "#4e98e2",
+          "lineSize": 1.5,
+          "showLine": true
+        },
+        {
+          "value": "/esp_serial_bridge/motor_state.data[0]",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "Duty [-1023..1023]",
+          "color": "#f5774d",
+          "lineSize": 1.5,
+          "showLine": true
+        }
+      ],
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 30,
+      "isSynced": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "sidebarDimension": 240
+    },
+    "Plot!stellung": {
+      "title": "Stellung der Ausgangswelle",
+      "paths": [
+        {
+          "value": "/esp_serial_bridge/joint_states.position[0]",
+          "enabled": true,
+          "timestampMethod": "headerStamp",
+          "label": "Stellung [rad]",
+          "color": "#7ac74f",
+          "lineSize": 1.5,
+          "showLine": true
+        },
+        {
+          "value": "/esp_serial_bridge/joint_states.velocity[0]",
+          "enabled": true,
+          "timestampMethod": "headerStamp",
+          "label": "Tempo [rad/s]",
+          "color": "#c95fd6",
+          "lineSize": 1.5,
+          "showLine": true
+        }
+      ],
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 30,
+      "isSynced": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "sidebarDimension": 240
+    },
+    "Gauge!strom": {
+      "path": "/esp_serial_bridge/motor_state.data[1]",
+      "minValue": 0,
+      "maxValue": 12,
+      "colorMode": "colormap",
+      "colorMap": "red-yellow-green",
+      "gradient": [
+        "#0000ff",
+        "#ff00ff"
+      ],
+      "reverse": true
+    },
+    "Plot!latenz": {
+      "title": "Latenz je Paket [ms]",
+      "paths": [
+        {
+          "value": "/esp_serial_bridge/latency_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "abgeschickt -> gelesen",
+          "color": "#4e98e2",
+          "lineSize": 1.5,
+          "showLine": true
+        }
+      ],
+      "minYValue": 0,
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 60,
+      "isSynced": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "sidebarDimension": 240
+    },
+    "Plot!umlauf": {
+      "title": "Umlauf beim Abgleich [ms] - gesund 0,3 bis 3",
+      "paths": [
+        {
+          "value": "/esp_serial_bridge/rtt_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "Umlauf",
+          "color": "#f5774d",
+          "lineSize": 1.5,
+          "showLine": true
+        }
+      ],
+      "minYValue": 0,
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 300,
+      "isSynced": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "sidebarDimension": 240
+    },
+    "Plot!drift": {
+      "title": "Quarzdrift [ppm] - gesund -100 bis +100",
+      "paths": [
+        {
+          "value": "/esp_serial_bridge/drift_ppm.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "Drift",
+          "color": "#c95fd6",
+          "lineSize": 1.5,
+          "showLine": true
+        }
+      ],
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 300,
+      "isSynced": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "sidebarDimension": 240
+    },
+    "Plot!versatz": {
+      "title": "Uhrenversatz [ms] - der Betrag ist egal, die Steigung ist der Drift",
+      "paths": [
+        {
+          "value": "/esp_serial_bridge/offset_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "Versatz",
+          "color": "#7ac74f",
+          "lineSize": 1.5,
+          "showLine": true
+        }
+      ],
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 300,
+      "isSynced": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "sidebarDimension": 240
+    },
+    "CallService!resync": {
+      "serviceName": "/esp_serial_bridge/resync",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Uhren neu abgleichen",
+      "buttonTooltip": "Eine Runde TIME_SYNC von Hand ausloesen",
+      "buttonColor": "#5865f2",
+      "editingMode": false
+    },
+    "Plot!akku": {
+      "title": "Akku",
+      "paths": [
+        {
+          "value": "/esp_serial_bridge/battery.voltage",
+          "enabled": true,
+          "timestampMethod": "headerStamp",
+          "label": "Pack [V]",
+          "color": "#4e98e2",
+          "lineSize": 1.5,
+          "showLine": true
+        },
+        {
+          "value": "/esp_serial_bridge/battery.cell_voltage[0]",
+          "enabled": true,
+          "timestampMethod": "headerStamp",
+          "label": "Zelle [V]",
+          "color": "#f5774d",
+          "lineSize": 1.5,
+          "showLine": true
+        }
+      ],
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 600,
+      "isSynced": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "sidebarDimension": 240
+    },
+    "Indicator!akkuwarn": {
+      "path": "/esp_serial_bridge/battery_low.data",
+      "style": "bulb",
+      "fallbackColor": "#4caf50",
+      "fallbackLabel": "Akku in Ordnung",
+      "rules": [
+        {
+          "operator": "=",
+          "rawValue": "true",
+          "color": "#d9534f",
+          "label": "UNTERSPANNUNG - der ESP schaltet NICHT ab"
+        }
+      ]
+    },
+    "Gauge!fortschritt": {
+      "path": "/esp_serial_bridge/move_progress.data",
+      "minValue": 0,
+      "maxValue": 100,
+      "colorMode": "colormap",
+      "colorMap": "red-yellow-green",
+      "gradient": [
+        "#0000ff",
+        "#ff00ff"
+      ],
+      "reverse": false
+    },
+    "RawMessages!movedone": {
+      "topicPath": "/esp_serial_bridge/move_done",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "all",
+      "fontSize": 12
+    },
+    "DiagnosticStatusPanel!link": {
+      "topicToRender": "/diagnostics",
+      "selectedHardwareId": "/dev/ttyTHS1",
+      "selectedName": "esp_serial_bridge: link",
+      "splitFraction": 0.55,
+      "numericPrecision": 3
+    },
+    "DiagnosticSummary!alle": {
+      "topicToRender": "/diagnostics",
+      "minLevel": 0,
+      "pinnedIds": [],
+      "hardwareIdFilter": "",
+      "sortByLevel": true
+    },
+    "RawMessages!konsole": {
+      "topicPath": "/esp_serial_bridge/console.data",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "all",
+      "fontSize": 12
+    },
+    "Log!rosout": {
+      "searchTerms": [],
+      "minLogLevel": 1,
+      "topicToRender": "/rosout"
+    },
+    "Publish!calaction": {
+      "topicName": "/esp_serial_bridge/cal_action",
+      "datatype": "std_msgs/msg/String",
+      "schemaName": "std_msgs/msg/String",
+      "buttonText": "Aktion senden",
+      "buttonTooltip": "start minus plus center left right save abort free hold goto_center step status",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": \"plus\"\n}"
+    },
+    "RawMessages!calstate": {
+      "topicPath": "/esp_serial_bridge/cal_state",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "all",
+      "fontSize": 12
+    },
+    "CallService!calstart": {
+      "serviceName": "/esp_serial_bridge/calibrate_start",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Kalibrierung starten",
+      "buttonTooltip": "Muss vor jeder cal_action laufen",
+      "buttonColor": "#4e98e2",
+      "editingMode": false
+    },
+    "CallService!calsave": {
+      "serviceName": "/esp_serial_bridge/calibrate_save",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Kalibrierung speichern",
+      "buttonTooltip": "Schreibt Mitte/links/rechts ins NVS",
+      "buttonColor": "#7ac74f",
+      "editingMode": false
+    },
+    "CallService!pidget": {
+      "serviceName": "/esp_serial_bridge/pid_get",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "PID lesen",
+      "buttonTooltip": "Die Antwort steht im Feld message",
+      "buttonColor": "#5865f2",
+      "editingMode": false
+    },
+    "CallService!pidsave": {
+      "serviceName": "/esp_serial_bridge/pid_save",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "PID speichern",
+      "buttonTooltip": "pid_set ist fluechtig - das hier schreibt ins NVS",
+      "buttonColor": "#7ac74f",
+      "editingMode": false
+    },
+    "RawMessages!pid": {
+      "topicPath": "/esp_serial_bridge/pid",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "all",
+      "fontSize": 12
+    },
+    "Publish!motor": {
+      "topicName": "/esp_serial_bridge/motor",
+      "datatype": "std_msgs/msg/Int32",
+      "schemaName": "std_msgs/msg/Int32",
+      "buttonText": "Motor setzen",
+      "buttonTooltip": "Offene Steuerung, -1023 bis +1023. 0 = auslaufen lassen.",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": 400\n}"
+    },
+    "Publish!steer": {
+      "topicName": "/esp_serial_bridge/steer",
+      "datatype": "std_msgs/msg/Float32",
+      "schemaName": "std_msgs/msg/Float32",
+      "buttonText": "Lenkung setzen",
+      "buttonTooltip": "-100 = rechts, 0 = geradeaus, +100 = links",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": 0.0\n}"
+    },
+    "Publish!trim": {
+      "topicName": "/esp_serial_bridge/trim",
+      "datatype": "std_msgs/msg/Int32",
+      "schemaName": "std_msgs/msg/Int32",
+      "buttonText": "Trim",
+      "buttonTooltip": "0 = Mitte nach links, 1 = nach rechts, 2 = speichern",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": 0\n}"
+    },
+    "Publish!led": {
+      "topicName": "/esp_serial_bridge/led",
+      "datatype": "std_msgs/msg/Bool",
+      "schemaName": "std_msgs/msg/Bool",
+      "buttonText": "LED schalten",
+      "buttonTooltip": "true = an",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": true\n}"
+    },
+    "Publish!pidset": {
+      "topicName": "/esp_serial_bridge/pid_set",
+      "datatype": "std_msgs/msg/Float32MultiArray",
+      "schemaName": "std_msgs/msg/Float32MultiArray",
+      "buttonText": "PID setzen",
+      "buttonTooltip": "[index, wert] oder gleich alle neun Werte. Fluechtig - danach PID speichern.",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": [0.0, 4.25]\n}"
+    },
+    "Publish!cal": {
+      "topicName": "/esp_serial_bridge/cal",
+      "datatype": "std_msgs/msg/Int32MultiArray",
+      "schemaName": "std_msgs/msg/Int32MultiArray",
+      "buttonText": "Kalibrieraktion (numerisch)",
+      "buttonTooltip": "[aktion, arg] - dasselbe wie cal_action, nur mit Codes",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": [2, 0]\n}"
+    },
+    "CallService!torquefree": {
+      "serviceName": "/esp_serial_bridge/servo_torque_free",
+      "requestPayload": "{\n  \"data\": true\n}",
+      "layout": "vertical",
+      "buttonText": "Servo freigeben",
+      "buttonTooltip": "Nur waehrend der Kalibrierung. Danach steht die Lenkung von Hand verstellbar.",
+      "buttonColor": "#f5a623",
+      "editingMode": false
+    },
+    "CallService!trimsave": {
+      "serviceName": "/esp_serial_bridge/trim_save",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Trim speichern",
+      "buttonTooltip": "Schreibt den Lenkungs-Offset ins NVS",
+      "buttonColor": "#7ac74f",
+      "editingMode": false
+    },
+    "CallService!estop": {
+      "serviceName": "/esp_serial_bridge/emergency_stop",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "NOTHALT",
+      "buttonTooltip": "Wie das Topic, aber mit Quittung",
+      "buttonColor": "#d9534f",
+      "editingMode": false
+    },
+    "CallService!moveabort": {
+      "serviceName": "/esp_serial_bridge/move_abort",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Fahrt abbrechen",
+      "buttonTooltip": "Bricht eine laufende Positionsfahrt ab",
+      "buttonColor": "#f5a623",
+      "editingMode": false
+    },
+    "CallService!stampon": {
+      "serviceName": "/esp_serial_bridge/set_stamp_mode",
+      "requestPayload": "{\n  \"data\": true\n}",
+      "layout": "vertical",
+      "buttonText": "Zeitstempel an/aus",
+      "buttonTooltip": "Ohne Stempel tragen alle Nachrichten die Lesezeit",
+      "buttonColor": "#5865f2",
+      "editingMode": false
+    },
+    "CallService!setled": {
+      "serviceName": "/esp_serial_bridge/set_led",
+      "requestPayload": "{\n  \"data\": true\n}",
+      "layout": "vertical",
+      "buttonText": "LED an/aus",
+      "buttonTooltip": "Wie das Topic, mit Quittung",
+      "buttonColor": "#5865f2",
+      "editingMode": false
+    },
+    "CallService!torque": {
+      "serviceName": "/esp_serial_bridge/torque_report",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Servolast ausgeben",
+      "buttonTooltip": "Ausgabe erscheint auf der USB-Konsole des ESP, nicht in ROS",
+      "buttonColor": "#5865f2",
+      "editingMode": false
+    },
+    "RawMessages!button": {
+      "topicPath": "/esp_serial_bridge/button",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "all",
+      "fontSize": 12
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": "Tab!haupt"
+}
