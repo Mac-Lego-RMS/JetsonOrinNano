@@ -19,6 +19,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <ESP32Encoder.h>
+#include <esp_timer.h>
 #include "SCServo.h"
 
 // ==========================================
@@ -59,10 +60,12 @@ constexpr uint16_t DUTY_MAX = (1 << PWM_RES) - 1;   // 1023
 #define CMD_PID_SET     0x80   // 5B: paramId, int32 wert (x1000)
 #define CMD_PID_GET     0x81   // 0B
 #define CMD_PID_SAVE    0x83   // 0B: aktuelle Parameter ins NVS schreiben
-#define CMD_MOVE        0x90   // 5B: moveId, int32 ziel in 1/10 Grad (absolut)
+#define CMD_MOVE        0x90   // 5B: moveId, int32 weite in 1/10 Grad (relativ)
 #define CMD_MOVE_ABORT  0x91   // 0B
 #define CMD_PROGRESS    0x92   // 0B
 #define CMD_BATTERY     0xA0   // 0B
+#define CMD_SYNC_REQ    0xB0   // 4B: uint32 req_id
+#define CMD_TELEM_RATE  0xB3   // 1B: hz (0 = aus, max 100 = Motortask-Takt)
 #define CMD_EMERGENCY   0xFF   // 0B
 
 // --- Protokoll: ESP -> Jetson ---
@@ -73,6 +76,8 @@ constexpr uint16_t DUTY_MAX = (1 << PWM_RES) - 1;   // 1023
 #define CMD_PROGRESS_RSP 0x94  // 11B: moveId, aktiv, prozent, int32 ist, int32 ziel
 #define CMD_BATTERY_RSP 0xA1   // 6B: int32 pack mV, int16 zelle mV
 #define CMD_BATTERY_WARN 0xA2  // 6B: wie CMD_BATTERY_RSP, ungefragt bei Unterspannung
+#define CMD_SYNC_RSP    0xB1   // 22B: uint32 req_id, int64 t2_us, int64 t3_us, uint16 crc
+#define CMD_ENC_TELEM   0xB2   // 16B: uint16 seq, int64 t_us, int32 count, uint16 crc
 
 // Status-Codes in CMD_MOVE_DONE
 #define MOVE_OK         0x00
@@ -137,6 +142,44 @@ static unsigned long  g_lastCmdTime = 0;   // Watchdog-Zeitstempel
 static portMUX_TYPE   g_motorMux = portMUX_INITIALIZER_UNLOCKED;
 
 static QueueHandle_t  g_moveResultQueue = nullptr;
+
+// --- Encoder-Telemetrie fuer den EKF auf dem Jetson ---
+// Der Zeitstempel entsteht dort, wo der Zaehler gelesen wird (im Motortask),
+// nicht beim Versenden. g_encCount wird nur alle TASK_PERIOD aktualisiert - wer
+// ihn asynchron liest und dann stempelt, datiert einen bis zu 10 ms alten Wert
+// auf jetzt. esp_timer_get_time() ist int64 us und laeuft nicht ueber; micros()
+// waere nach 71,6 min hinueber.
+struct EncoderSample {
+    int64_t  t_us;      // esp_timer_get_time() beim Zaehlerlesen
+    int32_t  count;     // roher kumulativer Encoder-Count, ungefiltert
+    uint16_t seq;       // fortlaufend, fuer Verlusterkennung auf Jetson-Seite
+};
+
+static QueueHandle_t g_encQueue = nullptr;
+static uint16_t      g_encSeq   = 0;   // nur vom Motortask beschrieben
+
+// Sendefrequenz der Telemetrie. Die Samples entstehen im Motortask-Takt
+// (100 Hz), mehr ist ohne Aenderung von TASK_PERIOD nicht zu holen - hoehere
+// Werte werden auf 100 begrenzt, kleinere dezimieren den Strom.
+static volatile uint8_t g_telemHz = 100;
+
+// Asynchrone Meldungen aus loop() an den Link-Task. Serial1 gehoert exklusiv
+// dem Link-Task: zwei Tasks, die in dieselbe UART schreiben, verschraenken
+// ihre Bytes und zerlegen das Protokoll.
+struct TxPacket {
+    uint8_t len;
+    uint8_t buf[16];
+};
+static QueueHandle_t g_txQueue = nullptr;
+
+// Befehle, die der Link-Task nicht selbst ausfuehren darf, weil sie den Servo
+// anfassen oder ins NVS schreiben (beides dauert Millisekunden bis Sekunden).
+struct DeferredCmd {
+    uint8_t cmd;
+    uint8_t len;
+    uint8_t data[8];
+};
+static QueueHandle_t g_deferQueue = nullptr;
 
 // Telemetrie: Motortask schreibt, Core 1 liest nur zur Ausgabe.
 static volatile float   g_rpm        = 0.0f;
@@ -341,8 +384,20 @@ void motorControlTask(void* pvParameters) {
 
     for (;;) {
         unsigned long now = millis();
+
+        // Stempel und Zaehlerstand gehoeren zusammen - erst die Zeit, dann
+        // sofort den Zaehler, ohne etwas dazwischen.
+        int64_t tSample = esp_timer_get_time();
         long posCnt = (long)encoder.getCount();
         g_encCount = posCnt;
+
+        // Roh weitergeben: keine Glaettung, keine Einheitenumrechnung. Der EKF
+        // differenziert selbst und waehlt sein Fenster. g_rpm unten ist EMA-
+        // gefiltert und wegen der Filterlaufzeit fuer den EKF unbrauchbar.
+        if (g_encQueue) {
+            EncoderSample s = { tSample, (int32_t)posCnt, ++g_encSeq };
+            xQueueSend(g_encQueue, &s, 0);   // nicht blockierend, Overflow egal
+        }
 
         unsigned long lastCmdTime;
         MotorCommand cmd = getMotorCommand(&lastCmdTime);
@@ -684,6 +739,31 @@ static inline void writeI32BE(uint8_t* b, int32_t v) {
     b[0] = (uint8_t)(v >> 24); b[1] = (uint8_t)(v >> 16);
     b[2] = (uint8_t)(v >> 8);  b[3] = (uint8_t)v;
 }
+static inline void writeI64BE(uint8_t* b, int64_t v) {
+    for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (56 - 8 * i));
+}
+
+// CRC-16/CCITT-FALSE. Polynom 0x1021, Init 0xFFFF, keine Reflexion, kein
+// Final-XOR. Testvektor: "123456789" -> 0x29B1.
+//
+// Die Variante ist hier bewusst festgeschrieben: "crc16" allein ist mehrdeutig
+// (MODBUS, XMODEM, KERMIT ... unterscheiden sich in Init, Reflexion und XOR und
+// liefern fuer dieselben Daten verschiedene Werte). Die Gegenstelle muss exakt
+// diese nachbauen.
+//
+// Gerechnet wird ueber CMD-Byte + Nutzlast OHNE die beiden CRC-Bytes selbst.
+// Das START_BYTE gehoert NICHT dazu - es dient nur der Resynchronisation.
+static uint16_t crc16_ccitt(const uint8_t* data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++) {
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+                                 : (uint16_t)(crc << 1);
+        }
+    }
+    return crc;
+}
 
 bool savePidParams();   // Definition weiter unten, wird von CMD_PID_SAVE genutzt
 
@@ -718,6 +798,10 @@ static const char* cmdName(uint8_t cmd) {
         case CMD_MOVE_ABORT:    return "MOVE_ABORT";
         case CMD_PROGRESS:      return "PROGRESS";
         case CMD_BATTERY:       return "BATTERY";
+        case CMD_SYNC_REQ:      return "SYNC_REQ";
+        case CMD_SYNC_RSP:      return "SYNC_RSP";
+        case CMD_ENC_TELEM:     return "ENC_TELEM";
+        case CMD_TELEM_RATE:    return "TELEM_RATE";
         case CMD_EMERGENCY:     return "EMERGENCY";
         case CMD_BUTTON:        return "BUTTON";
         case CMD_PID_RSP:       return "PID_RSP";
@@ -761,23 +845,85 @@ private:
     uint32_t repeatCount = 0;
     unsigned long repeatSince = 0;
 
+    // Empfangszeit des Startbytes. Beim Lesen des Startbytes ist noch nicht
+    // bekannt, ob ein SYNC_REQ folgt - also wird immer gestempelt und der Wert
+    // nur dann verwendet, wenn es einer war.
+    int64_t startByteUs = 0;
+
 public:
     JetsonComms(HardwareSerial* s, SCSCL* sv) : serialPort(s), servo(sv) {}
 
     void begin(unsigned long baud = 115200) {
+        // Muss vor begin() stehen, sonst bleiben die Default-Groessen stehen.
+        // TX klein halten: ein grosser Sendepuffer erzeugt nur Latenz, weil
+        // Pakete dann hinter aelteren warten statt sofort rauszugehen.
+        serialPort->setRxBufferSize(512);
+        serialPort->setTxBufferSize(256);
         serialPort->begin(baud, SERIAL_8N1, PIN_JETSON_RX, PIN_JETSON_TX);
         stateTime = millis();
     }
 
-    void sendButtonEvent() {
-        uint8_t p[3] = {START_BYTE, CMD_BUTTON, 0x01};   // 0x01 = Pressed
-        sendPacket(p, sizeof(p));
+    // --- Encoder-Telemetrie (100 Hz) ---
+    void sendEncTelem(const EncoderSample& s) {
+        uint8_t p[18];
+        p[0] = START_BYTE;
+        p[1] = CMD_ENC_TELEM;
+        p[2] = (uint8_t)(s.seq >> 8);
+        p[3] = (uint8_t)s.seq;
+        writeI64BE(&p[4], s.t_us);
+        writeI32BE(&p[12], s.count);
+        uint16_t crc = crc16_ccitt(&p[1], 15);   // CMD + 14 B Nutzlast
+        p[16] = (uint8_t)(crc >> 8);
+        p[17] = (uint8_t)crc;
+        sendPacket(p, sizeof(p), true);          // quiet: kein Log bei 100 Hz
     }
 
-    void sendMoveDone(const MoveResult& r) {
-        uint8_t p[8] = {START_BYTE, CMD_MOVE_DONE, r.id, r.status};
+    // --- Zeitsynchronisation ---
+    // t2 = Empfang des Startbytes, t3 = unmittelbar vor dem Absenden. Der
+    // Jetson rechnet offset = ((t2-t1) + (t3-t4)) / 2; die ESP-Verarbeitungszeit
+    // (t3-t2) faellt dabei heraus, eine verzoegerte Antwort verfaelscht das
+    // Ergebnis also nicht - solange t2 und t3 ehrlich sind.
+    void sendSyncRsp(uint32_t reqId, int64_t t2) {
+        uint8_t p[24];
+        p[0] = START_BYTE;
+        p[1] = CMD_SYNC_RSP;
+        writeI32BE(&p[2], (int32_t)reqId);
+        writeI64BE(&p[6], t2);
+
+        // Ohne flush() koennte das Paket noch hinter Telemetrie im Sendepuffer
+        // stehen und t3 waere um Millisekunden zu frueh. Bei 100 Hz ist der
+        // Puffer praktisch immer leer, flush() kehrt sofort zurueck.
+        serialPort->flush();
+        int64_t t3 = esp_timer_get_time();
+        writeI64BE(&p[14], t3);
+
+        uint16_t crc = crc16_ccitt(&p[1], 21);   // CMD + 20 B Nutzlast
+        p[22] = (uint8_t)(crc >> 8);
+        p[23] = (uint8_t)crc;
+        sendPacket(p, sizeof(p), true);
+    }
+
+    // --- Paketbau, ohne Serial-Zugriff ---
+    // Getrennt vom Senden, weil dieselben Pakete aus zwei Kontexten entstehen:
+    // der Link-Task sendet sie direkt, loop() legt sie in die TX-Queue.
+    static uint8_t buildButton(uint8_t* p) {
+        p[0] = START_BYTE; p[1] = CMD_BUTTON; p[2] = 0x01;   // 0x01 = Pressed
+        return 3;
+    }
+
+    static uint8_t buildMoveDone(uint8_t* p, const MoveResult& r) {
+        p[0] = START_BYTE; p[1] = CMD_MOVE_DONE; p[2] = r.id; p[3] = r.status;
         writeI32BE(&p[4], r.finalDeg10);
-        sendPacket(p, sizeof(p));
+        return 8;
+    }
+
+    static uint8_t buildBattery(uint8_t* p, uint8_t cmd) {
+        p[0] = START_BYTE; p[1] = cmd;
+        writeI32BE(&p[2], (int32_t)lroundf(battPackV * 1000.0f));
+        int16_t cellmV = (int16_t)lroundf(battCellV * 1000.0f);
+        p[6] = (uint8_t)(cellmV >> 8);
+        p[7] = (uint8_t)cellmV;
+        return 8;
     }
 
     void sendProgress() {
@@ -790,12 +936,8 @@ public:
     }
 
     void sendBattery(uint8_t cmd) {
-        uint8_t p[8] = {START_BYTE, cmd};
-        writeI32BE(&p[2], (int32_t)lroundf(battPackV * 1000.0f));
-        int16_t cellmV = (int16_t)lroundf(battCellV * 1000.0f);
-        p[6] = (uint8_t)(cellmV >> 8);
-        p[7] = (uint8_t)cellmV;
-        sendPacket(p, sizeof(p));
+        uint8_t p[8];
+        sendPacket(p, buildBattery(p, cmd));
     }
 
     void sendPidParams() {
@@ -804,11 +946,6 @@ public:
         writeI32BE(&p[2],  (int32_t)lroundf(pid.kp * 1000.0f));
         writeI32BE(&p[6],  (int32_t)lroundf(pid.ki * 1000.0f));
         writeI32BE(&p[10], (int32_t)lroundf(pid.kd * 1000.0f));
-        sendPacket(p, sizeof(p));
-    }
-
-    void sendPidSaved(bool ok) {
-        uint8_t p[3] = {START_BYTE, CMD_PID_SAVED, (uint8_t)(ok ? 0x00 : 0x01)};
         sendPacket(p, sizeof(p));
     }
 
@@ -843,6 +980,7 @@ public:
             switch (currentState) {
                 case WAITING_START:
                     if (byte == START_BYTE) {
+                        startByteUs = esp_timer_get_time();   // t2 fuer SYNC_REQ
                         currentState = WAITING_CMD;
                         bufIndex = 0;
                     } else {
@@ -891,10 +1029,12 @@ public:
 
 private:
     // Ein Paket rausschicken, mitzaehlen und optional mitschneiden.
-    void sendPacket(const uint8_t* p, size_t n) {
+    // quiet=true fuer die 100-Hz-Telemetrie: 100 printf/s aus einem Task mit
+    // Prioritaet 3 wuerden das restliche System lahmlegen.
+    void sendPacket(const uint8_t* p, size_t n, bool quiet = false) {
         serialPort->write(p, n);
         txPackets++;
-        if (g_linkDebug && !g_plotMode) {
+        if (g_linkDebug && !g_plotMode && !quiet) {
             Serial.printf("[TX] %s", cmdName(p[1]));
             for (size_t i = 2; i < n; i++) Serial.printf(" %02X", p[i]);
             Serial.println();
@@ -980,6 +1120,8 @@ private:
             case CMD_TRIM:       return 1;
             case CMD_PID_SET:    return 5;
             case CMD_MOVE:       return 5;
+            case CMD_SYNC_REQ:   return 4;
+            case CMD_TELEM_RATE: return 1;
             case CMD_CALIBRATE:
             case CMD_TORQUE:
             case CMD_PID_GET:
@@ -992,13 +1134,43 @@ private:
         }
     }
 
+    // An loop() weiterreichen. Die Nutzlast wird kopiert - buffer ist beim
+    // naechsten Paket schon wieder ueberschrieben.
+    void deferCommand() {
+        if (!g_deferQueue || dataLength > sizeof(DeferredCmd::data)) return;
+        DeferredCmd d;
+        d.cmd = currentCmd;
+        d.len = dataLength;
+        memcpy(d.data, buffer, dataLength);
+        xQueueSend(g_deferQueue, &d, 0);
+    }
+
     void executeCommand() {
         switch (currentCmd) {
+
+        // ---- Befehle fuer loop(): fassen den Servo an oder schreiben ins
+        //      NVS. Beides dauert Millisekunden bis Sekunden und darf den
+        //      Link-Task nicht blockieren. ----
+        case CMD_SERVO:
+        case CMD_CALIBRATE:
+        case CMD_TORQUE:
+        case CMD_TRIM:
+        case CMD_PID_SAVE:
+            deferCommand();
+            break;
 
         case CMD_EMERGENCY:
             // Aktiv bremsen statt nur ausrollen, bricht auch eine Fahrt ab.
             setMotorCommand(MOTOR_BRAKE, false, DUTY_MAX);
-            serialPort->println("ESP: EMERGENCY STOP EXECUTED!");
+            Serial.println("ESP: EMERGENCY STOP EXECUTED!");
+            break;
+
+        case CMD_SYNC_REQ:
+            sendSyncRsp((uint32_t)readI32BE(&buffer[0]), startByteUs);
+            break;
+
+        case CMD_TELEM_RATE:
+            g_telemHz = (buffer[0] > 100) ? 100 : buffer[0];
             break;
 
         case CMD_MOTOR: {
@@ -1032,10 +1204,6 @@ private:
             sendPidParams();
             break;
 
-        case CMD_PID_SAVE:
-            sendPidSaved(savePidParams());
-            break;
-
         case CMD_PID_SET: {
             uint8_t param = buffer[0];
             int32_t raw   = readI32BE(&buffer[1]);
@@ -1057,9 +1225,23 @@ private:
             break;
         }
 
+        case CMD_LED:
+            digitalWrite(PIN_LED, buffer[0] ? HIGH : LOW);
+            break;
+        }
+    }
+
+public:
+    // --- Verzoegerte Befehle, ausgefuehrt von loop() auf Core 1 ---
+    // Laufen dort, weil sie den SCServo-Bus bedienen oder ins NVS schreiben.
+    // Statusmeldungen gehen auf die USB-Konsole, nicht mehr auf Serial1: der
+    // Link traegt jetzt 100 Hz Binaertelemetrie, in die kein ASCII gehoert.
+    void runDeferred(const DeferredCmd& d) {
+        switch (d.cmd) {
+
         case CMD_SERVO: {
-            uint8_t id = buffer[0];
-            int16_t steerPct = (buffer[1] << 8) | buffer[2];
+            uint8_t id = d.data[0];
+            int16_t steerPct = (d.data[1] << 8) | d.data[2];
 
             // --- Dynamische Hub-Begrenzung auf 80% ---
             const float MAX_THROW_FACTOR = 0.80f;
@@ -1085,10 +1267,6 @@ private:
             break;
         }
 
-        case CMD_LED:
-            digitalWrite(PIN_LED, buffer[0] ? HIGH : LOW);
-            break;
-
         case CMD_CALIBRATE:
             runCalibrationRoutine(servo);
             break;
@@ -1097,26 +1275,45 @@ private:
             printTorque(servo);
             break;
 
+        case CMD_PID_SAVE: {
+            bool ok = savePidParams();
+            uint8_t p[3] = {START_BYTE, CMD_PID_SAVED, (uint8_t)(ok ? 0x00 : 0x01)};
+            queueTx(p, sizeof(p));
+            break;
+        }
+
         case CMD_TRIM: {
-            uint8_t action = buffer[0];
+            uint8_t action = d.data[0];
             if (action == 0x00) {          // Links trimmen (-2)
                 trimOffset        -= 2;
                 softwareCenterPos -= 2;
                 servo->WritePos(SERVO_ID, softwareCenterPos, 0, 0);
-                serialPort->printf("ESP: Trim L | Offset: %d | Pos: %d\n", trimOffset, softwareCenterPos);
+                Serial.printf("ESP: Trim L | Offset: %d | Pos: %d\n", trimOffset, softwareCenterPos);
             } else if (action == 0x01) {   // Rechts trimmen (+2)
                 trimOffset        += 2;
                 softwareCenterPos += 2;
                 servo->WritePos(SERVO_ID, softwareCenterPos, 0, 0);
-                serialPort->printf("ESP: Trim R | Offset: %d | Pos: %d\n", trimOffset, softwareCenterPos);
+                Serial.printf("ESP: Trim R | Offset: %d | Pos: %d\n", trimOffset, softwareCenterPos);
             } else if (action == 0x02) {   // Offset dauerhaft speichern
                 prefs.putInt("offset", trimOffset);
-                serialPort->printf("ESP: Trim-Offset (%d) im Flash gespeichert!\n", trimOffset);
+                Serial.printf("ESP: Trim-Offset (%d) im Flash gespeichert!\n", trimOffset);
             }
             break;
         }
         }
     }
+
+    // Aus loop() aufrufen statt direkt zu senden - Serial1 gehoert dem Link-Task.
+    static void queueTx(const uint8_t* p, uint8_t n) {
+        if (!g_txQueue || n > sizeof(TxPacket::buf)) return;
+        TxPacket t;
+        t.len = n;
+        memcpy(t.buf, p, n);
+        xQueueSend(g_txQueue, &t, 0);
+    }
+
+    // Ein fertig gebautes Paket aus der TX-Queue rausschicken (Link-Task).
+    void sendRaw(const TxPacket& t) { sendPacket(t.buf, t.len); }
 };
 
 // ==========================================
@@ -1126,6 +1323,56 @@ private:
 MotorDriver planetaryMotor(PIN_MOTOR_PWM, PIN_MOTOR_INA, PIN_MOTOR_INB);
 SCSCL sc09Servo;
 JetsonComms jetson(&Serial1, &sc09Servo);
+
+// ==========================================
+// 9b. LINK-TASK (Core 0)
+// ==========================================
+
+// Bedient Serial1 exklusiv. Muss einen eigenen Task haben, weil loop()
+// blockieren darf und das auch tut: runCalibrationRoutine() -> probeLimit()
+// laeuft bis zu 8 s pro Richtung. Waehrenddessen ginge weder Telemetrie raus
+// noch eine Sync-Anfrage rein.
+//
+// Prioritaet 3 > Motor_Task (1): der Link-Task laeuft nur wenige hundert
+// Mikrosekunden pro Zyklus und muss den Motortask verdraengen duerfen, damit
+// die Sync-Zeitstempel nicht um dessen Laufzeit verrutschen.
+TaskHandle_t LinkTaskHandle;
+
+void linkTask(void* pvParameters) {
+    (void)pvParameters;
+    uint8_t decimCounter = 0;
+
+    for (;;) {
+        // --- 1. Encoder-Telemetrie ---
+        // Immer leeren, auch wenn das Senden aus ist - sonst laeuft die Queue
+        // voll und der Motortask verwirft stumm.
+        EncoderSample s;
+        while (xQueueReceive(g_encQueue, &s, 0) == pdTRUE) {
+            uint8_t hz = g_telemHz;
+            if (hz == 0) continue;
+
+            // Samples kommen im Motortask-Takt (100 Hz). Kleinere Raten durch
+            // Dezimierung, hoehere gibt es ohne Aenderung von TASK_PERIOD nicht.
+            uint8_t divider = (uint8_t)((100 + hz / 2) / hz);
+            if (divider < 1) divider = 1;
+            if (++decimCounter >= divider) {
+                decimCounter = 0;
+                jetson.sendEncTelem(s);
+            }
+        }
+
+        // --- 2. Empfang ---
+        jetson.process();
+
+        // --- 3. Asynchrone Meldungen aus loop() ---
+        TxPacket t;
+        while (xQueueReceive(g_txQueue, &t, 0) == pdTRUE) {
+            jetson.sendRaw(t);
+        }
+
+        vTaskDelay(1);   // 1 kHz
+    }
+}
 
 String cmdBuf;
 uint8_t nextLocalMoveId = 1;   // IDs fuer Fahrten aus der USB-Konsole
@@ -1420,7 +1667,8 @@ void batteryTick() {
         battLastWarn = now;
         Serial.printf("ESP: WARNUNG Akku niedrig! %.2f V Pack | %.3f V/Zelle\n",
                       battPackV, battCellV);
-        jetson.sendBattery(CMD_BATTERY_WARN);
+        uint8_t p[8];
+        JetsonComms::queueTx(p, JetsonComms::buildBattery(p, CMD_BATTERY_WARN));
     }
 }
 
@@ -1472,9 +1720,12 @@ void setup() {
     softwareCenterPos = ((leftLimit + rightLimit) / 2) + trimOffset;
     loadPidParams();
 
-    // --- Motortask auf Core 0 ---
-    // Queue und Pins muessen vor dem Task stehen.
+    // --- Tasks auf Core 0 ---
+    // Alle Queues muessen stehen, bevor ein Task sie benutzt.
     g_moveResultQueue = xQueueCreate(8, sizeof(MoveResult));
+    g_encQueue        = xQueueCreate(8, sizeof(EncoderSample));
+    g_txQueue         = xQueueCreate(8, sizeof(TxPacket));
+    g_deferQueue      = xQueueCreate(8, sizeof(DeferredCmd));
     setMotorCommand(MOTOR_COAST, false, 0);
     xTaskCreatePinnedToCore(
         motorControlTask,
@@ -1483,6 +1734,15 @@ void setup() {
         (void*)&planetaryMotor,
         1,
         &MotorControlTaskHandle,
+        0                        // Core 0
+    );
+    xTaskCreatePinnedToCore(
+        linkTask,
+        "Link_Task",
+        4096,
+        nullptr,
+        3,                       // > Motor_Task, damit Sync-Stempel praezise sind
+        &LinkTaskHandle,
         0                        // Core 0
     );
 
@@ -1509,8 +1769,15 @@ void loop() {
         static unsigned long lastPressTime = 0;
         if (millis() - lastPressTime > 200) {   // 200 ms Entprellzeit
             lastPressTime = millis();
-            jetson.sendButtonEvent();
+            uint8_t p[3];
+            JetsonComms::queueTx(p, JetsonComms::buildButton(p));
         }
+    }
+
+    // --- Befehle, die der Link-Task an uns weitergereicht hat ---
+    DeferredCmd dc;
+    while (xQueueReceive(g_deferQueue, &dc, 0) == pdTRUE) {
+        jetson.runDeferred(dc);
     }
 
     // --- Ergebnisse abgeschlossener Positionsfahrten an den Jetson melden ---
@@ -1519,7 +1786,8 @@ void loop() {
         // Auto-Plotter endet mit der Fahrt - erst abschalten, dann melden,
         // sonst landet die Meldung noch im Kurvenstrom.
         if (g_plotAuto) { g_plotMode = false; g_plotAuto = false; }
-        jetson.sendMoveDone(r);
+        uint8_t p[8];
+        JetsonComms::queueTx(p, JetsonComms::buildMoveDone(p, r));
         const char* txt = (r.status == MOVE_OK)      ? "DONE"
                         : (r.status == MOVE_TIMEOUT) ? "TIMEOUT"
                                                      : "ABORTED";
@@ -1561,8 +1829,7 @@ void loop() {
         cmdBuf = "";
     }
 
-    // --- Jetson-Protokoll ---
-    jetson.process();
+    // Serial1 wird nicht mehr hier bedient - das macht linkTask auf Core 0.
 
     // --- Akku alle 15 s ---
     batteryTick();
