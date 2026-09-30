@@ -17,6 +17,21 @@ schemes/MainPCB and component datasheets. Open items are marked TODO in
 comments throughout this chapter.
 -->
 
+**Evidence at a glance.** Where this chapter answers each point of the
+rubric for criterion 2:
+
+| The rubric asks for | Section | Key evidence |
+| --- | --- | --- |
+| Power architecture, planned distribution | [Dual-input power path](#dual-input-power-path), [Regulation](#regulation) | two hot-swappable inputs, two regulated rails, Jetson deliberately unswitched |
+| Power budget, current draw | [Power budget](#power-budget) | 1.10–1.30 A measured per state; Jetson 76 %; matches the pack runtimes within 7 % |
+| Wiring diagram | [Wiring](#wiring) | vehicle-level wiring, schematic, all four copper layers, pin map |
+| Sensor selection and trade-offs | [Sensor set](#sensor-set), [LiDAR: selection](#lidar-selection) | three LiDARs compared; YOLO replaced for latency; why no ultrasonic or line sensor |
+| Placement justified with the field geometry | [LiDAR: placement](#lidar-placement), [Camera](#camera) | 55 mm scan plane against 100 mm walls, ±0.9° tilt tolerance; lens at wall-top height |
+| Noise, interference, shadows | [Interference](#interference-measured-and-it-is-mechanical), [Camera](#camera) | PWM on and off give identical IMU noise; yaw unaffected; fixed exposure against light |
+| Calibration methods | [Calibration](#calibration) | cross-checked analogue channels; camera–LiDAR zone measured with a pillar at 5–6 distances |
+| Failure points | [Protection](#protection), [Failure points and mitigation](#failure-points-and-mitigation) | 6.1 V clamp in front of the 650 € LiDAR; failure-mode table |
+| Iteration to improve reliability | [Design evolution](#design-evolution), [Iteration](#iteration-locating-and-removing-the-vibration-source) | five board revisions; gear repair −23 to −86 % pitch noise; three faults found by measurement |
+
 All electronics of the vehicle sit on a single custom 4-layer PCB that mounts
 directly on top of the Jetson Orin Nano carrier board (Seeed A603) as a **stack**:
 one 40-pin header carries the mechanical and electrical connection, two M3 screws
@@ -977,9 +992,9 @@ friction came from the adapter and not from the gear mesh. <!-- TODO measure: th
 
 ## Calibration
 
-Three quantities on this board are measured through analogue front ends whose
-accuracy depends on component values. None of them was trusted on the schematic
-alone; each was checked against an independent reference.
+No sensor on this vehicle is trusted on its data sheet or schematic alone. The
+analogue channels were checked against an independent reference, the camera and
+the LiDAR against a pillar at known distances.
 
 ### Battery voltage
 
@@ -1006,10 +1021,41 @@ Both were measured in place, on the vehicle, across the full drive-speed range
 ([Interference: measured, and it is mechanical](#interference-measured-and-it-is-mechanical)).
 Neither needed isolation or correction.
 
-<!-- TODO (owner): camera exposure and white balance - rationale in
-src/start_robot.sh; LiDAR-camera extrinsics and the fisheye model -
-src/camera_lidar_fusion/README.md; BNO055 calibration status
-(/bno055/calib_status); steering LUT (steer_calib.json, steer_lut.py). -->
+### Camera and LiDAR
+
+The fusion reads the colour of every LiDAR point from the fisheye image, so the
+geometry between the two sensors decides whether a pillar gets its own colour or
+the colour of the wall behind it. The lens model alone was not good enough: it is
+strictly equidistant ($r = f\theta$), and towards the edge of the image — exactly
+where the pillars appear — real fisheye lenses deviate from it by 9 to 12 px on
+our camera. Computing the top edge of the wall band from the model gave three
+different heights for the same edge at 0.5, 1.0 and 2.5 m.
+
+The calibration is therefore **measured**, with the tool
+[`rotation_calibration`](../../src/camera_lidar_fusion/camera_lidar_fusion/rotation_calibration.py):
+
+1. record the empty surroundings first, so the tool does not mistake the
+   vehicle's own parts for a target — the LiDAR's blind sectors fall out of
+   this step;
+2. place a pillar at 5 to 6 distances between 0.3 and 2.5 m and let the tool
+   measure over which image radius the pillar colour appears;
+3. fit the sampling zone through these points and save it.
+
+The focal length is checked the same way: the 270° opening angle is only the
+product description, so the horizon ring is fitted to a pillar sampled at
+several distances rather than taken from the data sheet. The full procedure is in
+[`src/camera_lidar_fusion/README.md`](../../src/camera_lidar_fusion/README.md).
+
+Exposure, gain and white balance are fixed rather than calibrated at run time —
+see [Camera](#camera).
+
+### Steering and gyro
+
+Both are calibrated on the vehicle and described with the software that uses
+them in [chapter 4](04-software.md): the steering characteristic is measured per
+speed (0.35, 0.50 and 0.75 m/s), and the gyro scale factor comes from five full
+turns.
+
 
 ## Failure points and mitigation
 
