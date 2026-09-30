@@ -9,3 +9,6 @@ fp-info-cache
 gerber/
 production/*.zip
 production/backups/
+
+# KiCad local history
+.history/
