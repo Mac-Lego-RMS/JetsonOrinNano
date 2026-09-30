@@ -173,6 +173,13 @@ JetsonOrinNano/
 │   ├── package.xml
 │   └── setup.py
 │
+├── esp_firmware/                # ESP32-S3 firmware (PlatformIO, not a ROS package)
+│   ├── src/main.cpp             # motor PID, steering servo, battery, Jetson protocol
+│   ├── lib/SCServo/             # Feetech servo library
+│   ├── test_sketches/           # standalone hardware test sketches
+│   ├── docs/JETSON_BRIDGE.md    # UART protocol specification
+│   └── platformio.ini
+│
 ├── wall_follower_robot/         # ROS 2 package — legacy wall-following control
 │   ├── wall_follower_robot/
 │   │   ├── wall_follower_logic.py  # PID wall follower + state machine
@@ -249,21 +256,19 @@ source install/setup.bash
 
 ### 5.3 — Flash the ESP32-S3
 
-The firmware depends on the **SCServo** library (Feetech serial servo) and the ESP32 `Preferences` library. Using the Arduino IDE:
-
-```text
-1. Install the ESP32 board package (core 3.x) via the Boards Manager.
-2. Install the "SCServo" library.
-3. Open MainCodeESP.ino and select your ESP32-S3 board.
-4. Connect the ESP32-S3 over USB and click Upload.
-```
-
-Or with **arduino-cli**:
+The firmware is a **PlatformIO** project in [`esp_firmware/`](esp_firmware). It
+brings the **SCServo** library (Feetech serial servo) along in `lib/`, and
+PlatformIO fetches the ESP32 Arduino core 3.x and `ESP32Encoder` itself.
+Open the folder in VS Code with the PlatformIO extension, or from the shell:
 
 ```bash
-arduino-cli compile --fqbn esp32:esp32:esp32s3 MainCodeESP.ino
-arduino-cli upload  --fqbn esp32:esp32:esp32s3 -p /dev/ttyUSB0 MainCodeESP.ino
+cd src/esp_firmware
+pio run -t upload        # build and flash over USB
+pio device monitor       # debug console, 115200 baud
 ```
+
+Details — pin map, console commands, the UART protocol — are in
+[`esp_firmware/README.md`](esp_firmware/README.md).
 
 ---
 
