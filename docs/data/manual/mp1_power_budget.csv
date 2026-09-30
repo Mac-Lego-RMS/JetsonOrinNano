@@ -1,0 +1,7 @@
+state,current_a,supply_v,note
+jetson_idle,0.835,14.8,Jetson only
+jetson_boot_peak,0.900,14.8,peak while booting
+system_idle,1.10,14.8,all nodes running incl. LiDAR
+servo_holding,1.13,14.8,steering servo held against resistance
+driving_0.3,1.15,14.8,speed setpoint 0.3 m/s on the ground
+driving_1.0,1.30,14.8,speed setpoint 1.0 m/s on the ground

@@ -1,0 +1,13 @@
+condition,duty,supply_current_ma,note
+baseline,0,138,Jetson disconnected (J16 unplugged); bench supply 14.8 V
+free,25,152,wheels off the ground
+free,50,161,
+free,75,172,
+free,100,183,
+free,125,195,
+free,150,207,
+free,175,219,
+free,200,232,
+free,225,245,
+free,250,255,
+wall,full,660,driven into a wall until the tyres break traction
