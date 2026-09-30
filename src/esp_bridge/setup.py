@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'esp_serial_bridge = esp_bridge.esp_serial_bridge:main',
+            'pwm_sweep = esp_bridge.pwm_sweep:main',
         ],
     },
 )
