@@ -31,6 +31,8 @@ for criterion 5:
 | [`docs/`](..) | this journal, the analysis scripts, the measurement data behind every figure |
 | `v-photos/`, `t-photos/`, `video/` | vehicle photos, team photos, driving videos |
 
+<!-- TODO (Clemens): the CAD moves to models/; then update this row, the Hardware paragraph below and the README. -->
+
 The ROS 2 packages in `src/`:
 
 | Package | Role |
@@ -46,7 +48,7 @@ The ROS 2 packages in `src/`:
 
 **Software environment.** [`setup/README.md`](../../setup/README.md) takes a
 fresh Jetson Orin Nano to a running vehicle in seven steps: JetPack 6.2, clone
-with submodules, device rules for `/dev/rplidar` and `/dev/picam`, container
+with Git LFS and submodules, device rules for `/dev/rplidar` and `/dev/picam`, container
 image, workspace build, firmware, autostart. The container image is described by
 [`setup/Dockerfile`](../../setup/Dockerfile). The original image had been set up
 by hand; the Dockerfile was reconstructed from the running container and lists
