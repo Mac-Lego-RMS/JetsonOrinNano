@@ -26,9 +26,9 @@ rubric for criterion 2:
 | Power budget, current draw | [Power budget](#power-budget) | 1.10–1.30 A measured per state; Jetson 76 %; matches the pack runtimes within 7 % |
 | Wiring diagram | [Wiring](#wiring) | vehicle-level wiring, schematic, all four copper layers, pin map |
 | Sensor selection and trade-offs | [Sensor set](#sensor-set), [LiDAR: selection](#lidar-selection) | three LiDARs compared; YOLO replaced for latency; why no ultrasonic or line sensor |
-| Placement justified with the field geometry | [LiDAR: placement](#lidar-placement), [Camera](#camera) | 55 mm scan plane against 100 mm walls, ±0.9° tilt tolerance; lens at wall-top height |
-| Noise, interference, shadows | [Interference](#interference-measured-and-it-is-mechanical), [Camera](#camera) | PWM on and off give identical IMU noise; yaw unaffected; fixed exposure against light |
-| Calibration methods | [Calibration](#calibration) | cross-checked analogue channels; camera–LiDAR zone measured with a pillar at 5–6 distances |
+| Placement justified with the field geometry | [LiDAR: placement](#lidar-placement), [Camera](#camera) | 55 mm scan plane against 100 mm walls, ±0.9° tilt tolerance; scan plane in the camera's view from 0.18 m |
+| Noise, interference, shadows | [Interference](#interference-measured-and-it-is-mechanical), [Camera](#camera) | PWM on and off give identical IMU noise; yaw unaffected; exposure measured on the field |
+| Calibration methods | [Calibration](#calibration) | cross-checked analogue channels; camera–LiDAR zone measured with a pillar at 5–6 distances; lens 197° measured, not 270° from the data sheet |
 | Failure points | [Protection](#protection), [Failure points and mitigation](#failure-points-and-mitigation) | 6.1 V clamp in front of the 650 € LiDAR; failure-mode table |
 | Iteration to improve reliability | [Design evolution](#design-evolution), [Iteration](#iteration-locating-and-removing-the-vibration-source) | five board revisions; gear repair −23 to −86 % pitch noise; three faults found by measurement |
 
@@ -701,7 +701,7 @@ actuation.** No sensor used for perception is routed through the microcontroller
 | Sensor | Task | Rate | Interface | Position |
 | --- | --- | --- | --- | --- |
 | Slamtec RPLIDAR S3 | walls, pillars, localisation | 15 Hz, ≈2 520 points per scan | UART 1 Mbaud → on-board CP2102N → USB | front, centred on the front axle, ≈7 cm ahead of the vehicle centre; scan plane 55 mm above the floor |
-| PiCam360, 270° fisheye | colour of the pillars | 15 fps, 1280 × 960 | USB | above the LiDAR, lens facing the ceiling |
+| PiCam360 fisheye, 197° calibrated | colour of the pillars | 15 fps, 1280 × 960 | USB | above the LiDAR, lens facing the ceiling |
 | Bosch BNO055 | yaw rate for the EKF | 100 Hz | I²C to the Jetson | on the rear axle |
 | Hall encoder | wheel speed and distance | 408 counts per wheel revolution | ESP32, IO15/IO16 | on the drive motor |
 | Voltage and current sense | battery and motor telemetry | telemetry rate | ESP32 ADC, IO1/IO8 | on the board |
@@ -803,11 +803,19 @@ sensor appears to the Jetson as an ordinary USB serial device (consumed by
 
 ### Camera
 
-A **PiCam360** with a 270° fisheye lens, facing the ceiling. It sees the full
-circle around the vehicle and reaches 45° below the horizon. The lens sits 5 cm
-above the scan plane, at about 105 mm — practically at the top edge of the walls.
-The colour fusion relies on exactly this: seen from that height the top edge of
-a wall projects onto a circle of constant radius in the image.
+A **PiCam360** fisheye facing the ceiling, so one image covers the full circle
+around the vehicle. The lens sits 27 mm above the scan plane, at about 82 mm —
+below the top of the walls and the pillars. The data sheet states a 270° opening
+angle; calibrated on the vehicle, the lens model gives an effective **197°**
+([Calibration](#calibration)), so the view reaches 8.5° below the horizon. The
+scan plane, 27 mm below the lens, is therefore in view from
+
+$$
+d_\mathrm{min} = \frac{27\,\mathrm{mm}}{\tan 8.5^\circ} \approx 0.18\,\mathrm{m}
+$$
+
+outwards — close to the 0.15 m below which the software ignores LiDAR points
+anyway, so practically every LiDAR point can be given a colour.
 
 **Why this camera.** The comparison against the previous 120° camera — which
 seats of the next straight are visible before a corner — is in
@@ -819,11 +827,14 @@ about 200 ms from image to result. The current pipeline projects every LiDAR
 point into the image and reads its colour, in 10–20 ms. Every pillar then has a
 distance and a colour at the same time.
 
-**Light.** Exposure (50 ms), gain and white balance are fixed at start-up
-(`src/start_robot.sh`). With automatic exposure the colour detection fell apart
-whenever the camera re-enumerated. The exposure is deliberately bright: green
-pillars otherwise sink towards black. Direct sunlight remains the camera's weak
-spot for the same reason.
+**Light.** Exposure, gain and white balance are measured on the field mat with
+`camera_exposure_calib` and applied at start-up; the current values are 30 ms,
+gain 0 and 5 329 K ([`config/camera_calib.env`](../../config/camera_calib.env)).
+Fixed values in `src/start_robot.sh` (50 ms, gain 20, 4 600 K) are the fall-back.
+Automatic exposure is never used: with it the colour detection fell apart
+whenever the camera re-enumerated. The setting is deliberately bright, because
+green pillars otherwise sink towards black; direct sunlight remains the camera's
+weak spot for the same reason.
 
 ### IMU
 
@@ -1041,13 +1052,17 @@ The calibration is therefore **measured**, with the tool
    measure over which image radius the pillar colour appears;
 3. fit the sampling zone through these points and save it.
 
-The focal length is checked the same way: the 270° opening angle is only the
-product description, so the horizon ring is fitted to a pillar sampled at
-several distances rather than taken from the data sheet. The full procedure is in
+The focal length is checked the same way. The 270° opening angle is only the
+product description; fitted to a pillar sampled at several distances, the lens
+model gives an effective 197°. Taken from the data sheet, the horizon ring would
+sit about 110 px too far inside the image — above the pillars instead of on
+them. The result is stored in
+[`config/fisheye_calib.yaml`](../../config/fisheye_calib.yaml), which the fusion
+loads at start-up. The full procedure is in
 [`src/camera_lidar_fusion/README.md`](../../src/camera_lidar_fusion/README.md).
 
-Exposure, gain and white balance are fixed rather than calibrated at run time —
-see [Camera](#camera).
+Exposure, gain and white balance are measured on the field mat — see
+[Camera](#camera).
 
 ### Steering and gyro
 
