@@ -313,8 +313,7 @@ unaffected by this and always worked.
 the system as 0.265 A at 14.8 V = 3.9 W. At an assumed converter efficiency of
 ~90 %, the 5 V rail therefore carries about 3.5 W, or **≈0.7 A**.
 
-<!-- TODO: confirm that R29 has been swapped on the vehicle -->
-**Correction:** `R29 = 45.3 kΩ` → 2.05 A typical, a value characterised
+**Change applied:** `R29 = 45.3 kΩ` → 2.05 A typical, a value characterised
 directly in the datasheet rather than interpolated. The limit now sits below the
 regulator's 3.5 A rating, and retains roughly three times the headroom over the
 0.7 A measured load.
