@@ -1,19 +1,19 @@
 /*
- * ESP Controller - Merge aus MainCode.ino + motor_encoder_test_v2.ino
+ * ESP Controller - merge of MainCode.ino + motor_encoder_test_v2.ino
  * Board : ESP32-S3 (MainPCB, custom) / ESP32 Arduino Core 3.x
  *
- * Kernaufteilung:
- *   Core 1 (loop)             : Command-Handling - Jetson-Protokoll, USB-Debug,
- *                               Button, Servo/Lenkung, Batteriemessung.
- *                               Darf blockieren.
- *   Core 0 (motorControlTask) : Antrieb - VNH5019, Encoder, PID-Positionsregler.
- *                               Einziger Ort, der die Motorpins anfasst.
+ * Core split:
+ *   Core 1 (loop)             : Command handling - Jetson protocol, USB debug,
+ *                               button, servo/steering, battery measurement.
+ *                               Allowed to block.
+ *   Core 0 (motorControlTask) : Drive - VNH5019, encoder, PID position controller.
+ *                               The only place that touches the motor pins.
  *
- * Uebergabe zwischen den Kernen: ausschliesslich ueber die setXxx/getXxx-
- * Funktionen, abgesichert per Spinlock, plus eine Queue fuer die Ergebnisse
- * abgeschlossener Positionsfahrten. Nie direkt
- * auf die Sollwerte schreiben - sonst sieht der Motortask eine neue Richtung
- * mit altem Duty.
+ * Hand-over between the cores: exclusively via the setXxx/getXxx
+ * functions, protected by a spinlock, plus a queue for the results of
+ * completed position moves. Never write directly
+ * to the setpoints - otherwise the motor task sees a new direction
+ * with the old duty.
  */
 
 #include <Arduino.h>
@@ -23,23 +23,23 @@
 #include "SCServo.h"
 
 // ==========================================
-// 0. KONSOLE - USB-CDC und optional UART0
+// 0. CONSOLE - USB-CDC and optionally UART0
 // ==========================================
 //
-// Der ESP32-S3 kann die Konsole auf zwei Wegen ausgeben:
-//   - natives USB-Serial-JTAG (GPIO19/20). Mit ARDUINO_USB_CDC_ON_BOOT=1 und
-//     ARDUINO_USB_MODE=1 zeigt "Serial" genau dorthin (siehe platformio.ini).
-//   - UART0 (GPIO43/44), wo bei manchen Boards ein USB-UART-Wandler haengt.
+// The ESP32-S3 can output the console in two ways:
+//   - native USB-Serial-JTAG (GPIO19/20). With ARDUINO_USB_CDC_ON_BOOT=1 and
+//     ARDUINO_USB_MODE=1, "Serial" points exactly there (see platformio.ini).
+//   - UART0 (GPIO43/44), where some boards have a USB-UART converter attached.
 //
-// Fallstrick beim Bring-up: HWCDC::write() verwirft die Daten vollstaendig,
-// solange isCDC_Connected() false liefert - also solange der Host die
-// CDC-Verbindung nicht aufgebaut hat. Ein Terminal, das DTR nicht setzt, sieht
-// deshalb nie etwas, obwohl der COM-Port existiert und der ESP laeuft.
+// Pitfall during bring-up: HWCDC::write() discards the data completely
+// as long as isCDC_Connected() returns false - i.e. as long as the host has
+// not established the CDC connection. A terminal that does not set DTR
+// therefore never sees anything, even though the COM port exists and the ESP is running.
 //
-// -DCONSOLE_MIRROR_UART0=1 (Env "esp32-s3-uart0") legt die Konsole zusaetzlich
-// auf UART0. Dann genuegt ein USB-TTL-Adapter an GPIO43 (ESP-TX) / GPIO44
-// (ESP-RX) als Notausgang, unabhaengig vom USB-Zustand. Nur einschalten, wenn
-// diese beiden Pins auf dem Board frei sind.
+// -DCONSOLE_MIRROR_UART0=1 (env "esp32-s3-uart0") additionally routes the console
+// to UART0. Then a USB-TTL adapter on GPIO43 (ESP-TX) / GPIO44
+// (ESP-RX) is enough as an emergency exit, independent of the USB state. Only enable
+// this if these two pins are free on the board.
 #ifndef CONSOLE_MIRROR_UART0
 #define CONSOLE_MIRROR_UART0 0
 #endif
@@ -49,10 +49,10 @@ class ConsoleIO : public Print {
 public:
     void begin(unsigned long baud) {
         HWCDCSerial.begin();
-        Serial0.begin(baud);          // UART0 auf seinen Standardpins
+        Serial0.begin(baud);          // UART0 on its default pins
     }
-    // Auf UART0 immer, auf CDC nur wenn verbunden: sonst kostet jeder Aufruf
-    // bis zu tx_timeout_ms (100 ms) am TX-Semaphor, und das im loop().
+    // Always on UART0, on CDC only when connected: otherwise every call costs
+    // up to tx_timeout_ms (100 ms) on the TX semaphore, and that inside loop().
     size_t write(uint8_t c) override {
         Serial0.write(c);
         if (HWCDCSerial) HWCDCSerial.write(c);
@@ -76,138 +76,138 @@ public:
 };
 static ConsoleIO Console;
 
-// Der Core definiert "Serial" selbst als Makro auf HWCDCSerial. Umbiegen statt
-// alle Aufrufstellen anzufassen - "Serial1"/"Serial2" sind eigene Tokens und
-// bleiben unberuehrt.
+// The core itself defines "Serial" as a macro for HWCDCSerial. Redirect it instead
+// of touching every call site - "Serial1"/"Serial2" are separate tokens and
+// remain unaffected.
 #undef Serial
 #define Serial Console
 #endif  // CONSOLE_MIRROR_UART0
 
 // ==========================================
-// 1. PIN- UND PROTOKOLL-DEFINITIONEN
+// 1. PIN AND PROTOCOL DEFINITIONS
 // ==========================================
 
-// --- Antrieb: VNH5019 + Quadratur-Encoder ---
+// --- Drive: VNH5019 + quadrature encoder ---
 constexpr int PIN_MOTOR_PWM = 41;   // VNH5019 PWM
 constexpr int PIN_MOTOR_INA = 42;   // VNH5019 INA
 constexpr int PIN_MOTOR_INB = 38;   // VNH5019 INB
-// Stromsense: auf dem neuen Board an GPIO8 = ADC1_CH7, also analog lesbar
-// (das alte GPIO39 war es nicht). Skalierung siehe CS_MV_PER_A_NOMINAL.
+// Current sense: on the new board on GPIO8 = ADC1_CH7, so readable as analog
+// (the old GPIO39 was not). For scaling see CS_MV_PER_A_NOMINAL.
 constexpr int PIN_MOTOR_CS  = 8;    // VNH5019 CS, ADC1_CH7
 constexpr int PIN_ENC_A     = 15;   // Encoder A
 constexpr int PIN_ENC_B     = 16;   // Encoder B
 
-// Fahrtrichtung. Welche Drehrichtung "vorwaerts" ist, entscheidet die
-// Verdrahtung, nicht das Protokoll: an welchen Klemmen des VNH5019 die
-// Motorleitungen haengen und wie herum der Encoder eingebaut ist.
-// Auf true stellen, wenn ein POSITIVER Motorwert das Fahrzeug rueckwaerts
-// fahren laesst.
+// Driving direction. Which rotation direction is "forward" is decided by the
+// wiring, not by the protocol: which VNH5019 terminals the motor leads are
+// connected to and which way round the encoder is mounted.
+// Set to true if a POSITIVE motor value makes the vehicle drive
+// backwards.
 //
-// Der Schalter dreht Motorausgang UND Encoder gemeinsam - das ist Absicht.
-// Wuerden die beiden unterschiedliche Vorzeichen haben, faende die
-// Positionsregelung ihr Ziel nie: sie zieht dann von der Sollposition weg
-// statt darauf zu, bis der Timeout kommt oder etwas kaputtgeht.
+// The switch flips motor output AND encoder together - this is intentional.
+// If the two had different signs, the position controller would never
+// find its target: it would then pull away from the setpoint position
+// instead of towards it, until the timeout hits or something breaks.
 constexpr bool DRIVE_INVERT = true;
 
-// --- Peripherie ---
-// Servo-Bus ueber die Halbduplex-Buffer des neuen Boards, Pins aus ESP-Sicht:
-//   ESP-TX (GPIO17) -> A-Eingang des SN74LVC1G126 (treibt die Busleitung)
-//   ESP-RX (GPIO18) <- Y-Ausgang des SN74LVC1G125 (haengt an der Busleitung)
-// Die Richtungsumschaltung macht die Hardware ueber die beiden OE-Eingaenge;
-// die Firmware kennt keinen Direction-Pin. Zur Laufzeit per "svpin<rx>,<tx>"
-// tauschbar, falls die Zuordnung doch andersherum bestueckt ist.
+// --- Peripherals ---
+// Servo bus via the half-duplex buffers of the new board, pins from the ESP's view:
+//   ESP-TX (GPIO17) -> A input of the SN74LVC1G126 (drives the bus line)
+//   ESP-RX (GPIO18) <- Y output of the SN74LVC1G125 (attached to the bus line)
+// Direction switching is done by the hardware via the two OE inputs;
+// the firmware has no direction pin. Swappable at runtime via "svpin<rx>,<tx>"
+// in case the assignment was populated the other way round after all.
 #define PIN_SERVO_RX    18
 #define PIN_SERVO_TX    17
 #define PIN_JETSON_RX   10
 #define PIN_JETSON_TX   11
 #define PIN_LED         13
 #define PIN_BUTTON      9
-#define PIN_BATTERY     1           // ADC1_CH0, Teiler 100k / 22k gegen GND
+#define PIN_BATTERY     1           // ADC1_CH0, divider 100k / 22k to GND
 
 // --- PWM ---
-// 10 Bit beibehalten, damit CMD_MOTOR (16-Bit-Speed 0..1023) unveraendert bleibt.
+// Keep 10 bits so that CMD_MOTOR (16-bit speed 0..1023) stays unchanged.
 constexpr int PWM_FREQ = 20000;
 constexpr int PWM_RES  = 10;
 constexpr uint16_t DUTY_MAX = (1 << PWM_RES) - 1;   // 1023
 
-// --- Protokoll: Jetson -> ESP ---
+// --- Protocol: Jetson -> ESP ---
 #define START_BYTE      0xA5
 
-// Zweites Startbyte fuer Pakete mit Sendezeitstempel:
+// Second start byte for packets with a send timestamp:
 //
-//   A6 <CMD> <uint32 t_tx_us> <PAYLOAD wie bei A5>
+//   A6 <CMD> <uint32 t_tx_us> <PAYLOAD as with A5>
 //
-// Der Stempel sind die unteren 32 Bit der ESP-Uhr (esp_timer, Mikrosekunden
-// seit Boot) und meint den Zeitpunkt, zu dem das *letzte Byte* des Pakets die
-// Leitung verlaesst - nicht den Zeitpunkt des Aufrufs. Der Anteil fuers
-// Rausschieben (10 Bit pro Byte bei 115200 Baud) wird eingerechnet, damit
-// beide Seiten denselben Bezugspunkt haben und ein langes Paket nicht
-// scheinbar frueher losgeht als ein kurzes.
+// The stamp is the lower 32 bits of the ESP clock (esp_timer, microseconds
+// since boot) and denotes the moment the *last byte* of the packet leaves
+// the line - not the moment of the call. The time for shifting out
+// (10 bits per byte at 115200 baud) is included so that
+// both sides share the same reference point and a long packet does not
+// appear to start earlier than a short one.
 //
-// Die ESP-Uhr in die Jetson-Uhr rechnet der Offset aus dem Ping-Pong von
-// CMD_TIME_SYNC / CMD_TIME_RSP (siehe docs/JETSON_BRIDGE.md).
+// The conversion from ESP clock to Jetson clock uses the offset from the ping-pong of
+// CMD_TIME_SYNC / CMD_TIME_RSP (see docs/JETSON_BRIDGE.md).
 //
-// Stempeln ist per Default AUS und wird mit CMD_STAMP_MODE (oder "ts1" auf der
-// USB-Konsole) eingeschaltet - eine Bridge, die 0xA6 nicht kennt, sieht sonst
-// nur noch Bruch. Der Empfangspfad des ESP versteht 0xA6 immer, die Bridge
-// darf ihre Befehle also jederzeit stempeln.
+// Stamping is OFF by default and is enabled with CMD_STAMP_MODE (or "ts1" on the
+// USB console) - a bridge that does not know 0xA6 would otherwise see
+// nothing but garbage. The ESP's receive path always understands 0xA6, so the bridge
+// may stamp its commands at any time.
 #define START_BYTE_TS   0xA6
 #define CMD_MOTOR       0x10   // 3B: dir, speedHi, speedLo
 #define CMD_SERVO       0x20   // 3B: id, pctHi, pctLo
 #define CMD_LED         0x30   // 1B: on/off
-#define CMD_CALIBRATE   0x40   // 0B: startet die manuelle Kalibrierung
-#define CMD_CAL         0x41   // 2B: aktion, argument (manuelle Kalibrierung)
+#define CMD_CALIBRATE   0x40   // 0B: starts the manual calibration
+#define CMD_CAL         0x41   // 2B: action, argument (manual calibration)
 #define CMD_TORQUE      0x50   // 0B
-#define CMD_TRIM        0x60   // 1B: 0=links 1=rechts 2=speichern
-#define CMD_PID_SET     0x80   // 5B: paramId, int32 wert (x1000)
+#define CMD_TRIM        0x60   // 1B: 0=left 1=right 2=save
+#define CMD_PID_SET     0x80   // 5B: paramId, int32 value (x1000)
 #define CMD_PID_GET     0x81   // 0B
-#define CMD_PID_SAVE    0x83   // 0B: aktuelle Parameter ins NVS schreiben
-#define CMD_MOVE        0x90   // 5B: moveId, int32 ziel in 1/10 Grad (absolut)
+#define CMD_PID_SAVE    0x83   // 0B: write current parameters to NVS
+#define CMD_MOVE        0x90   // 5B: moveId, int32 target in 1/10 degree (absolute)
 #define CMD_MOVE_ABORT  0x91   // 0B
 #define CMD_PROGRESS    0x92   // 0B
 #define CMD_BATTERY     0xA0   // 0B
-#define CMD_TIME_SYNC   0xB0   // 1B: seq  -> Antwort CMD_TIME_RSP
-#define CMD_STAMP_MODE  0xB2   // 1B: 0=aus 1=an -> Antwort CMD_STAMP_RSP
-#define CMD_TELEM_RATE  0xC0   // 2B: uint16 Intervall in ms, 0 = aus
+#define CMD_TIME_SYNC   0xB0   // 1B: seq  -> reply CMD_TIME_RSP
+#define CMD_STAMP_MODE  0xB2   // 1B: 0=off 1=on -> reply CMD_STAMP_RSP
+#define CMD_TELEM_RATE  0xC0   // 2B: uint16 interval in ms, 0 = off
 #define CMD_EMERGENCY   0xFF   // 0B
 
-// Aktionen in CMD_CAL
-#define CAL_ACT_START   0x00   // Kalibriermodus starten
-#define CAL_ACT_MINUS   0x01   // einen Schritt Richtung Position 0
-#define CAL_ACT_PLUS    0x02   // einen Schritt Richtung Position 1023
-#define CAL_ACT_CENTER  0x03   // aktuelle Stellung = Mitte
-#define CAL_ACT_LEFT    0x04   // aktuelle Stellung = linker Anschlag
-#define CAL_ACT_RIGHT   0x05   // aktuelle Stellung = rechter Anschlag
-#define CAL_ACT_SAVE    0x06   // pruefen, ins NVS schreiben, Modus beenden
-#define CAL_ACT_ABORT   0x07   // abbrechen, gespeicherte Werte bleiben
-#define CAL_ACT_FREE    0x08   // Torque aus - Lenkung von Hand bewegen
-#define CAL_ACT_HOLD    0x09   // Torque an - aktuelle Stellung halten
-#define CAL_ACT_GOTO_C  0x0A   // gemerkte Mitte anfahren
-#define CAL_ACT_STEP    0x0B   // arg = neue Schrittweite in Ticks
-#define CAL_ACT_STATUS  0x0C   // nur Zustand abfragen
+// Actions in CMD_CAL
+#define CAL_ACT_START   0x00   // start calibration mode
+#define CAL_ACT_MINUS   0x01   // one step towards position 0
+#define CAL_ACT_PLUS    0x02   // one step towards position 1023
+#define CAL_ACT_CENTER  0x03   // current position = center
+#define CAL_ACT_LEFT    0x04   // current position = left end stop
+#define CAL_ACT_RIGHT   0x05   // current position = right end stop
+#define CAL_ACT_SAVE    0x06   // validate, write to NVS, exit mode
+#define CAL_ACT_ABORT   0x07   // abort, stored values are kept
+#define CAL_ACT_FREE    0x08   // torque off - move steering by hand
+#define CAL_ACT_HOLD    0x09   // torque on - hold current position
+#define CAL_ACT_GOTO_C  0x0A   // move to the stored center
+#define CAL_ACT_STEP    0x0B   // arg = new step size in ticks
+#define CAL_ACT_STATUS  0x0C   // only query state
 
-// Status-Codes in CMD_CAL_RSP
-#define CAL_ST_OK       0x00   // Aktion ausgefuehrt
-#define CAL_ST_SAVED    0x01   // Kalibrierung gespeichert, Modus beendet
-#define CAL_ST_REJECTED 0x02   // unvollstaendig oder unplausibel - nicht gespeichert
-#define CAL_ST_NOSERVO  0x03   // Servo antwortet nicht
-#define CAL_ST_INACTIVE 0x04   // Aktion braucht einen laufenden Kalibriermodus
-#define CAL_ST_LIMIT    0x05   // Bereichsende 0 / 1023 erreicht
+// Status codes in CMD_CAL_RSP
+#define CAL_ST_OK       0x00   // action executed
+#define CAL_ST_SAVED    0x01   // calibration saved, mode exited
+#define CAL_ST_REJECTED 0x02   // incomplete or implausible - not saved
+#define CAL_ST_NOSERVO  0x03   // servo does not respond
+#define CAL_ST_INACTIVE 0x04   // action requires an active calibration mode
+#define CAL_ST_LIMIT    0x05   // end of range 0 / 1023 reached
 
-// --- Protokoll: ESP -> Jetson ---
-#define CMD_CAL_RSP     0x42   // 11B: aktiv, flags, status, int16 pos/mitte/links/rechts
+// --- Protocol: ESP -> Jetson ---
+#define CMD_CAL_RSP     0x42   // 11B: active, flags, status, int16 pos/center/left/right
 #define CMD_BUTTON      0x70   // 1B: 0x01 = pressed
-#define CMD_PID_RSP     0x82   // 12B: int32 Kp, Ki, Kd (jeweils x1000)
-#define CMD_PID_SAVED   0x84   // 1B: 0x00 = gespeichert, 0x01 = Fehler
-#define CMD_MOVE_DONE   0x93   // 6B: moveId, status, int32 ist-Pos (1/10 Grad)
-#define CMD_PROGRESS_RSP 0x94  // 11B: moveId, aktiv, prozent, int32 ist, int32 ziel
-#define CMD_BATTERY_RSP 0xA1   // 6B: int32 pack mV, int16 zelle mV
-#define CMD_BATTERY_WARN 0xA2  // 6B: wie CMD_BATTERY_RSP, ungefragt bei Unterspannung
+#define CMD_PID_RSP     0x82   // 12B: int32 Kp, Ki, Kd (each x1000)
+#define CMD_PID_SAVED   0x84   // 1B: 0x00 = saved, 0x01 = error
+#define CMD_MOVE_DONE   0x93   // 6B: moveId, status, int32 actual pos (1/10 degree)
+#define CMD_PROGRESS_RSP 0x94  // 11B: moveId, active, percent, int32 actual, int32 target
+#define CMD_BATTERY_RSP 0xA1   // 6B: int32 pack mV, int16 cell mV
+#define CMD_BATTERY_WARN 0xA2  // 6B: like CMD_BATTERY_RSP, unsolicited on undervoltage
 #define CMD_TIME_RSP    0xB1   // 17B: seq, int64 t_rx_us, int64 t_tx_us
-#define CMD_STAMP_RSP   0xB3   // 1B: aktueller Stempelmodus
-#define CMD_TELEMETRY   0xC1   // 12B: int32 pos, int32 tempo, int16 duty, int16 mA
+#define CMD_STAMP_RSP   0xB3   // 1B: current stamp mode
+#define CMD_TELEMETRY   0xC1   // 12B: int32 pos, int32 speed, int16 duty, int16 mA
 
-// Status-Codes in CMD_MOVE_DONE
+// Status codes in CMD_MOVE_DONE
 #define MOVE_OK         0x00
 #define MOVE_TIMEOUT    0x01
 #define MOVE_ABORTED    0x02
@@ -215,14 +215,14 @@ constexpr uint16_t DUTY_MAX = (1 << PWM_RES) - 1;   // 1023
 #define JETSON_TIMEOUT  5000
 
 // ==========================================
-// 2. GETEILTER ZUSTAND ZWISCHEN DEN KERNEN
+// 2. SHARED STATE BETWEEN THE CORES
 // ==========================================
 
 enum MotorMode : uint8_t {
-    MOTOR_COAST    = 0,   // H-Bruecke hochohmig, Motor rollt aus
-    MOTOR_DRIVE    = 1,   // faehrt offen mit duty in Richtung reverse
-    MOTOR_BRAKE    = 2,   // Kurzschlussbremse mit duty als Bremskraft
-    MOTOR_POSITION = 3    // PID regelt auf Zielposition
+    MOTOR_COAST    = 0,   // H-bridge high-impedance, motor coasts to a stop
+    MOTOR_DRIVE    = 1,   // drives open-loop with duty in direction reverse
+    MOTOR_BRAKE    = 2,   // short-circuit brake with duty as braking force
+    MOTOR_POSITION = 3    // PID controls to target position
 };
 
 struct MotorCommand {
@@ -231,22 +231,22 @@ struct MotorCommand {
     uint16_t  duty    = 0;          // 0..DUTY_MAX
 };
 
-// PID-Parameter. Startwerte sind Schaetzungen fuer den Pololu 25D mit 408
-// Counts/U - muessen am realen Aufbau nachgezogen werden (Befehl "pid").
+// PID parameters. Initial values are estimates for the Pololu 25D with 408
+// counts/rev - must be tuned on the real setup (command "pid").
 struct PidParams {
-    float    kp        = 4.0f;    // Duty pro Count Regelabweichung
-    float    ki        = 0.5f;    // Duty pro (Count * Sekunde)
-    float    kd        = 0.10f;   // Duty pro (Count / Sekunde)
-    float    iTermLim  = 200.0f;  // Begrenzung des I-Anteils in Duty (Anti-Windup)
-    uint16_t maxDuty   = 700;     // Stellgroessenbegrenzung
-    // Anlauf-Duty gegen Haftreibung. Kurz vorm Ziel ist die Regelabweichung so
-    // klein, dass kp*err unter die Losbrechschwelle faellt - der Motor bleibt
-    // stehen und die Fahrt laeuft in den Timeout. Solange das Ziel nicht
-    // erreicht ist, wird mindestens dieser Wert angelegt. 0 = aus.
+    float    kp        = 4.0f;    // duty per count of control error
+    float    ki        = 0.5f;    // duty per (count * second)
+    float    kd        = 0.10f;   // duty per (count / second)
+    float    iTermLim  = 200.0f;  // limit of the I term in duty (anti-windup)
+    uint16_t maxDuty   = 700;     // actuator output limit
+    // Breakaway duty against static friction. Just before the target the control
+    // error is so small that kp*err drops below the breakaway threshold - the motor
+    // stalls and the move runs into the timeout. As long as the target has not
+    // been reached, at least this value is applied. 0 = off.
     uint16_t minDuty   = 0;
-    int32_t  tolDeg10  = 50;      // Zielfenster, 1/10 Grad (50 = 5,0 Grad)
-    uint32_t settleMs  = 200;     // so lange im Fenster -> fertig
-    uint32_t timeoutMs = 10000;   // Abbruch, wenn Ziel nicht erreicht
+    int32_t  tolDeg10  = 50;      // target window, 1/10 degree (50 = 5.0 degrees)
+    uint32_t settleMs  = 200;     // this long inside the window -> done
+    uint32_t timeoutMs = 10000;   // abort if target not reached
 };
 
 struct MoveState {
@@ -266,53 +266,53 @@ struct MoveResult {
 static MotorCommand   g_motorCmd;
 static PidParams      g_pid;
 static MoveState      g_move;
-static unsigned long  g_lastCmdTime = 0;   // Watchdog-Zeitstempel
+static unsigned long  g_lastCmdTime = 0;   // watchdog timestamp
 static portMUX_TYPE   g_motorMux = portMUX_INITIALIZER_UNLOCKED;
 
 static QueueHandle_t  g_moveResultQueue = nullptr;
 
-// Telemetrie: Motortask schreibt, Core 1 liest nur zur Ausgabe.
+// Telemetry: motor task writes, core 1 only reads for output.
 static volatile float   g_rpm        = 0.0f;
 static volatile long    g_encCount   = 0;
-static volatile int16_t g_dutySigned = 0;   // + vorwaerts, - rueckwaerts
+static volatile int16_t g_dutySigned = 0;   // + forward, - backward
 
 ESP32Encoder encoder;
-// COUNTS_PER_REV des AKTIVEN Motors eintragen:
-// ServoCity DE3 (Open-Collector): 3 PPR x 4 x 42,875 Getriebe = ~514,5
-// Pololu 25D #4841 (Push-Pull)  : 48 CPR x 4,4 Getriebe = 211,2 (Ausgangswelle)
+// Enter COUNTS_PER_REV of the ACTIVE motor:
+// ServoCity DE3 (open collector): 3 PPR x 4 x 42.875 gearbox = ~514.5
+// Pololu 25D #4841 (push-pull)  : 48 CPR x 4.4 gearbox = 211.2 (output shaft)
 constexpr float COUNTS_PER_REV = 408.0f;
 
-// --- Geschwindigkeitsmessung ---
-// Abgetastet wird mit dem Takt des Motortasks (TASK_PERIOD, 10 ms). Gemessen
-// wird ueber ein GLEITENDES Fenster der letzten g_speedWindow Abtastungen:
+// --- Speed measurement ---
+// Sampling runs at the motor task's rate (TASK_PERIOD, 10 ms). The measurement
+// is taken over a SLIDING window of the last g_speedWindow samples:
 //
-//   tempo = (count[jetzt] - count[jetzt - n]) / (t[jetzt] - t[jetzt - n])
+//   speed = (count[now] - count[now - n]) / (t[now] - t[now - n])
 //
-// Damit kommt bei jeder Abtastung ein neuer Wert - also mit 100 Hz -, das
-// Fenster darf aber trotzdem laenger sein als 10 ms. Die beiden Groessen sind
-// entkoppelt, und genau das ist der Punkt der Uebung: frueher hing die
-// Ausgaberate an der Fensterlaenge, ein Wert alle 100 ms.
+// This yields a new value at every sample - i.e. at 100 Hz - while the
+// window can still be longer than 10 ms. The two quantities are
+// decoupled, and that is exactly the point of the exercise: previously the
+// output rate was tied to the window length, one value every 100 ms.
 //
-// Die Differenz der beiden Randwerte IST der Mittelwert ueber das Fenster -
-// alle Zwischenwerte kuerzen sich weg. Deshalb kein Mittelwert der
-// Einzelmessungen und kein EMA: die Verzoegerung betraegt exakt ein halbes
-// Fenster und laesst sich hinschreiben, statt als Zeitkonstante im Nebel zu
-// bleiben.
+// The difference of the two edge values IS the mean over the window -
+// all intermediate values cancel out. Hence no mean of the
+// individual measurements and no EMA: the delay is exactly half a
+// window and can be written down, instead of staying hidden in the fog
+// as a time constant.
 //
-// Was die Fensterlaenge kostet, ist Aufloesung. Ein einzelner Impuls in einem
-// Fenster von n x 10 ms entspricht:
+// What the window length costs is resolution. A single pulse in a
+// window of n x 10 ms corresponds to:
 //
-//   n = 1  (10 ms)   14,7 U/min   88 grad/s   <- so grob wie der Vollausschlag
-//   n = 5  (50 ms)    2,9 U/min   17,6 grad/s
-//   n = 10 (100 ms)   1,5 U/min    8,8 grad/s
+//   n = 1  (10 ms)   14.7 rpm   88 deg/s   <- as coarse as full deflection
+//   n = 5  (50 ms)    2.9 rpm   17.6 deg/s
+//   n = 10 (100 ms)   1.5 rpm    8.8 deg/s
 //
-// bei 408 Impulsen je Umdrehung und rund 30 U/min Hoechstdrehzahl. Ueber das
-// Fenster laesst sich Rauschen gegen Verzoegerung tauschen, zur Laufzeit per
-// "sw<n>" auf der Konsole.
+// at 408 pulses per revolution and roughly 30 rpm top speed. The window
+// trades noise against delay, adjustable at runtime via
+// "sw<n>" on the console.
 constexpr uint8_t SPEED_WINDOW_MAX = 32;
 static volatile uint8_t g_speedWindow = 1;
 
-// --- Umrechnung Ausgangswelle: 1/10 Grad <-> Encoder-Counts ---
+// --- Output shaft conversion: 1/10 degree <-> encoder counts ---
 static inline long deg10ToCounts(int32_t deg10) {
     return lroundf(deg10 * COUNTS_PER_REV / 3600.0f);
 }
@@ -321,12 +321,12 @@ static inline int32_t countsToDeg10(long counts) {
 }
 
 // ==========================================
-// 3. ZUGRIFF AUF DEN GETEILTEN ZUSTAND
+// 3. ACCESS TO THE SHARED STATE
 // ==========================================
 
-// Offener Steuerbefehl. Fuettert den Watchdog - jeder gueltige Befehl haelt
-// den Antrieb am Leben, egal ob von Jetson oder USB. Bricht eine laufende
-// Positionsfahrt ab, damit sich nicht zwei Regler um den Motor streiten.
+// Open-loop control command. Feeds the watchdog - every valid command keeps
+// the drive alive, whether from the Jetson or USB. Aborts a running
+// position move so that two controllers do not fight over the motor.
 void setMotorCommand(MotorMode mode, bool reverse, uint16_t duty) {
     if (duty > DUTY_MAX) duty = DUTY_MAX;
     portENTER_CRITICAL(&g_motorMux);
@@ -346,12 +346,12 @@ void setMotorCommand(MotorMode mode, bool reverse, uint16_t duty) {
     }
 }
 
-// Positionsfahrt starten. deltaDeg10 ist RELATIV zur aktuellen Stellung, in
-// 1/10 Grad der Ausgangswelle. 900 = "drehe 90 Grad weiter", -450 = "45 Grad
-// zurueck". Damit ist eine Fahrt reset-fest: sie braucht keinen Nullpunkt.
-// Es laeuft immer nur eine Fahrt. Wird eine neue gestartet, waehrend noch eine
-// aktiv ist, bekommt die alte ID ein MOVE_ABORTED - sonst wartet der Jetson
-// ewig auf eine Quittung, die nie kommt.
+// Start a position move. deltaDeg10 is RELATIVE to the current position, in
+// 1/10 degree of the output shaft. 900 = "turn 90 degrees further", -450 = "45 degrees
+// back". This makes a move reset-proof: it does not need a zero point.
+// Only one move runs at a time. If a new one is started while another is
+// still active, the old ID gets a MOVE_ABORTED - otherwise the Jetson waits
+// forever for an acknowledgement that never arrives.
 void startMove(uint8_t id, int32_t deltaDeg10) {
     portENTER_CRITICAL(&g_motorMux);
     bool    superseded = g_move.active;
@@ -409,7 +409,7 @@ void setPid(const PidParams& p) {
 }
 
 // ==========================================
-// 4. SERVO / LENKUNG - Zustand
+// 4. SERVO / STEERING - state
 // ==========================================
 
 Preferences prefs;
@@ -417,39 +417,39 @@ int trimOffset = 0;
 
 const int SERVO_ID = 1;
 
-// SC-Serie (SCSCL, big-endian): Positionsbereich 0..1023 (10 Bit), Mitte 512.
-// Der SC09 ist ein SCS-Servo, KEIN STS - er antwortet big-endian und mit halber
-// Aufloesung. Deshalb SCSCL statt SMS_STS.
+// SC series (SCSCL, big-endian): position range 0..1023 (10 bits), center 512.
+// The SC09 is an SCS servo, NOT an STS - it replies big-endian and with half
+// the resolution. Hence SCSCL instead of SMS_STS.
 constexpr int SERVO_POS_MAX    = 1023;
 constexpr int SERVO_CENTER_DEF = 512;
-// SCSCL-WritePosEx nimmt Speed (Acc/Time intern 0). Speed 0 ist beim SC09 KEIN
-// "maximal schnell", sondern "keine Geschwindigkeit" - das Ziel landet im
-// Register, der Servo bleibt aber stehen. Deshalb auch beim Lenken > 0.
-constexpr uint16_t SERVO_SPEED_FAST  = 1500;   // Lenken: zuegig, aber mit Speed
-constexpr uint16_t SERVO_SPEED_CALIB = 500;    // Kalibrierung: gebremst
-constexpr uint8_t  SERVO_ACC         = 50;      // von SCSCL ignoriert, aus Kompatibilitaet
-// SC09: 0..1023 Ticks ueber ~300 Grad Vollbereich. Nur fuer die Anzeige.
+// SCSCL WritePosEx takes speed (acc/time internally 0). On the SC09, speed 0 is NOT
+// "maximum speed" but "no speed" - the target lands in the
+// register, but the servo does not move. Hence > 0 for steering as well.
+constexpr uint16_t SERVO_SPEED_FAST  = 1500;   // steering: brisk, but with speed
+constexpr uint16_t SERVO_SPEED_CALIB = 500;    // calibration: slowed down
+constexpr uint8_t  SERVO_ACC         = 50;      // ignored by SCSCL, kept for compatibility
+// SC09: 0..1023 ticks over ~300 degrees full range. For display only.
 constexpr float    SERVO_DEG_PER_TICK = 300.0f / (SERVO_POS_MAX + 1);
 
-// Konvention aus der Kalibrierung: leftLimit ist der Anschlag mit der GROESSEREN
-// Rohposition, rightLimit der mit der kleineren, centerLimit die von Hand
-// gesetzte Geradeausstellung. softwareCenterPos = centerLimit + trimOffset.
-// Die Zuordnung in CMD_SERVO rechnet symmetrisch, eine gespiegelt montierte
-// Lenkung funktioniert also auch mit vertauschten Werten - dann ist nur die
-// Vorzeichenrichtung des Lenkbefehls gedreht.
+// Convention from the calibration: leftLimit is the end stop with the LARGER
+// raw position, rightLimit the one with the smaller, centerLimit the manually
+// set straight-ahead position. softwareCenterPos = centerLimit + trimOffset.
+// The mapping in CMD_SERVO is computed symmetrically, so a mirror-mounted
+// steering also works with swapped values - only the sign
+// direction of the steering command is then flipped.
 int softwareCenterPos = SERVO_CENTER_DEF;
 int centerLimit = SERVO_CENTER_DEF;
 int leftLimit  = SERVO_POS_MAX;
 int rightLimit = 0;
 
-int servoManualPos = SERVO_CENTER_DEF;   // Position der manuellen Konsolensteuerung (j/l/m)
+int servoManualPos = SERVO_CENTER_DEF;   // position of the manual console control (j/l/m)
 
-// Serial2-Pins fuer den Servo-Bus, zur Laufzeit umstellbar ("svpin<rx>,<tx>").
-// Zum Eingrenzen einer vertauschten Verkabelung, ohne loeten zu muessen.
+// Serial2 pins for the servo bus, changeable at runtime ("svpin<rx>,<tx>").
+// For narrowing down swapped wiring without having to solder.
 int g_servoRx = PIN_SERVO_RX;
 int g_servoTx = PIN_SERVO_TX;
-uint32_t g_servoBaud   = 1000000;   // per "svbaud<n>" fuer Oszi-Messung senkbar
-bool     g_servoTxTest = false;      // sendet dauerhaft 0x55 zum Oszilloskopieren
+uint32_t g_servoBaud   = 1000000;   // can be lowered via "svbaud<n>" for scope measurements
+bool     g_servoTxTest = false;      // continuously sends 0x55 for oscilloscope viewing
 
 TaskHandle_t MotorControlTaskHandle;
 
@@ -460,7 +460,7 @@ void IRAM_ATTR buttonISR() {
 }
 
 // ==========================================
-// 5. MOTORTREIBER (VNH5019) - nur vom Motortask (Core 0) aufrufen!
+// 5. MOTOR DRIVER (VNH5019) - call only from the motor task (core 0)!
 // ==========================================
 
 class MotorDriver {
@@ -485,14 +485,14 @@ public:
     }
 
     void drive(bool reverse, uint16_t duty) {
-        // != wirkt auf bool wie XOR: DRIVE_INVERT kippt die Richtung.
+        // != acts like XOR on bool: DRIVE_INVERT flips the direction.
         const bool rev = (reverse != DRIVE_INVERT);
         digitalWrite(inaPin, rev ? LOW  : HIGH);
         digitalWrite(inbPin, rev ? HIGH : LOW);
         ledcWrite(pwmPin, duty);
     }
 
-    // INA=INB=LOW mit Duty > 0: Kurzschlussbremse gegen GND.
+    // INA=INB=LOW with duty > 0: short-circuit brake to GND.
     void brake(uint16_t duty) {
         digitalWrite(inaPin, LOW);
         digitalWrite(inbPin, LOW);
@@ -501,32 +501,32 @@ public:
 };
 
 // ==========================================
-// 6. MOTOR-CONTROL TASK (Core 0)
+// 6. MOTOR CONTROL TASK (core 0)
 // ==========================================
 
-// Rampe: max. Duty-Aenderung pro Task-Zyklus.
-// 25 -> volle Skala in ~410 ms. Hoeher = spritziger, aber mehr Stromspitze.
+// Ramp: max. duty change per task cycle.
+// 25 -> full scale in ~410 ms. Higher = snappier, but larger current spike.
 constexpr uint16_t RAMP_STEP    = 25;
-constexpr uint32_t TASK_PERIOD  = 10;    // ms - zugleich das Abtastintervall
-                                         // der Geschwindigkeitsmessung
+constexpr uint32_t TASK_PERIOD  = 10;    // ms - also the sampling interval
+                                         // of the speed measurement
 
 void motorControlTask(void* pvParameters) {
     MotorDriver* motor = (MotorDriver*)pvParameters;
 
-    uint16_t  appliedDuty    = 0;       // was gerade wirklich anliegt
+    uint16_t  appliedDuty    = 0;       // what is actually applied right now
     bool      appliedReverse = false;
     MotorMode appliedMode    = MOTOR_COAST;
 
-    // Ringpuffer der Geschwindigkeitsmessung: je Abtastung Encoderstand und
-    // Zeitpunkt. Zeitpunkt in Mikrosekunden, weil 10 ms in Millisekunden nur
-    // 10 Schritte sind - der Quantisierungsfehler der Zeit waere sonst so
-    // gross wie das Fenster selbst.
+    // Ring buffer of the speed measurement: encoder count and timestamp per
+    // sample. Timestamp in microseconds, because 10 ms in milliseconds is only
+    // 10 steps - the quantization error of the time would otherwise be as
+    // large as the window itself.
     long     speedCnt[SPEED_WINDOW_MAX] = {0};
     uint32_t speedUs[SPEED_WINDOW_MAX]  = {0};
-    uint8_t  speedHead = 0;    // naechster Schreibplatz
-    uint8_t  speedFill = 0;    // wie viele Plaetze schon gueltig sind
+    uint8_t  speedHead = 0;    // next write slot
+    uint8_t  speedFill = 0;    // how many slots are already valid
 
-    // PID-Zustand
+    // PID state
     float integral   = 0.0f;
     long  lastPosCnt = 0;
     bool  pidPrimed  = false;
@@ -548,9 +548,9 @@ void motorControlTask(void* pvParameters) {
         PidParams    pid = getPid();
 
         // --- Watchdog ---
-        // Greift nur im offenen Steuerbetrieb. Eine Positionsfahrt darf laenger
-        // als JETSON_TIMEOUT dauern, ohne dass ein Befehl nachkommt - dort ist
-        // pid.timeoutMs das Sicherheitsnetz.
+        // Only applies in open-loop control mode. A position move may take longer
+        // than JETSON_TIMEOUT without a follow-up command - there
+        // pid.timeoutMs is the safety net.
         if (cmd.mode == MOTOR_DRIVE && (now - lastCmdTime > JETSON_TIMEOUT)) {
             cmd.mode = MOTOR_COAST;
             cmd.duty = 0;
@@ -561,12 +561,12 @@ void motorControlTask(void* pvParameters) {
         MotorMode wantMode   = cmd.mode;
 
         // ------------------------------------------------
-        // PID-Positionsregler
+        // PID position controller
         // ------------------------------------------------
         if (cmd.mode == MOTOR_POSITION && mv.active) {
-            // Neue Fahrt = vorher keine aktiv ODER eine andere ID. Ohne den
-            // ID-Vergleich wuerde eine abloesende Fahrt Integral und Startzeit
-            // der alten erben und verfrueht in den Timeout laufen.
+            // New move = none active before OR a different ID. Without the
+            // ID comparison, a superseding move would inherit the integral and start time
+            // of the old one and run into the timeout prematurely.
             if (!wasMoving || mv.id != lastMoveId) {
                 integral      = 0.0f;
                 lastPosCnt    = posCnt;
@@ -583,31 +583,31 @@ void motorControlTask(void* pvParameters) {
             long tolCnt = deg10ToCounts(pid.tolDeg10);
             if (tolCnt < 1) tolCnt = 1;
 
-            // D-Anteil auf die Messgroesse statt auf den Fehler: kein
-            // Ableitungssprung, wenn ein neues Ziel gesetzt wird.
+            // D term on the measured value instead of the error: no
+            // derivative kick when a new target is set.
             float dMeas = pidPrimed ? ((float)(posCnt - lastPosCnt) / dt) : 0.0f;
             lastPosCnt  = posCnt;
             pidPrimed   = true;
 
             integral += err * dt;
             float iTerm = pid.ki * integral;
-            // Anti-Windup: I-Anteil in Duty begrenzen und Integral zurueckrechnen
+            // Anti-windup: limit I term in duty and back-calculate the integral
             if (iTerm >  pid.iTermLim) { iTerm =  pid.iTermLim; integral = (pid.ki != 0.0f) ?  pid.iTermLim / pid.ki : 0.0f; }
             if (iTerm < -pid.iTermLim) { iTerm = -pid.iTermLim; integral = (pid.ki != 0.0f) ? -pid.iTermLim / pid.ki : 0.0f; }
 
             float out = pid.kp * err + iTerm - pid.kd * dMeas;
 
             if (labs(errCnt) <= tolCnt) {
-                // Totzone: im Zielfenster nicht weiter nachregeln. Sonst steht
-                // waehrend der Verweilzeit ein Rest-Duty aus dem I-Anteil an und
-                // der Antrieb drueckt gegen die Reibung, ohne etwas zu bewirken.
+                // Dead band: no further correction inside the target window. Otherwise
+                // a residual duty from the I term is applied during the settle time and
+                // the drive pushes against friction without achieving anything.
                 out = 0.0f;
                 integral = 0.0f;
             } else if (pid.minDuty > 0 && fabsf(out) < (float)pid.minDuty) {
-                // Haftreibung ueberwinden: ausserhalb des Zielfensters nie
-                // weniger als minDuty anlegen. Richtung kommt aus dem Vorzeichen
-                // der Regelabweichung, nicht aus out - out kann durch den
-                // D-Anteil kurzzeitig das falsche Vorzeichen haben.
+                // Overcome static friction: outside the target window never
+                // apply less than minDuty. Direction comes from the sign
+                // of the control error, not from out - out can briefly have the
+                // wrong sign due to the D term.
                 out = (errCnt < 0) ? -(float)pid.minDuty : (float)pid.minDuty;
             }
 
@@ -619,7 +619,7 @@ void motorControlTask(void* pvParameters) {
             wantDuty    = (uint16_t)fabsf(out);
             wantMode    = MOTOR_POSITION;
 
-            // --- Fortschritt ---
+            // --- Progress ---
             long span = labs(mv.targetCnt - mv.startCnt);
             uint8_t pct = 100;
             if (span > 0) {
@@ -631,7 +631,7 @@ void motorControlTask(void* pvParameters) {
             g_move.progress = pct;
             portEXIT_CRITICAL(&g_motorMux);
 
-            // --- Ziel erreicht? ---
+            // --- Target reached? ---
             bool finished = false;
             uint8_t status = MOVE_OK;
 
@@ -664,7 +664,7 @@ void motorControlTask(void* pvParameters) {
             }
         } else {
             wasMoving = false;
-            if (cmd.mode == MOTOR_POSITION) {   // Fahrt beendet, noch nicht umgeschaltet
+            if (cmd.mode == MOTOR_POSITION) {   // move finished, not yet switched over
                 wantMode = MOTOR_COAST;
                 wantDuty = 0;
             } else {
@@ -672,10 +672,10 @@ void motorControlTask(void* pvParameters) {
             }
         }
 
-        // --- Jeder Modus- oder Richtungswechsel geht ueber Duty 0 ---
-        // Sonst schaltet INA/INB unter Last um (Stromspitze), oder - schlimmer -
-        // ein Nothalt laesst appliedMode auf DRIVE stehen und die Bremskraft
-        // wirkt als Fahrbefehl.
+        // --- Every mode or direction change goes through duty 0 ---
+        // Otherwise INA/INB switch under load (current spike), or - worse -
+        // an emergency stop leaves appliedMode at DRIVE and the braking force
+        // acts as a drive command.
         bool changing = (wantMode != appliedMode) ||
                         ((wantMode == MOTOR_DRIVE || wantMode == MOTOR_POSITION) &&
                          wantReverse != appliedReverse);
@@ -683,20 +683,20 @@ void motorControlTask(void* pvParameters) {
             wantDuty = 0;
         }
 
-        // Richtung/Modus uebernehmen, sobald die Bruecke stromlos ist.
-        // MUSS vor der Rampe stehen: danach ist appliedDuty nach dem ersten
-        // Rampenschritt nie wieder 0 und appliedMode haengt fuer immer auf COAST
-        // - der Motor laeuft dann gar nicht erst an.
+        // Take over direction/mode as soon as the bridge is de-energized.
+        // MUST come before the ramp: otherwise appliedDuty is never 0 again after the first
+        // ramp step and appliedMode stays stuck at COAST forever
+        // - the motor then never even starts.
         if (appliedDuty == 0) {
             appliedReverse = wantReverse;
             appliedMode    = wantMode;
         }
 
-        // --- Slew-Rate-Limiter ---
-        // Nur beim Beschleunigen begrenzen. Reduzieren ist elektrisch
-        // unkritisch (entspricht dem normalen PWM-Tastverhaeltnis) und muss
-        // sofort wirken, sonst braucht der Nothalt eine halbe Sekunde.
-        // Bremsen wird ebenfalls sofort voll angelegt.
+        // --- Slew rate limiter ---
+        // Only limit when accelerating. Reducing is electrically
+        // uncritical (equivalent to the normal PWM duty cycle) and must
+        // take effect immediately, otherwise the emergency stop takes half a second.
+        // Braking is also applied at full strength immediately.
         if (appliedDuty < wantDuty) {
             uint16_t step = (appliedMode == MOTOR_BRAKE) ? DUTY_MAX : RAMP_STEP;
             appliedDuty = min<uint16_t>(wantDuty, appliedDuty + step);
@@ -712,12 +712,12 @@ void motorControlTask(void* pvParameters) {
             default:             motor->coast();                            break;
         }
 
-        // Was wirklich an der Bruecke anliegt, fuer Plotter und Telemetrie.
+        // What is actually applied at the bridge, for plotter and telemetry.
         g_dutySigned = (appliedMode == MOTOR_DRIVE || appliedMode == MOTOR_POSITION)
                        ? (int16_t)(appliedReverse ? -(int)appliedDuty : (int)appliedDuty)
                        : 0;
 
-        // --- Geschwindigkeit: gleitendes Fenster ---
+        // --- Speed: sliding window ---
         speedCnt[speedHead] = posCnt;
         speedUs[speedHead]  = micros();
         speedHead = (uint8_t)((speedHead + 1) % SPEED_WINDOW_MAX);
@@ -728,9 +728,9 @@ void motorControlTask(void* pvParameters) {
             if (want < 1) want = 1;
             if (want > SPEED_WINDOW_MAX - 1) want = SPEED_WINDOW_MAX - 1;
 
-            // Solange der Ring noch nicht voll ist, so weit zurueckschauen wie
-            // moeglich - sonst laege der "aelteste" Wert auf einer Null aus der
-            // Initialisierung und das Tempo spraenge beim Start ins Absurde.
+            // As long as the ring is not yet full, look back as far as
+            // possible - otherwise the "oldest" value would be a zero from the
+            // initialization and the speed would shoot to absurd values at startup.
             uint8_t back = (want < speedFill) ? want : (uint8_t)(speedFill - 1);
 
             if (back >= 1) {
@@ -738,10 +738,10 @@ void motorControlTask(void* pvParameters) {
                                            % SPEED_WINDOW_MAX);
                 uint8_t oldest = (uint8_t)((newest + SPEED_WINDOW_MAX - back)
                                            % SPEED_WINDOW_MAX);
-                // Echte verstrichene Zeit statt Nenn-Takt: der Task kann
-                // verspaetet drankommen, und ein zu kurz angenommenes dt
-                // blaeht das Tempo auf. Die Subtraktion ist auch ueber den
-                // Ueberlauf von micros() hinweg richtig (71,6 min).
+                // Real elapsed time instead of nominal period: the task can
+                // get its turn late, and an assumed dt that is too short
+                // inflates the speed. The subtraction is also correct across
+                // the overflow of micros() (71.6 min).
                 uint32_t dtUs = speedUs[newest] - speedUs[oldest];
                 if (dtUs > 0) {
                     long delta = speedCnt[newest] - speedCnt[oldest];
@@ -758,38 +758,38 @@ void motorControlTask(void* pvParameters) {
 }
 
 // ==========================================
-// 7. BATTERIE (Core 1)
+// 7. BATTERY (Core 1)
 // ==========================================
 
-// Spannungsteiler 100k oben / 22k gegen GND -> Faktor (100+22)/22.
-// Per Serial ("vc<faktor>") nachziehbar und im NVS gespeichert, weil
-// Widerstandstoleranzen den rechnerischen Wert um mehrere Prozent verfehlen.
+// Voltage divider 100k high side / 22k to GND -> factor (100+22)/22.
+// Adjustable via Serial ("vc<factor>") and stored in NVS, because resistor
+// tolerances make the calculated value miss by several percent.
 constexpr float BATT_DIVIDER_NOMINAL = (100.0f + 22.0f) / 22.0f;   // 5.545
 float battDivider = BATT_DIVIDER_NOMINAL;
 
-// Ab hier ist der ADC am Anschlag: 12 dB reichen bis ~3,1 V am Pin, darueber
-// liefert er stur seinen Maximalcode. Jede hoehere Spannung sieht dann gleich
-// aus - der "Messwert" ist keine Messung mehr, sondern die Obergrenze selbst.
-// 4S voll (16,8 V) landet ueber den Teiler bei ~3,03 V und bleibt darunter.
+// From here on the ADC is at its limit: 12 dB reaches up to ~3.1 V at the pin,
+// above that it stubbornly returns its maximum code. Every higher voltage then
+// looks the same - the "reading" is no longer a measurement but the ceiling itself.
+// 4S full (16.8 V) ends up at ~3.03 V through the divider and stays below it.
 constexpr float BATT_ADC_CLIP_MV = 3100.0f;
 
 constexpr int   BATT_CELLS        = 4;        // 4S
-constexpr float BATT_WARN_CELL    = 3.80f;    // Warnschwelle pro Zelle
-constexpr float BATT_RECOVER_CELL = 3.85f;    // Hysterese: erst darueber wieder entwarnen
-constexpr uint32_t BATT_INTERVAL  = 15000;    // alle 15 s messen
-constexpr uint32_t BATT_WARN_REPEAT = 60000;  // Warnung hoechstens 1x pro Minute
+constexpr float BATT_WARN_CELL    = 3.80f;    // warning threshold per cell
+constexpr float BATT_RECOVER_CELL = 3.85f;    // hysteresis: only clear the warning above this
+constexpr uint32_t BATT_INTERVAL  = 15000;    // measure every 15 s
+constexpr uint32_t BATT_WARN_REPEAT = 60000;  // warning at most once per minute
 
-// --- Motorstrom (VNH5019 CS an GPIO8) ---
-// Der VNH5019 spiegelt einen Bruchteil des Motorstroms auf CS; ueber den
-// Messwiderstand auf dem Board wird daraus eine Spannung. Der Pololu-Traeger
-// liefert ~0,14 V/A - ist der Widerstand auf dem eigenen Board anders bemessen,
-// stimmt der Wert nicht. Deshalb per "ic<mV pro A>" nachziehbar und im NVS
-// gespeichert. Gegenprobe mit einer Strommesszange oder dem Labornetzteil.
+// --- Motor current (VNH5019 CS on GPIO8) ---
+// The VNH5019 mirrors a fraction of the motor current onto CS; the sense
+// resistor on the board turns that into a voltage. The Pololu carrier board
+// gives ~0.14 V/A - if the resistor on our own board is sized differently,
+// the value is wrong. Hence adjustable via "ic<mV per A>" and stored in NVS.
+// Cross-check with a current clamp or the lab power supply.
 constexpr float CS_MV_PER_A_NOMINAL = 140.0f;
 float csMvPerA  = CS_MV_PER_A_NOMINAL;
-int   csZeroMv  = 0;      // Nullpunkt bei stehendem Motor ("iz")
+int   csZeroMv  = 0;      // zero point with the motor stopped ("iz")
 
-// Rohspannung am CS-Pin in mV. Ohne Nullpunktabzug - den macht der Aufrufer.
+// Raw voltage at the CS pin in mV. No zero-point subtraction - the caller does that.
 float readMotorCsMv() {
     uint32_t sum = 0;
     for (int i = 0; i < 16; i++) sum += analogReadMilliVolts(PIN_MOTOR_CS);
@@ -799,7 +799,7 @@ float readMotorCsMv() {
 float readMotorCurrentA() {
     if (csMvPerA <= 0.0f) return 0.0f;
     float a = (readMotorCsMv() - csZeroMv) / csMvPerA;
-    return (a < 0.0f) ? 0.0f : a;   // CS kann nur Strom in eine Richtung melden
+    return (a < 0.0f) ? 0.0f : a;   // CS can only report current in one direction
 }
 
 float    battPackV   = 0.0f;
@@ -808,37 +808,37 @@ bool     battLow     = false;
 uint32_t battLastRead = 0;
 uint32_t battLastWarn = 0;
 
-// Live-Ausgabe des Abgriffs ("vm"). Das 15-s-Raster taugt nicht zur Fehlersuche:
-// eine wackelige Loetstelle findet man nur, wenn man daran ruettelt und dabei
-// zusieht. 0 = aus. Laeuft bewusst als Flag statt als blockierende Schleife,
-// damit Antrieb und Jetson-Link waehrenddessen weiterlaufen.
+// Live output of the tap ("vm"). The 15 s interval is useless for troubleshooting:
+// a flaky solder joint can only be found by wiggling it while watching.
+// 0 = off. Deliberately runs as a flag instead of a blocking loop,
+// so that the drive and the Jetson link keep running meanwhile.
 uint32_t g_battMonMs   = 0;
 uint32_t g_battMonLast = 0;
 
-// Spannung am Teilerabgriff in mV. analogReadMilliVolts nutzt die
-// Werkskalibrierung des ADC - deutlich genauer als analogRead/4095*3.3.
-// Als eigene Funktion, weil sich ohne den Rohwert ein geklippter Messwert
-// nicht von einem falsch kalibrierten Teilerfaktor unterscheiden laesst.
+// Voltage at the divider tap in mV. analogReadMilliVolts uses the factory
+// calibration of the ADC - considerably more accurate than analogRead/4095*3.3.
+// A separate function because without the raw value a clipped reading cannot
+// be told apart from a wrongly calibrated divider factor.
 float readBatteryMv() {
     uint32_t sum = 0;
     for (int i = 0; i < 16; i++) sum += analogReadMilliVolts(PIN_BATTERY);
     return sum / 16.0f;
 }
 
-// Liefert die Packspannung in Volt.
+// Returns the pack voltage in volts.
 float readBatteryVolts() {
     return (readBatteryMv() / 1000.0f) * battDivider;
 }
 
-// Misst den Abgriff dreimal: freilaufend, dann gegen die internen Pull-
-// Widerstaende des ESP (~45 kOhm). Wie stark die Spannung dabei nachgibt,
-// verraet die Quellimpedanz des Knotens - und damit, ob am Pin ueberhaupt
-// noch der gedachte Teiler haengt. Ohne Akku sind das die Erwartungswerte:
-//   Teiler heil:      frei ~0 mV, Pullup ~1080 mV (3,3 V ueber 45k/22k)
-//   22k offen, 100k an einer lebenden Schiene: Pulldown zieht auf ~1,5 V
-//   Kurzschluss nach 3V3: bleibt auch mit Pulldown oben
+// Measures the tap three times: floating, then against the internal pull
+// resistors of the ESP (~45 kOhm). How much the voltage gives way reveals the
+// source impedance of the node - and thus whether the intended divider is
+// actually still connected to the pin. Without battery these are the expected values:
+//   divider intact:   free ~0 mV, pullup ~1080 mV (3.3 V across 45k/22k)
+//   22k open, 100k on a live rail: pulldown pulls to ~1.5 V
+//   short to 3V3: stays high even with pulldown
 void batteryPinDiagnose() {
-    Serial.printf("Akku-Pin-Diagnose an GPIO%d (Akku sollte dafuer ab sein):\n",
+    Serial.printf("Battery pin diagnosis on GPIO%d (battery should be disconnected):\n",
                   PIN_BATTERY);
 
     float mvFree = readBatteryMv();
@@ -851,55 +851,55 @@ void batteryPinDiagnose() {
     vTaskDelay(50 / portTICK_PERIOD_MS);
     float mvUp = readBatteryMv();
 
-    // Zurueck auf reinen Analogeingang. Die Reihenfolge ist dieselbe wie im
-    // setup(): erst lesen (haengt den Pin an den ADC-Kanal), dann daempfen.
+    // Back to a plain analog input. The order is the same as in
+    // setup(): read first (attaches the pin to the ADC channel), then attenuate.
     pinMode(PIN_BATTERY, INPUT);
     (void)analogRead(PIN_BATTERY);
     analogSetPinAttenuation(PIN_BATTERY, ADC_11db);
     vTaskDelay(50 / portTICK_PERIOD_MS);
 
-    Serial.printf("  frei     %7.1f mV\n", mvFree);
+    Serial.printf("  free     %7.1f mV\n", mvFree);
     Serial.printf("  Pulldown %7.1f mV\n", mvDown);
     Serial.printf("  Pullup   %7.1f mV\n", mvUp);
     Serial.print("  -> ");
 
     if (mvFree < 300.0f) {
-        Serial.println("Abgriff liegt auf Masse - das ist das erwartete Bild ohne Akku.");
+        Serial.println("Tap is at ground - this is the expected picture without a battery.");
         if (mvUp > 700.0f && mvUp < 1500.0f)
-            Serial.println("     Pullup-Wert passt zum 22k gegen GND: Teiler ist heil.");
+            Serial.println("     Pullup value matches the 22k to GND: divider is intact.");
         else
-            Serial.println("     Pullup-Wert passt aber nicht zu 22k gegen GND - Abgriff pruefen.");
+            Serial.println("     But pullup value does not match 22k to GND - check the tap.");
     } else if (mvDown < 300.0f) {
-        Serial.println("Knoten ist hochohmig: er floatet, nichts zieht ihn nach Masse.");
-        Serial.println("     Der 22k-Zweig gegen GND ist offen (kalte Loetstelle/Bruch).");
+        Serial.println("Node is high-impedance: it floats, nothing pulls it to ground.");
+        Serial.println("     The 22k leg to GND is open (cold solder joint/break).");
     } else if (mvDown < 2500.0f) {
-        Serial.println("Etwas speist ueber ~100k ein, waehrend der 22k gegen GND fehlt.");
-        Serial.println("     Sieht nach dem Teiler-Oberzweig an einer lebenden Schiene aus.");
+        Serial.println("Something feeds in via ~100k while the 22k to GND is missing.");
+        Serial.println("     Looks like the upper divider leg on a live rail.");
     } else {
-        Serial.println("Niederohmig hart getrieben - der Pulldown kommt nicht dagegen an.");
-        Serial.println("     Loetbruecke oder Fehlbestueckung nach 3V3 am wahrscheinlichsten.");
+        Serial.println("Driven hard at low impedance - the pulldown cannot overcome it.");
+        Serial.println("     Solder bridge or wrongly fitted part to 3V3 most likely.");
     }
 }
 
 // ==========================================
-// 8. SERVO HILFSFUNKTIONEN (Kalibrierung & Torque) - Core 1
+// 8. SERVO HELPER FUNCTIONS (calibration & torque) - Core 1
 // ==========================================
 
 void printTorque(SCSCL* servo) {
     int rawLoad = servo->ReadLoad(SERVO_ID);
     if (rawLoad != -1) {
         int actualLoad = rawLoad & 0x3FF;   // Bits 0-9
-        Serial.print("ESP: Aktuelles Servo-Torque: ");
+        Serial.print("ESP: Current servo torque: ");
         Serial.println(actualLoad);
     } else {
-        Serial.println("ESP: Fehler beim Lesen des Torques!");
+        Serial.println("ESP: Error reading the torque!");
     }
 }
 
-// Halbduplex-Eigenecho: jede zweite Leseanfrage verschluckt sich am zurueck-
-// gespiegelten eigenen Sendepaket und liefert -1. Retry sitzt das aus - bis zu
-// 6 Versuche, ein gueltiges Ergebnis ist meist beim 2. da. Betrifft nur Reads;
-// WritePosEx (Lenken) braucht das nicht.
+// Half-duplex self-echo: every other read request chokes on our own transmitted
+// packet being mirrored back and returns -1. Retrying sits that out - up to
+// 6 attempts, a valid result usually arrives on the 2nd. Only affects reads;
+// WritePosEx (steering) does not need it.
 template <typename F>
 int servoReadRetry(F fn, int tries = 6) {
     for (int i = 0; i < tries; i++) {
@@ -909,21 +909,21 @@ int servoReadRetry(F fn, int tries = 6) {
     return -1;
 }
 
-// Schreibt eine rohe Servo-Position 0..1023 unter Umgehung der Lenk-Limits und
-// meldet den Rueckgabewert.
+// Writes a raw servo position 0..1023 bypassing the steering limits and
+// reports the return value.
 void servoWriteRaw(SCSCL* servo, int pos) {
     pos = constrain(pos, 0, SERVO_POS_MAX);
     servoManualPos = pos;
     int ret = servo->WritePosEx(SERVO_ID, pos, SERVO_SPEED_CALIB, SERVO_ACC);
     Serial.printf("Servo -> Pos %d (WritePosEx ret=%d%s)\n", pos, ret,
-                  ret == -1 ? " KEINE ANTWORT" : "");
+                  ret == -1 ? " NO RESPONSE" : "");
 }
 
-// Testet beide Protokolle der SCServo-Lib auf demselben Bus (Serial2) und
-// meldet, welches antwortet. SC-Serie (SCSCL) und STS/SMS-Serie (SMS_STS) sind
-// zueinander inkompatibel - ein STS-Servo antwortet nicht auf SCSCL-Pakete.
-// Serial2 mit neuen Pins fuer den Servo-Bus neu starten. RX/TX sind aus ESP-
-// Sicht: rx = wo der ESP empfaengt (an U1RXD), tx = wo er sendet (an U1TXD).
+// Tests both protocols of the SCServo lib on the same bus (Serial2) and
+// reports which one responds. SC series (SCSCL) and STS/SMS series (SMS_STS) are
+// mutually incompatible - an STS servo does not respond to SCSCL packets.
+// Restart Serial2 with new pins for the servo bus. RX/TX are from the ESP's
+// point of view: rx = where the ESP receives (to U1RXD), tx = where it transmits (to U1TXD).
 void servoBusRestart(SCSCL* servo) {
     Serial2.end();
     Serial2.begin(g_servoBaud, SERIAL_8N1, g_servoRx, g_servoTx);
@@ -934,69 +934,69 @@ void servoSetPins(SCSCL* servo, int rx, int tx) {
     g_servoRx = rx;
     g_servoTx = tx;
     servoBusRestart(servo);
-    Serial.printf("-> Servo-Bus neu: RX=IO%d  TX=IO%d @ %lu Baud. Jetzt 'svs' testen.\n",
+    Serial.printf("-> Servo bus restarted: RX=IO%d  TX=IO%d @ %lu baud. Now test 'svs'.\n",
                   g_servoRx, g_servoTx, (unsigned long)g_servoBaud);
 }
 
 void servoScanProtocols(SCSCL* scs) {
-    Serial.println("--- Protokoll-Scan auf Serial2 (ID 1) ---");
+    Serial.println("--- Protocol scan on Serial2 (ID 1) ---");
 
-    // Gegenprobe mit dem STS-Treiber (little-endian, 0..4095) auf demselben Bus.
+    // Cross-check with the STS driver (little-endian, 0..4095) on the same bus.
     SMS_STS sts;
     sts.pSerial = &Serial2;
     int stsPos = servoReadRetry([&]{ return sts.ReadPos(SERVO_ID); });
-    Serial.printf("  SMS_STS (STS-Serie, 0..4095): %s\n",
-                  stsPos == -1 ? "keine Antwort" : String("Pos " + String(stsPos)).c_str());
+    Serial.printf("  SMS_STS (STS series, 0..4095): %s\n",
+                  stsPos == -1 ? "no response" : String("Pos " + String(stsPos)).c_str());
 
     int scsPos = servoReadRetry([&]{ return scs->ReadPos(SERVO_ID); });
-    Serial.printf("  SCSCL  (SC-Serie, 0..1023): %s\n",
-                  scsPos == -1 ? "keine Antwort" : String("Pos " + String(scsPos)).c_str());
+    Serial.printf("  SCSCL  (SC series, 0..1023): %s\n",
+                  scsPos == -1 ? "no response" : String("Pos " + String(scsPos)).c_str());
 
     if (scsPos != -1 || stsPos != -1) {
-        Serial.println("  => Servo antwortet - Firmware nutzt SCSCL (SC-Serie), korrekt.");
+        Serial.println("  => Servo responds - firmware uses SCSCL (SC series), correct.");
     } else {
-        Serial.println("  => Beide stumm: Verkabelung/Strom/Baudrate pruefen.");
+        Serial.println("  => Both silent: check wiring/power/baud rate.");
     }
 }
 
-// Vollstaendige Servo-Diagnose. Der wichtigste Befehl, wenn sich nichts bewegt:
-// er trennt Bus-, Strom-, Torque- und Mapping-Probleme voneinander.
+// Complete servo diagnosis. The most important command when nothing moves:
+// it separates bus, power, torque and mapping problems from each other.
 void servoDiagnose(SCSCL* servo) {
     int pos  = servoReadRetry([&]{ return servo->ReadPos(SERVO_ID); });
     int volt = servoReadRetry([&]{ return servo->ReadVoltage(SERVO_ID); });
     int load = servoReadRetry([&]{ return servo->ReadLoad(SERVO_ID); });
     int mode = servoReadRetry([&]{ return servo->ReadMode(SERVO_ID); });
 
-    Serial.println("--- Servo-Diagnose (ID 1) ---");
+    Serial.println("--- Servo diagnosis (ID 1) ---");
     if (pos == -1 && volt == -1) {
-        Serial.println("  KEINE Antwort vom Servo-Bus.");
-        Serial.printf("  -> Verkabelung Serial2 (RX IO%d / TX IO%d), 1 Mbit,\n",
+        Serial.println("  NO response from the servo bus.");
+        Serial.printf("  -> Check wiring of Serial2 (RX IO%d / TX IO%d), 1 Mbit,\n",
                       g_servoRx, g_servoTx);
-        Serial.println("     Servo-Stromversorgung und gemeinsame Masse pruefen.");
+        Serial.println("     servo power supply and common ground.");
         return;
     }
     Serial.printf("  Position : %d\n", pos);
-    Serial.printf("  Spannung : %.1f V%s\n", volt / 10.0f,
-                  (volt != -1 && volt < 40) ? "  (< 4 V - Servo unterversorgt!)" : "");
-    Serial.printf("  Last     : %d\n", load);
-    Serial.printf("  Modus    : %d %s\n", mode,
-                  mode == 0 ? "(Position)" : mode == 1 ? "(PWM/Rad - dreht nicht auf Position!)" : "");
+    Serial.printf("  Voltage  : %.1f V%s\n", volt / 10.0f,
+                  (volt != -1 && volt < 40) ? "  (< 4 V - servo undersupplied!)" : "");
+    Serial.printf("  Load     : %d\n", load);
+    Serial.printf("  Mode     : %d %s\n", mode,
+                  mode == 0 ? "(Position)" : mode == 1 ? "(PWM/wheel - does not turn to a position!)" : "");
 
-    // Torque erzwingen - haeufigste Ursache fuer "haelt/bewegt sich nicht".
+    // Force torque on - most common cause of "does not hold/move".
     int te = servo->EnableTorque(SERVO_ID, 1);
-    Serial.printf("  Torque eingeschaltet (EnableTorque ret=%d)\n", te);
+    Serial.printf("  Torque enabled (EnableTorque ret=%d)\n", te);
     if (pos != -1) {
-        servo->WritePosEx(SERVO_ID, pos, SERVO_SPEED_FAST, SERVO_ACC);   // Position halten
+        servo->WritePosEx(SERVO_ID, pos, SERVO_SPEED_FAST, SERVO_ACC);   // hold position
         servoManualPos = pos;
     }
-    Serial.println("  Test: 'j'/'l' bewegen, 'm' Mitte, 'sv512' Mitte-Pos.");
+    Serial.println("  Test: 'j'/'l' move, 'm' center, 'sv512' center pos.");
 }
 
-// Zwingt den SC-Servo in den Positions-Modus. Anders als STS hat die SC-Serie
-// KEIN Mode-Register (33). Position vs. Dauerdreh (Wheel) haengt allein an den
-// Winkel-Limits: MIN==MAX==0 => Wheel, sonst Positions-Servo. Also MIN=0,
-// MAX=1023 setzen. Liegt im EPROM: unlock -> schreiben -> lock. Alles
-// Schreibbefehle, daher vom Halbduplex-Echo nicht betroffen.
+// Forces the SC servo into position mode. Unlike STS, the SC series has
+// NO mode register (33). Position vs. continuous rotation (wheel) depends solely on the
+// angle limits: MIN==MAX==0 => wheel, otherwise position servo. So set MIN=0,
+// MAX=1023. Lives in the EPROM: unlock -> write -> lock. All of these are
+// write commands, hence not affected by the half-duplex echo.
 void servoForcePositionMode(SCSCL* servo) {
     servo->unLockEprom(SERVO_ID);
     servo->writeWord(SERVO_ID, SCSCL_MIN_ANGLE_LIMIT_L, 0);
@@ -1004,64 +1004,64 @@ void servoForcePositionMode(SCSCL* servo) {
     servo->LockEprom(SERVO_ID);
     vTaskDelay(20 / portTICK_PERIOD_MS);
     servo->EnableTorque(SERVO_ID, 1);
-    Serial.println("-> Positions-Modus gesetzt (Limits 0..1023, Torque an).");
-    Serial.println("   Jetzt 'm' / 'j' / 'l' testen.");
+    Serial.println("-> Position mode set (limits 0..1023, torque on).");
+    Serial.println("   Now test 'm' / 'j' / 'l'.");
 }
 
-// Register-Dump + Schreib-Ruecklese-Test. Klaert die Kernfrage: kommen Writes
-// ueberhaupt am Servo an? Schreibt ein Ziel und liest das Ziel-Register zurueck.
+// Register dump + write/read-back test. Answers the core question: do writes
+// reach the servo at all? Writes a goal and reads the goal register back.
 void servoRegisterDump(SCSCL* servo) {
-    // SC-Serie: Mode wird aus den Winkel-Limits abgeleitet (ReadMode: 0=Position,
-    // 3=Wheel). Kein eigenes Mode-Register wie bei STS.
+    // SC series: mode is derived from the angle limits (ReadMode: 0=position,
+    // 3=wheel). No dedicated mode register as on STS.
     int mode   = servoReadRetry([&]{ return servo->ReadMode(SERVO_ID); });
     int torque = servoReadRetry([&]{ return servo->readByte(SERVO_ID, SCSCL_TORQUE_ENABLE); });
     int minA   = servoReadRetry([&]{ return servo->readWord(SERVO_ID, SCSCL_MIN_ANGLE_LIMIT_L); });
     int maxA   = servoReadRetry([&]{ return servo->readWord(SERVO_ID, SCSCL_MAX_ANGLE_LIMIT_L); });
     int pos    = servoReadRetry([&]{ return servo->ReadPos(SERVO_ID); });
-    Serial.println("--- Servo-Register ---");
+    Serial.println("--- Servo registers ---");
     Serial.printf("  Mode=%d  Torque(40)=%d  MinAng(9)=%d  MaxAng(11)=%d  Pos(56)=%d\n",
                   mode, torque, minA, maxA, pos);
 
-    // Schreib-Test: Torque-Register direkt setzen und zuruecklesen.
+    // Write test: set the torque register directly and read it back.
     servo->writeByte(SERVO_ID, SCSCL_TORQUE_ENABLE, 1);
     vTaskDelay(20 / portTICK_PERIOD_MS);
     int tqBack = servoReadRetry([&]{ return servo->readByte(SERVO_ID, SCSCL_TORQUE_ENABLE); });
-    Serial.printf("  Schreibtest Torque=1 -> zurueckgelesen %d  %s\n", tqBack,
-                  tqBack == 1 ? "WRITE KOMMT AN" : "WRITE KOMMT NICHT AN!");
+    Serial.printf("  Write test Torque=1 -> read back %d  %s\n", tqBack,
+                  tqBack == 1 ? "WRITE ARRIVES" : "WRITE DOES NOT ARRIVE!");
 
-    // Ziel schreiben und Ziel-Register zuruecklesen.
+    // Write the goal and read back the goal register.
     servo->WritePosEx(SERVO_ID, SERVO_CENTER_DEF, SERVO_SPEED_FAST, SERVO_ACC);
     vTaskDelay(20 / portTICK_PERIOD_MS);
     int goal = servoReadRetry([&]{ return servo->readWord(SERVO_ID, SCSCL_GOAL_POSITION_L); });
     Serial.printf("  WritePosEx(%d) -> GoalPos(42)=%d  %s\n", SERVO_CENTER_DEF, goal,
-                  goal == SERVO_CENTER_DEF ? "ANGEKOMMEN (dreht nicht = Torque/Mechanik)"
-                               : "NICHT angekommen (Write-Problem)");
+                  goal == SERVO_CENTER_DEF ? "ARRIVED (not turning = torque/mechanics)"
+                               : "NOT arrived (write problem)");
 }
 
 // ==========================================
-// 8b. MANUELLE LENKUNGS-KALIBRIERUNG (Core 1)
+// 8b. MANUAL STEERING CALIBRATION (Core 1)
 // ==========================================
 //
-// Der SC09 kennt keine Drehmomentbegrenzung. Faehrt er selbsttaetig gegen einen
-// Anschlag, drueckt er mit vollem Moment weiter, bis Anlenkung oder Getriebe
-// nachgeben - automatisches Antasten ist damit nicht sicher zu betreiben.
-// Deshalb wird von Hand kalibriert: der Bediener faehrt in kleinen Schritten
-// (Default 10 Ticks ~ 3 Grad) und setzt Mitte und beide Anschlaege selbst.
+// The SC09 has no torque limiting. If it drives against an end stop on its
+// own, it keeps pushing with full torque until the linkage or gearbox gives
+// way - automatic probing therefore cannot be operated safely.
+// That is why calibration is done by hand: the operator moves in small steps
+// (default 10 ticks ~ 3 degrees) and sets the center and both end stops himself.
 //
-// Die gespeicherten Limits bleiben bis 'calsave' unveraendert. Ein Abbruch
-// (oder ein Reset mittendrin) laesst also die alte Kalibrierung intakt.
+// The stored limits remain unchanged until 'calsave'. An abort
+// (or a reset midway) therefore leaves the old calibration intact.
 
-constexpr int CAL_STEP_DEF = 10;    // Ticks pro Schritt (~2,9 Grad)
+constexpr int CAL_STEP_DEF = 10;    // ticks per step (~2.9 degrees)
 constexpr int CAL_STEP_MIN = 1;
 constexpr int CAL_STEP_MAX = 200;
-// Anschlaege muessen mindestens so weit auseinanderliegen (~15 Grad), sonst ist
-// beim Setzen offensichtlich etwas schiefgegangen.
+// End stops must be at least this far apart (~15 degrees), otherwise something
+// obviously went wrong while setting them.
 constexpr int CAL_MIN_SPAN = 50;
 
 struct CalState {
     bool active     = false;
-    bool freeMode   = false;                 // Torque aus, Lenkung von Hand
-    int  pos        = SERVO_CENTER_DEF;      // zuletzt kommandierte Rohposition
+    bool freeMode   = false;                 // torque off, steering by hand
+    int  pos        = SERVO_CENTER_DEF;      // last commanded raw position
     int  step       = CAL_STEP_DEF;
     bool haveCenter = false;
     bool haveLeft   = false;
@@ -1078,42 +1078,42 @@ static int calReadPos(SCSCL* servo) {
 
 static int calReadLoad(SCSCL* servo) {
     int raw = servoReadRetry([&]{ return servo->ReadLoad(SERVO_ID); });
-    return (raw == -1) ? -1 : (raw & 0x3FF);   // Bits 0-9, Bit 10 ist die Richtung
+    return (raw == -1) ? -1 : (raw & 0x3FF);   // bits 0-9, bit 10 is the direction
 }
 
 static void calPrintMark(const char* name, bool have, int value) {
     if (have) Serial.printf("  %-8s: %4d\n", name, value);
-    else      Serial.printf("  %-8s:    - (noch nicht gesetzt)\n", name);
+    else      Serial.printf("  %-8s:    - (not set yet)\n", name);
 }
 
 void calPrintStatus(SCSCL* servo) {
     int ist  = calReadPos(servo);
     int load = calReadLoad(servo);
 
-    Serial.printf("--- Kalibrierung: %s ---\n",
-                  !g_cal.active ? "inaktiv ('cal' startet sie)"
-                                : (g_cal.freeMode ? "AKTIV, Torque frei" : "AKTIV"));
-    Serial.printf("  Position: soll=%d  ist=%s  Last=%s\n", g_cal.pos,
+    Serial.printf("--- Calibration: %s ---\n",
+                  !g_cal.active ? "inactive ('cal' starts it)"
+                                : (g_cal.freeMode ? "ACTIVE, torque free" : "ACTIVE"));
+    Serial.printf("  Position: target=%d  actual=%s  load=%s\n", g_cal.pos,
                   ist  == -1 ? "?" : String(ist).c_str(),
                   load == -1 ? "?" : String(load).c_str());
-    Serial.printf("  Schritt : %d Ticks (~%.1f grad)\n",
+    Serial.printf("  Step    : %d ticks (~%.1f deg)\n",
                   g_cal.step, g_cal.step * SERVO_DEG_PER_TICK);
-    calPrintMark("Mitte",  g_cal.haveCenter, g_cal.center);
-    calPrintMark("Links",  g_cal.haveLeft,   g_cal.left);
-    calPrintMark("Rechts", g_cal.haveRight,  g_cal.right);
-    Serial.printf("  gespeichert: Mitte=%d  Links=%d  Rechts=%d  Trim=%d\n",
+    calPrintMark("Center", g_cal.haveCenter, g_cal.center);
+    calPrintMark("Left",   g_cal.haveLeft,   g_cal.left);
+    calPrintMark("Right",  g_cal.haveRight,  g_cal.right);
+    Serial.printf("  stored: Center=%d  Left=%d  Right=%d  Trim=%d\n",
                   centerLimit, leftLimit, rightLimit, trimOffset);
     if (g_cal.active) {
-        Serial.println("  + / -      ein Schritt (auch '+50' fuer einmalig 50 Ticks)");
-        Serial.println("  caln<t>    Schrittweite   calm/call/calr  Mitte/Links/Rechts merken");
-        Serial.println("  calfree    Torque aus (von Hand drehen)   calhold  wieder halten");
-        Serial.println("  calgo      Mitte anfahren                 calsave  speichern");
-        Serial.println("  calq       abbrechen (gespeicherte Werte bleiben)");
+        Serial.println("  + / -      one step (also '+50' for a one-off 50 ticks)");
+        Serial.println("  caln<t>    step size      calm/call/calr  store center/left/right");
+        Serial.println("  calfree    torque off (turn by hand)      calhold  hold again");
+        Serial.println("  calgo      go to center                   calsave  save");
+        Serial.println("  calq       abort (stored values are kept)");
     }
 }
 
 void calStart(SCSCL* servo) {
-    // Antrieb stillsetzen - waehrend der Kalibrierung soll nichts wegrollen.
+    // Stop the drive - nothing should roll away during calibration.
     setMotorCommand(MOTOR_COAST, false, 0);
 
     g_cal.active     = true;
@@ -1124,80 +1124,80 @@ void calStart(SCSCL* servo) {
     servo->EnableTorque(SERVO_ID, 1);
     int p = calReadPos(servo);
     if (p != -1) {
-        // Erst die Ist-Stellung uebernehmen und genau dorthin schreiben, sonst
-        // springt der Servo beim Einschalten des Torques auf ein altes Ziel.
+        // First adopt the actual position and write exactly that, otherwise
+        // the servo jumps to an old goal when torque is switched on.
         g_cal.pos = p;
         servoManualPos = p;
         servo->WritePosEx(SERVO_ID, p, SERVO_SPEED_CALIB, SERVO_ACC);
     } else {
-        // Ohne gelesene Ist-Position bewusst NICHTS schreiben: ein geratenes
-        // Ziel liesse die Lenkung quer durch den Bereich schlagen.
+        // Without a read-back actual position deliberately write NOTHING: a guessed
+        // goal would make the steering swing across the whole range.
         g_cal.pos = servoManualPos;
-        Serial.println("!! Servo nicht lesbar - Position wird nicht gesetzt.");
-        Serial.println("   Erst 'sv' (Diagnose), dann Kalibrierung neu starten.");
+        Serial.println("!! Servo not readable - position is not being set.");
+        Serial.println("   Run 'sv' (diagnosis) first, then restart calibration.");
     }
 
-    Serial.println("=== Manuelle Lenkungs-Kalibrierung ===");
-    Serial.println("  1) mit + / - auf Geradeaus stellen      -> 'calm'");
-    Serial.println("  2) langsam an den LINKEN Anschlag       -> 'call'");
-    Serial.println("  3) langsam an den RECHTEN Anschlag      -> 'calr'");
-    Serial.println("  4) 'calsave' speichert, 'calq' bricht ab");
-    Serial.println("  Kurz VOR dem harten Anschlag stoppen: der SC09 hat keine");
-    Serial.println("  Drehmomentbegrenzung und drueckt sonst dauerhaft dagegen.");
-    Serial.println("  Alternative: 'calfree', Lenkung von Hand an den Anschlag,");
-    Serial.println("  dann 'call'/'calr' - dabei wirkt gar keine Servokraft.");
+    Serial.println("=== Manual steering calibration ===");
+    Serial.println("  1) use + / - to set straight ahead      -> 'calm'");
+    Serial.println("  2) slowly to the LEFT end stop          -> 'call'");
+    Serial.println("  3) slowly to the RIGHT end stop         -> 'calr'");
+    Serial.println("  4) 'calsave' saves, 'calq' aborts");
+    Serial.println("  Stop just BEFORE the hard end stop: the SC09 has no");
+    Serial.println("  torque limiting and will otherwise keep pushing against it.");
+    Serial.println("  Alternative: 'calfree', move steering to the end stop by hand,");
+    Serial.println("  then 'call'/'calr' - no servo force acts at all.");
     calPrintStatus(servo);
 }
 
-// Ein Schritt um delta Ticks. Meldet Ist-Position und Last zurueck, damit am
-// Anschlag sichtbar wird, dass der Servo dem Ziel nicht mehr folgt.
+// One step of delta ticks. Reports back actual position and load, so that at
+// the end stop it becomes visible that the servo no longer follows the goal.
 uint8_t calMove(SCSCL* servo, int delta) {
     if (!g_cal.active) {
-        Serial.println("-> Kalibrierung laeuft nicht ('cal' startet sie)");
+        Serial.println("-> Calibration not running ('cal' starts it)");
         return CAL_ST_INACTIVE;
     }
     if (g_cal.freeMode) {
-        Serial.println("-> Torque ist frei ('calhold' schaltet ihn wieder ein)");
+        Serial.println("-> Torque is free ('calhold' switches it back on)");
         return CAL_ST_INACTIVE;
     }
 
     int target = constrain(g_cal.pos + delta, 0, SERVO_POS_MAX);
     if (target == g_cal.pos) {
-        Serial.printf("-> Bereichsende %d erreicht - weiter geht es nicht\n", target);
+        Serial.printf("-> End of range %d reached - cannot go further\n", target);
         return CAL_ST_LIMIT;
     }
 
     g_cal.pos = target;
     servoManualPos = target;
     servo->WritePosEx(SERVO_ID, target, SERVO_SPEED_CALIB, SERVO_ACC);
-    // Schritt zu Ende fahren lassen, bevor gemessen wird. SERVO_SPEED_CALIB ist
-    // die Fahrgeschwindigkeit in Ticks/s, dazu etwas Anlauf.
+    // Let the step finish before measuring. SERVO_SPEED_CALIB is
+    // the travel speed in ticks/s, plus a bit of start-up time.
     vTaskDelay((60 + abs(delta) * 1000 / (int)SERVO_SPEED_CALIB) / portTICK_PERIOD_MS);
 
     int ist  = calReadPos(servo);
     int load = calReadLoad(servo);
-    Serial.printf("Servo -> %d (%+d)  ist=%s  Last=%s\n", target, delta,
+    Serial.printf("Servo -> %d (%+d)  actual=%s  load=%s\n", target, delta,
                   ist  == -1 ? "?" : String(ist).c_str(),
                   load == -1 ? "?" : String(load).c_str());
 
     if (ist == -1) return CAL_ST_NOSERVO;
 
-    // Bleibt die Ist-Position mehr als einen halben Schritt hinter dem Ziel
-    // zurueck, klemmt es. Genau hier soll der Bediener aufhoeren.
+    // If the actual position lags more than half a step behind the goal,
+    // it is jammed. This is exactly where the operator should stop.
     if (abs(ist - target) > max(4, abs(delta) / 2)) {
-        Serial.printf("   !! folgt dem Ziel nicht (%d Ticks Abweichung) - Anschlag?\n",
+        Serial.printf("   !! not following the goal (%d ticks deviation) - end stop?\n",
                       abs(ist - target));
-        Serial.println("      Anschlag hier mit 'call'/'calr' setzen und zurueckfahren.");
+        Serial.println("      Set the end stop here with 'call'/'calr' and back off.");
     }
     return CAL_ST_OK;
 }
 
-// Aktuelle Stellung als Mitte / Links / Rechts merken. Es zaehlt die ausgelesene
-// Ist-Position, nicht das Kommando - im Free-Mode gibt es gar kein Kommando, und
-// am Anschlag weichen beide bewusst voneinander ab.
+// Store the current position as center / left / right. What counts is the
+// read-back actual position, not the command - in free mode there is no command
+// at all, and at the end stop the two deliberately differ.
 uint8_t calSetMark(SCSCL* servo, uint8_t what) {
     if (!g_cal.active) {
-        Serial.println("-> Kalibrierung laeuft nicht ('cal' startet sie)");
+        Serial.println("-> Calibration not running ('cal' starts it)");
         return CAL_ST_INACTIVE;
     }
 
@@ -1206,64 +1206,64 @@ uint8_t calSetMark(SCSCL* servo, uint8_t what) {
     if (p == -1) {
         p  = g_cal.pos;
         st = CAL_ST_NOSERVO;
-        Serial.println("   (Servo nicht lesbar - Sollposition uebernommen)");
+        Serial.println("   (servo not readable - commanded position used)");
     }
-    g_cal.pos = p;   // im Free-Mode nachziehen, damit Schritte hier weitergehen
+    g_cal.pos = p;   // track in free mode so that steps continue from here
 
     switch (what) {
         case CAL_ACT_CENTER: g_cal.center = p; g_cal.haveCenter = true;
-                             Serial.printf("-> Mitte  = %d\n", p);  break;
+                             Serial.printf("-> Center = %d\n", p);  break;
         case CAL_ACT_LEFT:   g_cal.left   = p; g_cal.haveLeft   = true;
-                             Serial.printf("-> Links  = %d\n", p);  break;
+                             Serial.printf("-> Left   = %d\n", p);  break;
         case CAL_ACT_RIGHT:  g_cal.right  = p; g_cal.haveRight  = true;
-                             Serial.printf("-> Rechts = %d\n", p);  break;
+                             Serial.printf("-> Right  = %d\n", p);  break;
         default: return CAL_ST_REJECTED;
     }
 
     if (g_cal.haveCenter && g_cal.haveLeft && g_cal.haveRight) {
-        Serial.println("   Alle drei Marken gesetzt - 'calsave' speichert.");
+        Serial.println("   All three marks set - 'calsave' stores them.");
     }
     return st;
 }
 
 void calSetStep(int ticks) {
     g_cal.step = constrain(ticks, CAL_STEP_MIN, CAL_STEP_MAX);
-    Serial.printf("-> Schrittweite = %d Ticks (~%.1f grad)\n",
+    Serial.printf("-> Step size = %d ticks (~%.1f deg)\n",
                   g_cal.step, g_cal.step * SERVO_DEG_PER_TICK);
 }
 
-// Torque aus: die Lenkung laesst sich von Hand bis an den Anschlag bewegen,
-// ganz ohne Servokraft. Beim Wiedereinschalten wird die Ist-Stellung als Ziel
-// gesetzt, sonst zieht der Servo auf sein altes Ziel zurueck.
+// Torque off: the steering can be moved by hand up to the end stop,
+// without any servo force. When switching back on, the actual position is set
+// as the goal, otherwise the servo pulls back to its old goal.
 uint8_t calSetFree(SCSCL* servo, bool freeIt) {
     if (!g_cal.active) {
-        Serial.println("-> Kalibrierung laeuft nicht ('cal' startet sie)");
+        Serial.println("-> Calibration not running ('cal' starts it)");
         return CAL_ST_INACTIVE;
     }
     g_cal.freeMode = freeIt;
     servo->EnableTorque(SERVO_ID, freeIt ? 0 : 1);
 
     if (freeIt) {
-        Serial.println("-> Torque AUS: Lenkung von Hand stellen, dann calm/call/calr.");
+        Serial.println("-> Torque OFF: set steering by hand, then calm/call/calr.");
         return CAL_ST_OK;
     }
 
     int p = calReadPos(servo);
     if (p == -1) {
-        Serial.println("-> Torque AN, aber Position nicht lesbar.");
+        Serial.println("-> Torque ON, but position not readable.");
         return CAL_ST_NOSERVO;
     }
     g_cal.pos = p;
     servoManualPos = p;
     servo->WritePosEx(SERVO_ID, p, SERVO_SPEED_CALIB, SERVO_ACC);
-    Serial.printf("-> Torque AN, haelt bei %d.\n", p);
+    Serial.printf("-> Torque ON, holding at %d.\n", p);
     return CAL_ST_OK;
 }
 
-// Zur gemerkten Mitte fahren (oder zur gespeicherten, solange keine gesetzt ist).
+// Move to the stored center mark (or to the saved one as long as none is set).
 uint8_t calGoCenter(SCSCL* servo) {
     if (!g_cal.active) {
-        Serial.println("-> Kalibrierung laeuft nicht ('cal' startet sie)");
+        Serial.println("-> Calibration not running ('cal' starts it)");
         return CAL_ST_INACTIVE;
     }
     if (g_cal.freeMode) calSetFree(servo, false);
@@ -1272,43 +1272,43 @@ uint8_t calGoCenter(SCSCL* servo) {
     g_cal.pos = target;
     servoManualPos = target;
     servo->WritePosEx(SERVO_ID, target, SERVO_SPEED_CALIB, SERVO_ACC);
-    Serial.printf("-> faehrt auf Mitte %d (%s)\n", target,
-                  g_cal.haveCenter ? "neu gesetzt" : "gespeichert");
+    Serial.printf("-> moving to center %d (%s)\n", target,
+                  g_cal.haveCenter ? "newly set" : "saved");
     return CAL_ST_OK;
 }
 
-// Prueft die drei Marken auf Plausibilitaet und schreibt sie ins NVS. Erst hier
-// aendern sich die aktiven Limits.
+// Checks the three marks for plausibility and writes them to NVS. Only here
+// do the active limits change.
 bool calSave(SCSCL* servo) {
     if (!g_cal.active) {
-        Serial.println("-> Kalibrierung laeuft nicht ('cal' startet sie)");
+        Serial.println("-> Calibration not running ('cal' starts it)");
         return false;
     }
     if (!g_cal.haveCenter || !g_cal.haveLeft || !g_cal.haveRight) {
-        Serial.printf("-> NICHT gespeichert, es fehlt:%s%s%s\n",
-                      g_cal.haveCenter ? "" : " Mitte (calm)",
-                      g_cal.haveLeft   ? "" : " Links (call)",
-                      g_cal.haveRight  ? "" : " Rechts (calr)");
+        Serial.printf("-> NOT saved, missing:%s%s%s\n",
+                      g_cal.haveCenter ? "" : " center (calm)",
+                      g_cal.haveLeft   ? "" : " left (call)",
+                      g_cal.haveRight  ? "" : " right (calr)");
         return false;
     }
 
     int lo = min(g_cal.left, g_cal.right);
     int hi = max(g_cal.left, g_cal.right);
     if (hi - lo < CAL_MIN_SPAN) {
-        Serial.printf("-> NICHT gespeichert: Anschlaege nur %d Ticks auseinander "
+        Serial.printf("-> NOT saved: end stops only %d ticks apart "
                       "(min. %d).\n", hi - lo, CAL_MIN_SPAN);
         return false;
     }
     if (g_cal.center <= lo || g_cal.center >= hi) {
-        Serial.printf("-> NICHT gespeichert: Mitte %d liegt nicht zwischen den "
-                      "Anschlaegen %d..%d.\n", g_cal.center, lo, hi);
+        Serial.printf("-> NOT saved: center %d is not between the "
+                      "end stops %d..%d.\n", g_cal.center, lo, hi);
         return false;
     }
 
     leftLimit   = g_cal.left;
     rightLimit  = g_cal.right;
     centerLimit = g_cal.center;
-    // Der alte Trim bezog sich auf die alte Mitte und ist damit hinfaellig.
+    // The old trim referred to the old center and is therefore obsolete.
     trimOffset  = 0;
     softwareCenterPos = centerLimit;
 
@@ -1316,7 +1316,7 @@ bool calSave(SCSCL* servo) {
     ok &= prefs.putInt("lLim10", leftLimit)   > 0;
     ok &= prefs.putInt("rLim10", rightLimit)  > 0;
     ok &= prefs.putInt("cLim10", centerLimit) > 0;
-    prefs.putInt("offset10", trimOffset);   // 0 schreibt NVS ggf. gar nicht neu
+    prefs.putInt("offset10", trimOffset);   // 0 may not rewrite NVS at all
 
     g_cal.active   = false;
     g_cal.freeMode = false;
@@ -1325,13 +1325,13 @@ bool calSave(SCSCL* servo) {
     servo->WritePosEx(SERVO_ID, softwareCenterPos, SERVO_SPEED_CALIB, SERVO_ACC);
     servoManualPos = softwareCenterPos;
 
-    Serial.printf("-> %s: Mitte=%d  Links=%d  Rechts=%d  (Trim auf 0 zurueckgesetzt)\n",
-                  ok ? "gespeichert" : "FEHLER beim Speichern (NVS)",
+    Serial.printf("-> %s: Center=%d  Left=%d  Right=%d  (trim reset to 0)\n",
+                  ok ? "saved" : "ERROR while saving (NVS)",
                   centerLimit, leftLimit, rightLimit);
-    Serial.printf("   Hub: links %+d Ticks (~%.0f grad), rechts %+d Ticks (~%.0f grad),\n",
+    Serial.printf("   Travel: left %+d ticks (~%.0f deg), right %+d ticks (~%.0f deg),\n",
                   leftLimit - centerLimit, (leftLimit - centerLimit) * SERVO_DEG_PER_TICK,
                   rightLimit - centerLimit, (rightLimit - centerLimit) * SERVO_DEG_PER_TICK);
-    Serial.println("   davon nutzt die Lenkung 80 % je Seite (+-100 %).");
+    Serial.println("   of which the steering uses 80% per side (+-100%).");
     return ok;
 }
 
@@ -1341,14 +1341,14 @@ void calAbort(SCSCL* servo) {
     servo->EnableTorque(SERVO_ID, 1);
     servo->WritePosEx(SERVO_ID, softwareCenterPos, SERVO_SPEED_CALIB, SERVO_ACC);
     servoManualPos = softwareCenterPos;
-    Serial.printf("-> Kalibrierung abgebrochen. Gespeicherte Werte bleiben "
-                  "(Mitte=%d L=%d R=%d), faehrt auf Mitte %d.\n",
+    Serial.printf("-> Calibration aborted. Saved values are kept "
+                  "(Center=%d L=%d R=%d), moving to center %d.\n",
                   centerLimit, leftLimit, rightLimit, softwareCenterPos);
 }
 
-// Eine Aktion ausfuehren. Gemeinsamer Einstieg fuer USB-Konsole und Jetson-Link,
-// damit beide Wege exakt dasselbe tun. arg ist die Schrittweite (0 = aktuelle)
-// bzw. bei CAL_ACT_STEP die neue Schrittweite.
+// Execute an action. Common entry point for the USB console and the Jetson link,
+// so that both paths do exactly the same thing. arg is the step size (0 = current)
+// or, for CAL_ACT_STEP, the new step size.
 uint8_t calHandleAction(SCSCL* servo, uint8_t action, uint8_t arg) {
     switch (action) {
         case CAL_ACT_START:  calStart(servo);                       return CAL_ST_OK;
@@ -1365,17 +1365,17 @@ uint8_t calHandleAction(SCSCL* servo, uint8_t action, uint8_t arg) {
         case CAL_ACT_STEP:   calSetStep(arg);                       return CAL_ST_OK;
         case CAL_ACT_STATUS: calPrintStatus(servo);                 return CAL_ST_OK;
         default:
-            Serial.printf("-> unbekannte Kalibrier-Aktion 0x%02X\n", action);
+            Serial.printf("-> unknown calibration action 0x%02X\n", action);
             return CAL_ST_REJECTED;
     }
 }
 
 // ==========================================
-// 9. KOMMUNIKATION (Jetson Bridge) - Core 1
+// 9. COMMUNICATION (Jetson Bridge) - Core 1
 // ==========================================
 
-// Alle Mehrbyte-Werte im Protokoll sind Big-Endian, wie im bestehenden
-// CMD_MOTOR/CMD_SERVO. Floats werden als int32 x1000 uebertragen.
+// All multi-byte values in the protocol are big-endian, as in the existing
+// CMD_MOTOR/CMD_SERVO. Floats are transmitted as int32 x1000.
 static inline int32_t readI32BE(const uint8_t* b) {
     return ((int32_t)b[0] << 24) | ((int32_t)b[1] << 16) |
            ((int32_t)b[2] << 8)  |  (int32_t)b[3];
@@ -1396,50 +1396,50 @@ static inline void writeI64BE(uint8_t* b, int64_t v) {
     for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (56 - 8 * i));
 }
 
-// --- Zeitbasis des Links ---
-// esp_timer_get_time() zaehlt Mikrosekunden seit Boot als int64 und laeuft -
-// anders als micros() - nicht alle 71 Minuten ueber. Auf der Leitung stehen im
-// Rahmenstempel nur die unteren 32 Bit (spart 4 Byte je Paket); CMD_TIME_RSP
-// liefert regelmaessig den vollen Wert, an dem die Bridge den Ueberlauf
-// wieder auspacken kann.
+// --- Time base of the link ---
+// esp_timer_get_time() counts microseconds since boot as int64 and - unlike
+// micros() - does not overflow every 71 minutes. On the wire, the frame stamp
+// carries only the lower 32 bits (saves 4 bytes per packet); CMD_TIME_RSP
+// regularly delivers the full value, which the bridge can use to unwrap the
+// overflow again.
 static inline int64_t nowUs() { return esp_timer_get_time(); }
 
-// Sendezeitstempel an alle ausgehenden Pakete haengen (Rahmen 0xA6 statt
-// 0xA5). Default aus, siehe START_BYTE_TS.
+// Attach a send timestamp to all outgoing packets (frame 0xA6 instead of
+// 0xA5). Off by default, see START_BYTE_TS.
 bool g_stampTx = false;
 
-// --- Fahrtelemetrie ---
-// Abstand zwischen zwei CMD_TELEMETRY in Millisekunden, 0 = aus. Der Jetson
-// stellt das mit CMD_TELEM_RATE ein, die USB-Konsole mit "tel<ms>".
+// --- Drive telemetry ---
+// Interval between two CMD_TELEMETRY packets in milliseconds, 0 = off. The
+// Jetson sets it with CMD_TELEM_RATE, the USB console with "tel<ms>".
 //
-// Untergrenze TELEMETRY_MS_MIN (10 ms) = der Takt des Motortasks. Schneller
-// zu senden waere sinnlos: Position und Geschwindigkeit entstehen beide in
-// diesem Takt, und beide sind bei jedem Paket frisch. Wie fein die
-// Geschwindigkeit aufgeloest ist, haengt nicht am Sendetakt, sondern am
-// Messfenster - siehe g_speedWindow.
+// Lower bound TELEMETRY_MS_MIN (10 ms) = the cycle time of the motor task.
+// Sending faster would be pointless: position and speed are both produced at
+// this rate, and both are fresh in every packet. How finely the speed is
+// resolved does not depend on the send rate but on the measurement window -
+// see g_speedWindow.
 //
-// Bewusst nicht im NVS: eine Bridge, die den Takt braucht, stellt ihn beim
-// Verbinden selbst ein, und ein ESP ohne Gegenstelle soll nicht ins Leere
-// senden.
+// Deliberately not stored in NVS: a bridge that needs the rate sets it itself
+// when connecting, and an ESP without a peer should not transmit into the
+// void.
 uint16_t g_telemetryMs = 0;
 constexpr uint16_t TELEMETRY_MS_MIN = 10;
 
-bool savePidParams();   // Definition weiter unten, wird von CMD_PID_SAVE genutzt
+bool savePidParams();   // Defined further below, used by CMD_PID_SAVE
 
-// --- Mitschnitt des Jetson-Links auf der USB-Konsole ---
-// 0 = aus, 1 = dekodierte Pakete, 2 = zusaetzlich jedes Rohbyte.
-// Level 1 ist Default. Achtung: ein Motor-Heartbeat im 100-ms-Takt erzeugt
-// 10 Zeilen/s - beim Dauerfahren mit "dbg0" abschalten.
+// --- Logging of the Jetson link on the USB console ---
+// 0 = off, 1 = decoded packets, 2 = additionally every raw byte.
+// Level 1 is the default. Caution: a motor heartbeat at 100 ms intervals produces
+// 10 lines/s - switch it off with "dbg0" during continuous driving.
 uint8_t g_linkDebug = 1;
 
-// Plotter-Modus: gibt zyklisch reine "name:wert"-Zeilen aus, wie sie der
-// Serial Plotter der Arduino IDE erwartet. Solange er laeuft, schweigt der
-// Link-Mitschnitt - jede Fremdzeile zerlegt sonst die Kurve.
+// Plotter mode: periodically prints plain "name:value" lines, as expected by
+// the Serial Plotter of the Arduino IDE. While it is running, the link log
+// stays silent - otherwise every foreign line breaks up the curve.
 bool g_plotMode = false;
-// Vom Befehl "gp<grad>" gesetzt: Plotter laeuft nur fuer die Dauer einer Fahrt
-// und schaltet sich danach selbst ab. Der Serial Plotter der Arduino IDE hat
-// kein Eingabefeld - so laesst sich eine Fahrt im Monitor ausloesen und die
-// Kurve danach im Plotter ansehen, ohne dazwischen etwas tippen zu muessen.
+// Set by the command "gp<deg>": the plotter runs only for the duration of one move
+// and then switches itself off. The Serial Plotter of the Arduino IDE has no
+// input field - this way a move can be triggered in the monitor and the curve
+// viewed afterwards in the plotter, without having to type anything in between.
 bool g_plotAuto = false;
 
 static const char* cmdName(uint8_t cmd) {
@@ -1480,17 +1480,17 @@ static const char* cmdName(uint8_t cmd) {
 static const char* calActionName(uint8_t act) {
     switch (act) {
         case CAL_ACT_START:  return "start";
-        case CAL_ACT_MINUS:  return "schritt-";
-        case CAL_ACT_PLUS:   return "schritt+";
-        case CAL_ACT_CENTER: return "mitte setzen";
-        case CAL_ACT_LEFT:   return "links setzen";
-        case CAL_ACT_RIGHT:  return "rechts setzen";
-        case CAL_ACT_SAVE:   return "speichern";
-        case CAL_ACT_ABORT:  return "abbrechen";
-        case CAL_ACT_FREE:   return "torque frei";
-        case CAL_ACT_HOLD:   return "torque halten";
-        case CAL_ACT_GOTO_C: return "mitte anfahren";
-        case CAL_ACT_STEP:   return "schrittweite";
+        case CAL_ACT_MINUS:  return "step-";
+        case CAL_ACT_PLUS:   return "step+";
+        case CAL_ACT_CENTER: return "set center";
+        case CAL_ACT_LEFT:   return "set left";
+        case CAL_ACT_RIGHT:  return "set right";
+        case CAL_ACT_SAVE:   return "save";
+        case CAL_ACT_ABORT:  return "abort";
+        case CAL_ACT_FREE:   return "torque free";
+        case CAL_ACT_HOLD:   return "torque hold";
+        case CAL_ACT_GOTO_C: return "go to center";
+        case CAL_ACT_STEP:   return "step size";
         case CAL_ACT_STATUS: return "status";
         default:             return "???";
     }
@@ -1511,26 +1511,26 @@ private:
     uint8_t currentCmd = 0;
     uint8_t dataLength = 0;
 
-    // --- Zeitstempel des gerade laufenden Empfangs ---
-    bool     frameStamped = false;   // Rahmen kam als 0xA6 herein
+    // --- Timestamps of the reception currently in progress ---
+    bool     frameStamped = false;   // Frame came in as 0xA6
     uint8_t  stampBuf[4];
     int      stampIndex = 0;
-    uint32_t frameStampUs = 0;       // Sendestempel der Gegenstelle (nur 0xA6)
-    int64_t  frameRxUs    = 0;       // ESP-Uhr beim letzten Byte des Rahmens
+    uint32_t frameStampUs = 0;       // Send stamp of the peer (0xA6 only)
+    int64_t  frameRxUs    = 0;       // ESP clock at the last byte of the frame
 
-    // Link-Statistik fuer die Fehlersuche
-    uint32_t rxPackets  = 0;   // vollstaendig empfangen und ausgefuehrt
-    uint32_t rxUnknown  = 0;   // unbekanntes CMD-Byte verworfen
-    uint32_t rxTimeouts = 0;   // Paket blieb unvollstaendig
-    uint32_t rxStray    = 0;   // Bytes ausserhalb eines Pakets (z.B. ASCII)
+    // Link statistics for troubleshooting
+    uint32_t rxPackets  = 0;   // completely received and executed
+    uint32_t rxUnknown  = 0;   // unknown CMD byte discarded
+    uint32_t rxTimeouts = 0;   // packet remained incomplete
+    uint32_t rxStray    = 0;   // bytes outside a packet (e.g. ASCII)
     uint32_t txPackets  = 0;
     unsigned long lastRxMs = 0;
-    uint32_t syncRequests = 0;    // beantwortete CMD_TIME_SYNC
-    int64_t  lastSyncUs   = 0;    // ESP-Uhr der letzten Antwort
+    uint32_t syncRequests = 0;    // answered CMD_TIME_SYNC requests
+    int64_t  lastSyncUs   = 0;    // ESP clock of the last response
 
-    // Unterdrueckung identischer Wiederholungen im Mitschnitt. Ein Heartbeat
-    // im 100-ms-Takt erzeugt sonst 10 nutzlose Zeilen/s und verdeckt genau die
-    // Pakete, auf die man wartet.
+    // Suppression of identical repetitions in the log. A heartbeat at 100 ms
+    // intervals would otherwise produce 10 useless lines/s and hide exactly
+    // the packets you are waiting for.
     uint8_t  lastLogCmd = 0xFF;
     uint8_t  lastLogBuf[24];
     uint8_t  lastLogLen = 0;
@@ -1584,9 +1584,9 @@ public:
         sendPacket(p, sizeof(p));
     }
 
-    // Vollstaendiger Zustand der manuellen Kalibrierung. Geht nach jeder
-    // CMD_CAL-Aktion raus, damit die Bridge eine Anzeige bauen kann, ohne
-    // selbst mitzuzaehlen.
+    // Complete state of the manual calibration. Sent after every CMD_CAL
+    // action so the bridge can build a display without having to keep count
+    // itself.
     void sendCalState(uint8_t status) {
         uint8_t flags = (g_cal.haveCenter ? 0x01 : 0) |
                         (g_cal.haveLeft   ? 0x02 : 0) |
@@ -1610,50 +1610,50 @@ public:
         sendPacket(p, sizeof(p));
     }
 
-    // Antwort auf CMD_TIME_SYNC. Traegt beide Zeitpunkte der ESP-Seite als
-    // volle int64-Mikrosekunden:
-    //   t_rx = letztes Byte der Anfrage empfangen
-    //   t_tx = letztes Byte dieser Antwort auf der Leitung
-    // Mit t1/t4 der Jetson-Seite (jeweils ebenfalls letztes Byte) ergibt sich
-    // der Uhrenversatz zu ((t2-t1) + (t3-t4)) / 2 und die Umlaufzeit zu
-    // (t4-t1) - (t3-t2). Siehe docs/JETSON_BRIDGE.md.
+    // Response to CMD_TIME_SYNC. Carries both points in time on the ESP side
+    // as full int64 microseconds:
+    //   t_rx = last byte of the request received
+    //   t_tx = last byte of this response on the wire
+    // Together with t1/t4 from the Jetson side (each also the last byte), the
+    // clock offset is ((t2-t1) + (t3-t4)) / 2 and the round-trip time is
+    // (t4-t1) - (t3-t2). See docs/JETSON_BRIDGE.md.
     //
-    // Dieses Paket geht bewusst NIE als 0xA6 raus: sein t_tx steht schon mit
-    // voller Breite in der Nutzlast, ein zusaetzlicher 32-Bit-Stempel waere
-    // nur Redundanz - und die Bridge braucht die Zeitsynchronisation, bevor
-    // sie ueberhaupt entscheiden kann, ob sie Stempel haben will.
+    // This packet is deliberately NEVER sent as 0xA6: its t_tx is already in
+    // the payload at full width, an additional 32-bit stamp would just be
+    // redundant - and the bridge needs the time sync before it can even
+    // decide whether it wants stamps at all.
     void sendTimeSync(uint8_t seq, int64_t rxUs) {
         uint8_t p[19] = {START_BYTE, CMD_TIME_RSP, seq};
         writeI64BE(&p[3], rxUs);
-        // p[11..18] (t_tx) fuellt sendPacket so spaet wie moeglich selbst.
+        // p[11..18] (t_tx) is filled in by sendPacket itself, as late as possible.
         sendPacket(p, sizeof(p), 11);
         syncRequests++;
         lastSyncUs = nowUs();
     }
 
-    // Fahrzustand: wo die Ausgangswelle steht, wie schnell sie dreht, was an
-    // der Bruecke anliegt und wie viel Strom fliesst.
+    // Drive state: where the output shaft is, how fast it is turning, what is
+    // applied to the bridge and how much current is flowing.
     //
-    // Tempo in 1/10 Grad pro Sekunde, gleiche Einheit wie die Wege in
-    // CMD_MOVE. Der Motortask fuehrt intern U/min - Faktor 60 (eine Umdrehung
-    // sind 3600 Zehntelgrad, eine Minute 60 Sekunden).
+    // Speed in 1/10 degree per second, same unit as the distances in
+    // CMD_MOVE. The motor task internally keeps RPM - factor 60 (one
+    // revolution is 3600 tenths of a degree, one minute is 60 seconds).
     void sendTelemetry() {
         uint8_t p[14] = {START_BYTE, CMD_TELEMETRY};
 
-        // Position und Tempo sind vorzeichenbehaftet: der Encoder-Delta im
-        // Motortask ist ein signed long, rueckwaerts liefert also negative
-        // Werte. writeI32BE schiebt arithmetisch, das Zweierkomplement kommt
-        // damit unveraendert auf die Leitung.
+        // Position and speed are signed: the encoder delta in the motor task
+        // is a signed long, so reversing yields negative values. writeI32BE
+        // shifts arithmetically, so the two's complement reaches the wire
+        // unchanged.
         writeI32BE(&p[2], countsToDeg10(g_encCount));
         writeI32BE(&p[6], (int32_t)lroundf(g_rpm * 60.0f));
 
-        // Duty ebenso: minus heisst rueckwaerts.
+        // Likewise duty: negative means reverse.
         int16_t duty = g_dutySigned;
         p[10] = (uint8_t)((uint16_t)duty >> 8);
         p[11] = (uint8_t)duty;
 
-        // Der Strom dagegen ist immer positiv - der VNH5019 meldet auf CS nur
-        // den Betrag, nicht die Richtung. Wer sie braucht, liest sie am Duty ab.
+        // The current, on the other hand, is always positive - the VNH5019 only
+        // reports the magnitude on CS, not the direction. Anyone who needs it reads it from the duty.
         int32_t mA = (int32_t)lroundf(readMotorCurrentA() * 1000.0f);
         mA = constrain(mA, 0L, 32767L);
         p[12] = (uint8_t)((uint16_t)(int16_t)mA >> 8);
@@ -1670,20 +1670,20 @@ public:
     void printLinkStats() {
         Serial.printf("Link IO%d(RX)/IO%d(TX) @115200 | debug=%u\n",
                       PIN_JETSON_RX, PIN_JETSON_TX, g_linkDebug);
-        Serial.printf("  RX: %lu Pakete, %lu unbekannt, %lu unvollstaendig, %lu Streubytes\n",
+        Serial.printf("  RX: %lu packets, %lu unknown, %lu incomplete, %lu stray bytes\n",
                       (unsigned long)rxPackets, (unsigned long)rxUnknown,
                       (unsigned long)rxTimeouts, (unsigned long)rxStray);
-        Serial.printf("  TX: %lu Pakete%s\n", (unsigned long)txPackets,
-                      g_stampTx ? " (mit Zeitstempel, Rahmen 0xA6)" : "");
-        Serial.printf("  Zeit: %lld us seit Boot | %lu Syncs",
+        Serial.printf("  TX: %lu packets%s\n", (unsigned long)txPackets,
+                      g_stampTx ? " (with timestamp, frame 0xA6)" : "");
+        Serial.printf("  Time: %lld us since boot | %lu syncs",
                       (long long)nowUs(), (unsigned long)syncRequests);
-        if (lastSyncUs) Serial.printf(" | letzter Sync vor %lld ms",
+        if (lastSyncUs) Serial.printf(" | last sync %lld ms ago",
                                       (long long)((nowUs() - lastSyncUs) / 1000));
         Serial.println();
         if (rxPackets == 0 && rxStray == 0) {
-            Serial.println("  !! noch NICHTS empfangen - Verkabelung/Baudrate/GND pruefen");
+            Serial.println("  !! NOTHING received yet - check wiring/baud rate/GND");
         } else if (lastRxMs) {
-            Serial.printf("  letztes Paket vor %lu ms\n", millis() - lastRxMs);
+            Serial.printf("  last packet %lu ms ago\n", millis() - lastRxMs);
         }
     }
 
@@ -1694,7 +1694,7 @@ public:
             if (currentState != WAITING_START && (millis() - stateTime > 100)) {
                 rxTimeouts++;
                 if (g_linkDebug && !g_plotMode) {
-                    Serial.printf("[RX] ABBRUCH cmd=0x%02X %s nach %d/%u Byte (>100 ms Pause) - resync\n",
+                    Serial.printf("[RX] ABORT cmd=0x%02X %s after %d/%u bytes (>100 ms gap) - resync\n",
                                   currentCmd, cmdName(currentCmd), bufIndex, dataLength);
                 }
                 currentState = WAITING_START;
@@ -1710,11 +1710,11 @@ public:
                         stampIndex = 0;
                         frameStampUs = 0;
                     } else {
-                        // Kein Startbyte: entweder ASCII-Klartext oder Muell nach
-                        // einem Sync-Verlust. Nur im Vollmodus einzeln melden.
+                        // No start byte: either ASCII plain text or garbage after
+                        // a loss of sync. Only reported individually in full mode.
                         rxStray++;
                         if (g_linkDebug >= 2 && !g_plotMode) {
-                            Serial.printf("[RX] sync-suche: 0x%02X%s\n", byte,
+                            Serial.printf("[RX] sync search: 0x%02X%s\n", byte,
                                           (byte >= 32 && byte < 127) ? " (ASCII)" : "");
                         }
                     }
@@ -1723,17 +1723,17 @@ public:
                 case WAITING_CMD: {
                     currentCmd = byte;
                     int len = payloadLength(currentCmd);
-                    if (len < 0) {                  // unbekannter Befehl
+                    if (len < 0) {                  // unknown command
                         rxUnknown++;
                         if (g_linkDebug && !g_plotMode) {
-                            Serial.printf("[RX] UNBEKANNT cmd=0x%02X - verworfen\n", currentCmd);
+                            Serial.printf("[RX] UNKNOWN cmd=0x%02X - discarded\n", currentCmd);
                         }
                         currentState = WAITING_START;
                         break;
                     }
                     dataLength = (uint8_t)len;
-                    // Bei 0xA6 stehen erst vier Byte Sendestempel, dann die
-                    // Nutzlast.
+                    // With 0xA6, four bytes of send stamp come first, then the
+                    // payload.
                     currentState = frameStamped ? READING_STAMP : READING_DATA;
                     if (!frameStamped && dataLength == 0) finishFrame();
                     break;
@@ -1757,14 +1757,14 @@ public:
     }
 
 private:
-    // Rahmen ist vollstaendig: Empfangszeit festhalten, protokollieren,
-    // ausfuehren, zurueck auf Sync-Suche.
+    // Frame is complete: record the receive time, log it, execute it, and
+    // go back to searching for sync.
     //
-    // frameRxUs meint das letzte Byte des Rahmens - denselben Bezugspunkt, den
-    // die Bridge fuer ihr t1 nimmt. Ungenau ist daran nur, dass process() aus
-    // dem loop() heraus liest: das Byte lag da schon eine Weile im
-    // Treiberpuffer. Diese Verzoegerung steckt in der gemessenen Umlaufzeit,
-    // die Bridge sieht sie also und kann Ausreisser verwerfen.
+    // frameRxUs refers to the last byte of the frame - the same reference
+    // point the bridge uses for its t1. The only inaccuracy is that process()
+    // reads from within loop(): the byte had already been sitting in the
+    // driver buffer for a while. This delay is contained in the measured
+    // round-trip time, so the bridge sees it and can discard outliers.
     void finishFrame() {
         frameRxUs = nowUs();
         logRxPacket();
@@ -1772,22 +1772,22 @@ private:
         currentState = WAITING_START;
     }
 
-    // Zeitpunkt, zu dem das letzte Byte eines n Byte langen Pakets die Leitung
-    // verlassen hat. 8N1 = 10 Bit pro Byte. Vor dem Aufruf muss der Sendepuffer
-    // leer sein, sonst schiebt sich der Rest des Vorgaengers davor.
+    // Point in time at which the last byte of an n-byte packet has left the
+    // wire. 8N1 = 10 bits per byte. The transmit buffer must be empty before
+    // the call, otherwise the rest of the previous packet gets in front of it.
     int64_t txDoneUs(size_t n) const {
         return nowUs() + (int64_t)n * 10 * 1000000 / (int64_t)linkBaud;
     }
 
-    // Ein Paket rausschicken, mitzaehlen und optional mitschneiden.
+    // Send out a packet, count it and optionally log it.
     //
-    // p enthaelt immer den ungestempelten Rahmen (START_BYTE, CMD, Nutzlast).
-    // Ist g_stampTx an, baut sendPacket daraus den 0xA6-Rahmen und schiebt vier
-    // Byte Zeitstempel zwischen CMD und Nutzlast.
+    // p always contains the unstamped frame (START_BYTE, CMD, payload).
+    // If g_stampTx is on, sendPacket builds the 0xA6 frame from it and inserts
+    // four bytes of timestamp between CMD and payload.
     //
-    // txStampOffset >= 0: an dieser Stelle im *ungestempelten* Rahmen steht ein
-    // int64-Feld, das den eigenen Sendezeitpunkt aufnimmt (nur CMD_TIME_RSP).
-    // Solche Pakete bekommen nie zusaetzlich einen Rahmenstempel.
+    // txStampOffset >= 0: at this position in the *unstamped* frame there is an
+    // int64 field that receives the packet's own send time (CMD_TIME_RSP only).
+    // Such packets never additionally get a frame stamp.
     void sendPacket(const uint8_t* p, size_t n, int txStampOffset = -1) {
         const bool stamped = g_stampTx && txStampOffset < 0;
         const bool needsClock = stamped || txStampOffset >= 0;
@@ -1798,7 +1798,7 @@ private:
         if (stamped) {
             out[k++] = START_BYTE_TS;
             out[k++] = p[1];
-            k += 4;                              // Platzhalter fuer den Stempel
+            k += 4;                              // Placeholder for the stamp
             memcpy(&out[k], p + 2, n - 2);
             k += n - 2;
         } else {
@@ -1806,9 +1806,9 @@ private:
             k = n;
         }
 
-        // Erst den Puffer leerlaufen lassen, dann stempeln: nur so gilt die
-        // Rechnung "jetzt + Uebertragungsdauer". Haengt noch eine ASCII-Zeile
-        // im Puffer (CMD_EMERGENCY, CMD_TRIM), waere der Stempel sonst zu frueh.
+        // Let the buffer drain first, then stamp: only then does the
+        // calculation "now + transmission time" hold. If an ASCII line is still
+        // in the buffer (CMD_EMERGENCY, CMD_TRIM), the stamp would otherwise be too early.
         if (needsClock) {
             serialPort->flush();
             int64_t done = txDoneUs(k);
@@ -1819,7 +1819,7 @@ private:
         serialPort->write(out, k);
         txPackets++;
         if (g_linkDebug && !g_plotMode) {
-            const uint8_t* payload = &out[k - (n - 2)];   // Nutzlast am Ende
+            const uint8_t* payload = &out[k - (n - 2)];   // Payload at the end
             Serial.printf("[TX] %s", cmdName(p[1]));
             if (stamped) Serial.printf(" t=%lu", (unsigned long)readU32BE(&out[2]));
             for (size_t i = 0; i < n - 2; i++) Serial.printf(" %02X", payload[i]);
@@ -1827,24 +1827,24 @@ private:
         }
     }
 
-    // Empfangenes Paket auf der USB-Konsole protokollieren.
+    // Log a received packet on the USB console.
     void logRxPacket() {
         rxPackets++;
         lastRxMs = millis();
         if (!g_linkDebug || g_plotMode) return;
 
-        // Byte-identische Wiederholung? Dann nur zaehlen und alle 5 s eine
-        // Sammelzeile ausgeben. In dbg2 (Rohbytes) bleibt alles ungefiltert.
+        // Byte-identical repetition? Then only count it and print a summary
+        // line every 5 s. In dbg2 (raw bytes) everything stays unfiltered.
         bool same = (currentCmd == lastLogCmd && dataLength == lastLogLen &&
                      memcmp(buffer, lastLogBuf, dataLength) == 0);
-        // Zeitsync-Pakete nie zusammenfassen - beim Nachmessen des Links will
-        // man jede einzelne Runde sehen, auch wenn die seq zufaellig gleich ist.
+        // Never merge time sync packets - when measuring the link you want to
+        // see every single round, even if the seq happens to be the same.
         if (currentCmd == CMD_TIME_SYNC) same = false;
 
         if (same && g_linkDebug < 2) {
             repeatCount++;
             if (millis() - repeatSince >= 5000) {
-                Serial.printf("[RX] %-12s  %lux unveraendert in %lu s\n",
+                Serial.printf("[RX] %-12s  %lux unchanged in %lu s\n",
                               cmdName(currentCmd), (unsigned long)repeatCount,
                               (millis() - repeatSince) / 1000);
                 repeatCount = 0;
@@ -1854,7 +1854,7 @@ private:
         }
 
         if (repeatCount) {
-            Serial.printf("[RX] %-12s  %lux unveraendert\n",
+            Serial.printf("[RX] %-12s  %lux unchanged\n",
                           cmdName(lastLogCmd), (unsigned long)repeatCount);
             repeatCount = 0;
         }
@@ -1875,24 +1875,24 @@ private:
                 Serial.printf("  dir=%u speed=%u", buffer[0], (buffer[1] << 8) | buffer[2]);
                 break;
             case CMD_SERVO:
-                Serial.printf("  id=%u lenkung=%d%%", buffer[0],
+                Serial.printf("  id=%u steer=%d%%", buffer[0],
                               (int16_t)((buffer[1] << 8) | buffer[2]));
                 break;
             case CMD_LED:
-                Serial.printf("  %s", buffer[0] ? "an" : "aus");
+                Serial.printf("  %s", buffer[0] ? "on" : "off");
                 break;
             case CMD_TRIM:
-                Serial.printf("  %s", buffer[0] == 0 ? "links" :
-                                      buffer[0] == 1 ? "rechts" : "speichern");
+                Serial.printf("  %s", buffer[0] == 0 ? "left" :
+                                      buffer[0] == 1 ? "right" : "save");
                 break;
             case CMD_PID_SET: {
                 int32_t raw = readI32BE(&buffer[1]);
-                Serial.printf("  param=%u wert=%.3f", buffer[0], raw / 1000.0f);
+                Serial.printf("  param=%u value=%.3f", buffer[0], raw / 1000.0f);
                 break;
             }
             case CMD_MOVE: {
                 int32_t d = readI32BE(&buffer[1]);
-                Serial.printf("  id=%u um %+.1f grad", buffer[0], d / 10.0f);
+                Serial.printf("  id=%u by %+.1f deg", buffer[0], d / 10.0f);
                 break;
             }
             case CMD_CAL:
@@ -1902,21 +1902,21 @@ private:
                 Serial.printf("  seq=%u", buffer[0]);
                 break;
             case CMD_STAMP_MODE:
-                Serial.printf("  %s", buffer[0] ? "an" : "aus");
+                Serial.printf("  %s", buffer[0] ? "on" : "off");
                 break;
             case CMD_TELEM_RATE: {
                 uint16_t ms = (buffer[0] << 8) | buffer[1];
-                if (ms) Serial.printf("  alle %u ms (%.1f Hz)", ms, 1000.0f / ms);
-                else    Serial.print("  aus");
+                if (ms) Serial.printf("  every %u ms (%.1f Hz)", ms, 1000.0f / ms);
+                else    Serial.print("  off");
                 break;
             }
             default:
-                break;   // Befehle ohne Nutzlast
+                break;   // Commands without payload
         }
         Serial.println();
     }
 
-    // Nutzlastlaenge je Befehl. -1 = unbekannt.
+    // Payload length per command. -1 = unknown.
     static int payloadLength(uint8_t cmd) {
         switch (cmd) {
             case CMD_MOTOR:      return 3;
@@ -1945,7 +1945,7 @@ private:
         switch (currentCmd) {
 
         case CMD_EMERGENCY:
-            // Aktiv bremsen statt nur ausrollen, bricht auch eine Fahrt ab.
+            // Brake actively instead of just coasting; also aborts a move.
             setMotorCommand(MOTOR_BRAKE, false, DUTY_MAX);
             serialPort->println("ESP: EMERGENCY STOP EXECUTED!");
             break;
@@ -1953,7 +1953,7 @@ private:
         case CMD_MOTOR: {
             bool     reverse = buffer[0];
             uint16_t speed   = (buffer[1] << 8) | buffer[2];   // 0..1023
-            // Speed 0 = ausrollen. Bremsen laeuft ueber CMD_EMERGENCY.
+            // Speed 0 = coast. Braking is done via CMD_EMERGENCY.
             setMotorCommand(speed ? MOTOR_DRIVE : MOTOR_COAST, reverse, speed);
             break;
         }
@@ -1977,10 +1977,10 @@ private:
             sendBattery(CMD_BATTERY_RSP);
             break;
 
-        // Zeitabgleich. Muss ohne Umweg beantwortet werden: jede Millisekunde,
-        // die zwischen Empfang und Antwort vergeht, geht als Unsicherheit in
-        // den Uhrenversatz ein. Deshalb hier direkt im Parser-Kontext und
-        // nicht ueber die Queue oder den naechsten loop().
+        // Time synchronization. Must be answered without detour: every millisecond
+        // that passes between reception and response enters the clock offset as
+        // uncertainty. That is why it is handled directly here in the parser
+        // context and not via the queue or the next loop().
         case CMD_TIME_SYNC:
             sendTimeSync(buffer[0], frameRxUs);
             break;
@@ -1990,9 +1990,9 @@ private:
             sendStampMode();
             break;
 
-        // Takt der Fahrtelemetrie setzen. Die sofortige Antwort dient
-        // gleichzeitig als Quittung - die Bridge weiss damit, dass der Takt
-        // angekommen ist, ohne auf das erste regulaere Paket zu warten.
+        // Set the drive telemetry rate. The immediate response also serves as
+        // an acknowledgement - it tells the bridge that the rate has arrived,
+        // without having to wait for the first regular packet.
         case CMD_TELEM_RATE: {
             uint16_t ms = (buffer[0] << 8) | buffer[1];
             g_telemetryMs = ms ? (ms < TELEMETRY_MS_MIN ? TELEMETRY_MS_MIN : ms) : 0;
@@ -2023,7 +2023,7 @@ private:
                 case 6: p.settleMs  = (uint32_t)(raw / 1000);     break;
                 case 7: p.timeoutMs = (uint32_t)(raw / 1000);     break;
                 case 8: p.minDuty   = (uint16_t)constrain(raw / 1000, 0L, (long)DUTY_MAX); break;
-                default: return;   // unbekannter Parameter, still verwerfen
+                default: return;   // unknown parameter, silently discard
             }
             setPid(p);
             break;
@@ -2033,18 +2033,18 @@ private:
             uint8_t id = buffer[0];
             int16_t steerPct = (buffer[1] << 8) | buffer[2];
 
-            // Waehrend der Kalibrierung darf kein Lenkbefehl dazwischenfunken -
-            // er wuerde die von Hand angefahrene Stellung sofort verwerfen.
+            // During calibration no steering command may interfere -
+            // it would immediately discard the manually approached position.
             if (g_cal.active) {
                 static uint32_t lastHint = 0;
                 if (millis() - lastHint > 2000) {
                     lastHint = millis();
-                    Serial.println("ESP: Lenkbefehl ignoriert - Kalibrierung laeuft.");
+                    Serial.println("ESP: Steering command ignored - calibration running.");
                 }
                 break;
             }
 
-            // --- Dynamische Hub-Begrenzung auf 80% ---
+            // --- Dynamic travel limit to 80% ---
             const float MAX_THROW_FACTOR = 1.0f;
 
             int maxDistRight = softwareCenterPos - rightLimit;
@@ -2072,9 +2072,9 @@ private:
             digitalWrite(PIN_LED, buffer[0] ? HIGH : LOW);
             break;
 
-        // Startet die manuelle Kalibrierung. Das automatische Antasten gibt es
-        // nicht mehr - der SC09 kann sein Drehmoment nicht begrenzen.
-        // Die eigentlichen Schritte laufen ueber CMD_CAL.
+        // Starts the manual calibration. Automatic probing no longer exists -
+        // the SC09 cannot limit its torque.
+        // The actual steps are handled via CMD_CAL.
         case CMD_CALIBRATE:
             calStart(servo);
             sendCalState(CAL_ST_OK);
@@ -2090,19 +2090,19 @@ private:
 
         case CMD_TRIM: {
             uint8_t action = buffer[0];
-            if (action == 0x00) {          // Trim -8 Ticks
+            if (action == 0x00) {          // Trim -8 ticks
                 trimOffset        -= 8;
                 softwareCenterPos  = centerLimit + trimOffset;
                 servo->WritePosEx(SERVO_ID, softwareCenterPos, SERVO_SPEED_FAST, SERVO_ACC);
                 serialPort->printf("ESP: Trim L | Offset: %d | Pos: %d\n", trimOffset, softwareCenterPos);
-            } else if (action == 0x01) {   // Trim +8 Ticks
+            } else if (action == 0x01) {   // Trim +8 ticks
                 trimOffset        += 8;
                 softwareCenterPos  = centerLimit + trimOffset;
                 servo->WritePosEx(SERVO_ID, softwareCenterPos, SERVO_SPEED_FAST, SERVO_ACC);
                 serialPort->printf("ESP: Trim R | Offset: %d | Pos: %d\n", trimOffset, softwareCenterPos);
-            } else if (action == 0x02) {   // Offset dauerhaft speichern
+            } else if (action == 0x02) {   // Save offset permanently
                 prefs.putInt("offset10", trimOffset);
-                serialPort->printf("ESP: Trim-Offset (%d) im Flash gespeichert!\n", trimOffset);
+                serialPort->printf("ESP: Trim offset (%d) saved to flash!\n", trimOffset);
             }
             break;
         }
@@ -2111,7 +2111,7 @@ private:
 };
 
 // ==========================================
-// 10. USB-DEBUG-KONSOLE (Core 1)
+// 10. USB DEBUG CONSOLE (Core 1)
 // ==========================================
 
 MotorDriver planetaryMotor(PIN_MOTOR_PWM, PIN_MOTOR_INA, PIN_MOTOR_INB);
@@ -2119,26 +2119,26 @@ SCSCL sc09Servo;
 JetsonComms jetson(&Serial1, &sc09Servo);
 
 String cmdBuf;
-uint8_t nextLocalMoveId = 1;   // IDs fuer Fahrten aus der USB-Konsole
+uint8_t nextLocalMoveId = 1;   // IDs for moves started from the USB console
 
 void printPidParams() {
     PidParams p = getPid();
     Serial.printf("PID  Kp=%.3f  Ki=%.3f  Kd=%.3f\n", p.kp, p.ki, p.kd);
-    Serial.printf("     iLim=%.0f  maxDuty=%u  minDuty=%u  tol=%.1f grad (%ld counts)\n",
+    Serial.printf("     iLim=%.0f  maxDuty=%u  minDuty=%u  tol=%.1f deg (%ld counts)\n",
                   p.iTermLim, p.maxDuty, p.minDuty, p.tolDeg10 / 10.0f,
                   (long)deg10ToCounts(p.tolDeg10));
     Serial.printf("     settle=%lu ms  timeout=%lu ms\n",
                   (unsigned long)p.settleMs, (unsigned long)p.timeoutMs);
 }
 
-// Eine Zeile im Format des Arduino-Serial-Plotters: "name:wert" durch
-// Leerzeichen getrennt.
+// One line in Arduino Serial Plotter format: "name:value" separated by
+// spaces.
 //
-// Beide Winkel sind RELATIV zum Fahrtbeginn, nicht absolut. Absolut waeren es
-// Werte um 1900 Grad, auf die der Plotter die Y-Achse skaliert - die eigentliche
-// 90-Grad-Bewegung waere dann 5 % der Achshoehe und saehe aus wie eine flache
-// Linie. Relativ laeuft ist von 0 auf ziel, und duty in Prozent liegt in
-// derselben Groessenordnung.
+// Both angles are RELATIVE to the start of the move, not absolute. Absolute
+// values would be around 1900 degrees, and the plotter would scale the Y axis to
+// that - the actual 90-degree movement would then be 5 % of the axis height and
+// look like a flat line. Relative, actual runs from 0 to target, and duty in
+// percent is in the same order of magnitude.
 void plotTick() {
     static uint32_t lastPlot = 0;
     if (!g_plotMode) return;
@@ -2147,16 +2147,16 @@ void plotTick() {
     lastPlot = now;
 
     MoveState m = getMoveState();
-    Serial.printf("ziel:%.1f ist:%.1f duty:%.1f\n",
+    Serial.printf("target:%.1f actual:%.1f duty:%.1f\n",
                   countsToDeg10(m.targetCnt - m.startCnt) / 10.0f,
                   countsToDeg10(g_encCount   - m.startCnt) / 10.0f,
                   (g_dutySigned * 100.0f) / DUTY_MAX);
 }
 
-// Schreibt den kompletten Parametersatz ins NVS. Gibt false zurueck, sobald
-// ein Schluessel nicht geschrieben werden konnte (volle oder defekte Partition).
-// NVS verwirft Schreibvorgaenge mit unveraendertem Wert selbst, mehrfaches
-// Speichern gleicher Werte kostet also keine Flash-Zyklen.
+// Writes the complete parameter set to NVS. Returns false as soon as a key
+// could not be written (full or corrupted partition).
+// NVS itself discards writes with an unchanged value, so saving identical
+// values repeatedly costs no flash cycles.
 bool savePidParams() {
     PidParams p = getPid();
     bool ok = true;
@@ -2172,11 +2172,11 @@ bool savePidParams() {
     return ok;
 }
 
-// Fehlende Schluessel werden per isKey() abgefangen. Ohne das protokolliert
-// ESP-IDF bei jedem noch nie gespeicherten Wert eine [E]-Zeile ("nvs_get_blob"),
-// die beim Debuggen wie ein echter Fehler aussieht - der Default greift aber.
+// Missing keys are caught via isKey(). Without that, ESP-IDF logs an [E] line
+// ("nvs_get_blob") for every value that has never been saved, which looks like
+// a real error while debugging - even though the default takes effect.
 void loadPidParams() {
-    PidParams p;   // Defaults aus der Struktur
+    PidParams p;   // defaults from the struct
     if (prefs.isKey("kp"))     p.kp        = prefs.getFloat("kp",     p.kp);
     if (prefs.isKey("ki"))     p.ki        = prefs.getFloat("ki",     p.ki);
     if (prefs.isKey("kd"))     p.kd        = prefs.getFloat("kd",     p.kd);
@@ -2190,75 +2190,75 @@ void loadPidParams() {
 }
 
 void printHelp() {
-    Serial.println("--- Motor (offen) ---");
-    Serial.println("  f<0-255> r<0-255> b<0-255>  vor/rueck/bremsen");
-    Serial.println("  c        coast            z  Encoder auf 0");
-    Serial.println("  e        Telemetrie (Counts, Grad, RPM, Duty, Strom)");
-    Serial.println("  i        Motorstrom    ic<mV/A> skalieren  iz  Nullpunkt");
+    Serial.println("--- Motor (open loop) ---");
+    Serial.println("  f<0-255> r<0-255> b<0-255>  fwd/rev/brake");
+    Serial.println("  c        coast            z  encoder to 0");
+    Serial.println("  e        telemetry (counts, deg, RPM, duty, current)");
+    Serial.println("  i        motor current  ic<mV/A> scale  iz  zero point");
     Serial.println("--- Position ---");
-    Serial.println("  g<grad>  um X Grad weiterdrehen (relativ, z.B. g90.0 / g-45)");
-    Serial.println("  gp<grad> dito, plottet automatisch bis zum Fahrtende");
-    Serial.println("  q        laufende Fahrt abbrechen");
-    Serial.println("  w        Fortschritt der Fahrt");
+    Serial.println("  g<deg>   rotate X degrees further (relative, e.g. g90.0 / g-45)");
+    Serial.println("  gp<deg>  same, plots automatically until the move ends");
+    Serial.println("  q        abort the running move");
+    Serial.println("  w        progress of the move");
     Serial.println("--- PID ---");
-    Serial.println("  kp<f> ki<f> kd<f>          Regelparameter");
-    Serial.println("  kl<f> Anti-Windup-Limit    km<0-1023> max. Duty");
-    Serial.println("  ka<0-1023> Anlauf-Duty     kt<grad> Zielfenster");
-    Serial.println("  kn<ms> Verweilzeit         kx<ms> Timeout");
-    Serial.println("  pid   anzeigen             pids  im Flash speichern");
-    Serial.println("  p     Plotter an/aus (Arduino Serial Plotter, 50 Hz)");
-    Serial.println("--- Jetson-Link (IO10 RX / IO11 TX) ---");
-    Serial.println("  dbg      Statistik    dbg0 aus  dbg1 Pakete  dbg2 +Rohbytes");
-    Serial.println("  ts       Uhr + Sync-Status   ts0/ts1  Sendezeitstempel aus/an");
-    Serial.println("  tel      Fahrtelemetrie   tel<ms> Takt setzen (tel0 = aus)");
-    Serial.println("  sw       Messfenster Tempo sw<n> in Vielfachen von 10 ms");
-    Serial.println("  o        LED umschalten (Taster meldet sich als [TX] BUTTON)");
-    Serial.println("--- Batterie ---");
-    Serial.println("  v        jetzt messen      vc<faktor>  Teiler kalibrieren");
-    Serial.println("  vd       Pin-Diagnose (Akku ab): prueft den Teiler am ADC-Eingang");
-    Serial.println("  vm       Live-Ausgabe zum Wackeltest  vm<ms> Takt  vm0 aus");
-    Serial.println("--- Lenkung: manuelle Kalibrierung ---");
-    Serial.println("  cal      starten / Status (x = dasselbe)");
-    Serial.println("  + / -    ein Schritt (auch '+50' = einmalig 50 Ticks)");
-    Serial.println("  caln<t>  Schrittweite in Ticks (Default 10, ~2,9 grad)");
-    Serial.println("  calm     Mitte  call  linker Anschlag  calr  rechter Anschlag");
-    Serial.println("  calfree  Torque aus (von Hand stellen)   calhold  wieder halten");
-    Serial.println("  calgo    Mitte anfahren  calsave  speichern  calq  abbrechen");
-    Serial.println("--- Lenkung: Betrieb ---");
-    Serial.println("  t Torque  a/d Trim Pos-/Pos+  s Trim speichern");
-    Serial.println("  j/l Pos-/Pos+  m Mitte  sv Diagnose  sv<0-1023> Pos  sve0/1 Torque");
-    Serial.println("  svs Protokoll-Scan  svpos Positions-Modus erzwingen (gegen Wheel-Mode)");
-    Serial.println("  svpin<rx>,<tx> Serial2-Pins tauschen (z.B. svpin17,18)");
-    Serial.println("  svbaud<n> Baud (Oszi)  svtx 0x55-Dauersignal an TX (Oszi-Test)");
-    Serial.println("  h        diese Hilfe");
+    Serial.println("  kp<f> ki<f> kd<f>          controller gains");
+    Serial.println("  kl<f> anti-windup limit    km<0-1023> max duty");
+    Serial.println("  ka<0-1023> start-up duty   kt<deg> target window");
+    Serial.println("  kn<ms> settle time         kx<ms> timeout");
+    Serial.println("  pid   show                 pids  save to flash");
+    Serial.println("  p     plotter on/off (Arduino Serial Plotter, 50 Hz)");
+    Serial.println("--- Jetson link (IO10 RX / IO11 TX) ---");
+    Serial.println("  dbg      statistics   dbg0 off  dbg1 packets  dbg2 +raw bytes");
+    Serial.println("  ts       clock + sync status ts0/ts1  TX timestamps off/on");
+    Serial.println("  tel      drive telemetry  tel<ms> set interval (tel0 = off)");
+    Serial.println("  sw       speed window     sw<n> in multiples of 10 ms");
+    Serial.println("  o        toggle LED (button reports as [TX] BUTTON)");
+    Serial.println("--- Battery ---");
+    Serial.println("  v        measure now       vc<factor>  calibrate divider");
+    Serial.println("  vd       pin diagnosis (battery off): checks the divider at the ADC input");
+    Serial.println("  vm       live output for wiggle test  vm<ms> interval  vm0 off");
+    Serial.println("--- Steering: manual calibration ---");
+    Serial.println("  cal      start / status (x = same)");
+    Serial.println("  + / -    one step (also '+50' = one-off 50 ticks)");
+    Serial.println("  caln<t>  step size in ticks (default 10, ~2.9 deg)");
+    Serial.println("  calm     center  call  left end stop  calr  right end stop");
+    Serial.println("  calfree  torque off (set by hand)        calhold  hold again");
+    Serial.println("  calgo    go to center  calsave  save  calq  abort");
+    Serial.println("--- Steering: operation ---");
+    Serial.println("  t torque  a/d trim Pos-/Pos+  s save trim");
+    Serial.println("  j/l Pos-/Pos+  m center  sv diagnostics  sv<0-1023> pos  sve0/1 torque");
+    Serial.println("  svs protocol scan  svpos force position mode (against wheel mode)");
+    Serial.println("  svpin<rx>,<tx> swap Serial2 pins (e.g. svpin17,18)");
+    Serial.println("  svbaud<n> baud (scope)  svtx continuous 0x55 signal on TX (scope test)");
+    Serial.println("  h        this help");
 }
 
 void handleDebugCommand(String cmd) {
     cmd.trim();
     if (cmd.length() == 0) return;
 
-    // --- Mehrbuchstabige Befehle zuerst ---
+    // --- Multi-letter commands first ---
     if (cmd.startsWith("pids")) {
-        Serial.println(savePidParams() ? "-> PID im Flash gespeichert"
-                                       : "-> FEHLER beim Speichern (NVS)");
+        Serial.println(savePidParams() ? "-> PID saved to flash"
+                                       : "-> ERROR while saving (NVS)");
         return;
     }
     if (cmd.startsWith("pid"))  { printPidParams(); return; }
 
-    // Fahrt starten und dabei plotten. Muss vor dem einbuchstabigen 'g' stehen.
+    // Start a move and plot it. Must come before the single-letter 'g'.
     if (cmd.startsWith("gp")) {
         float grad = cmd.substring(2).toFloat();
         uint8_t id = nextLocalMoveId++;
         if (nextLocalMoveId == 0) nextLocalMoveId = 1;
-        Serial.printf("-> move id=%u um %.1f grad | Plotter bis Fahrtende\n", id, grad);
+        Serial.printf("-> move id=%u by %.1f deg | plotter until move ends\n", id, grad);
         g_plotMode = true;
         g_plotAuto = true;
         startMove(id, (int32_t)lroundf(grad * 10.0f));
         return;
     }
 
-    // --- Manuelle Lenkungs-Kalibrierung ---
-    // Muss vor den einbuchstabigen Befehlen stehen ('c' ist coast).
+    // --- Manual steering calibration ---
+    // Must come before the single-letter commands ('c' is coast).
     if (cmd.startsWith("cal")) {
         String arg = cmd.substring(3);
         arg.trim();
@@ -2288,8 +2288,8 @@ void handleDebugCommand(String cmd) {
         return;
     }
 
-    // --- Messfenster der Geschwindigkeit ---
-    // Muss vor die einbuchstabigen Befehle ('s' = Stop).
+    // --- Speed measurement window ---
+    // Must come before the single-letter commands ('s' = stop).
     if (cmd.startsWith("sw")) {
         String arg = cmd.substring(2);
         arg.trim();
@@ -2301,18 +2301,18 @@ void handleDebugCommand(String cmd) {
         }
         uint32_t fensterMs = (uint32_t)g_speedWindow * TASK_PERIOD;
         float schrittRpm = 60000.0f / (COUNTS_PER_REV * (float)fensterMs);
-        Serial.printf("-> Messfenster %u x %lu ms = %lu ms\n",
+        Serial.printf("-> speed window %u x %lu ms = %lu ms\n",
                       g_speedWindow, (unsigned long)TASK_PERIOD,
                       (unsigned long)fensterMs);
-        Serial.printf("   ein Impuls = %.1f U/min = %.1f grad/s, "
-                      "Verzoegerung %.0f ms\n",
+        Serial.printf("   one pulse = %.1f RPM = %.1f deg/s, "
+                      "delay %.0f ms\n",
                       schrittRpm, schrittRpm * 6.0f, fensterMs / 2.0f);
-        Serial.println("   Ausgaberate bleibt davon unberuehrt (siehe 'tel').");
+        Serial.println("   Output rate is not affected by this (see 'tel').");
         return;
     }
 
-    // --- Fahrtelemetrie ---
-    // Muss vor die einbuchstabigen Befehle ('t' = Torque).
+    // --- Drive telemetry ---
+    // Must come before the single-letter commands ('t' = torque).
     if (cmd.startsWith("tel")) {
         String arg = cmd.substring(3);
         arg.trim();
@@ -2324,34 +2324,34 @@ void handleDebugCommand(String cmd) {
             else                              g_telemetryMs = (uint16_t)ms;
         }
         if (g_telemetryMs) {
-            Serial.printf("-> Telemetrie alle %u ms (%.1f Hz)\n",
+            Serial.printf("-> telemetry every %u ms (%.1f Hz)\n",
                           g_telemetryMs, 1000.0f / g_telemetryMs);
-            Serial.printf("   Tempo aus einem Fenster von %u ms ('sw'), "
-                          "aber bei jedem Paket neu.\n",
+            Serial.printf("   speed from a window of %u ms ('sw'), "
+                          "but recomputed for every packet.\n",
                           (unsigned)g_speedWindow * (unsigned)TASK_PERIOD);
         } else {
-            Serial.println("-> Telemetrie aus ('tel100' = 10 Hz)");
+            Serial.println("-> telemetry off ('tel100' = 10 Hz)");
         }
-        Serial.printf("   jetzt: %.1f grad  %.1f grad/s  duty=%d  I=%.2f A\n",
+        Serial.printf("   now: %.1f deg  %.1f deg/s  duty=%d  I=%.2f A\n",
                       countsToDeg10(g_encCount) / 10.0f, g_rpm * 6.0f,
                       g_dutySigned, readMotorCurrentA());
         return;
     }
 
-    // --- Zeitsynchronisation / Sendezeitstempel ---
-    // Muss vor die einbuchstabigen Befehle ('t' = Torque).
+    // --- Time synchronization / TX timestamps ---
+    // Must come before the single-letter commands ('t' = torque).
     if (cmd.startsWith("ts")) {
         String arg = cmd.substring(2);
         arg.trim();
         if (arg.length() > 0) {
             g_stampTx = (arg.toInt() != 0);
-            jetson.sendStampMode();      // Bridge ueber die Umstellung informieren
+            jetson.sendStampMode();      // inform the bridge about the change
         }
-        Serial.printf("-> Sendezeitstempel %s (Rahmen 0x%02X)\n",
-                      g_stampTx ? "AN" : "AUS", g_stampTx ? START_BYTE_TS : START_BYTE);
-        Serial.printf("   ESP-Uhr: %lld us seit Boot (%.3f s)\n",
+        Serial.printf("-> TX timestamps %s (frame 0x%02X)\n",
+                      g_stampTx ? "ON" : "OFF", g_stampTx ? START_BYTE_TS : START_BYTE);
+        Serial.printf("   ESP clock: %lld us since boot (%.3f s)\n",
                       (long long)nowUs(), nowUs() / 1000000.0);
-        Serial.println("   Abgleich macht der Jetson mit CMD_TIME_SYNC (0xB0).");
+        Serial.println("   The Jetson does the alignment with CMD_TIME_SYNC (0xB0).");
         return;
     }
 
@@ -2359,35 +2359,35 @@ void handleDebugCommand(String cmd) {
         String arg = cmd.substring(3);
         if (arg.length() > 0) {
             g_linkDebug = (uint8_t)constrain(arg.toInt(), 0L, 2L);
-            Serial.printf("-> Link-Debug = %u (%s)\n", g_linkDebug,
-                          g_linkDebug == 0 ? "aus" :
-                          g_linkDebug == 1 ? "Pakete" : "Pakete + Rohbytes");
+            Serial.printf("-> link debug = %u (%s)\n", g_linkDebug,
+                          g_linkDebug == 0 ? "off" :
+                          g_linkDebug == 1 ? "packets" : "packets + raw bytes");
         }
         jetson.printLinkStats();
         return;
     }
 
-    // --- Motorstrom kalibrieren ---
+    // --- Calibrate motor current ---
     if (cmd.startsWith("ic")) {
         float f = cmd.substring(2).toFloat();
         if (f > 1.0f && f < 5000.0f) {
             csMvPerA = f;
             prefs.putFloat("csmv", csMvPerA);
-            Serial.printf("-> Stromsense = %.1f mV/A (gespeichert)\n", csMvPerA);
+            Serial.printf("-> current sense = %.1f mV/A (saved)\n", csMvPerA);
         } else {
-            Serial.printf("-> aktuell %.1f mV/A (nominal %.1f). Format: ic140\n",
+            Serial.printf("-> currently %.1f mV/A (nominal %.1f). Format: ic140\n",
                           csMvPerA, CS_MV_PER_A_NOMINAL);
         }
         return;
     }
-    // Nullpunkt bei stehendem Motor. Muss im Coast gemessen werden, sonst
-    // wandert der Ruhestrom in den Offset und jede spaetere Messung ist zu klein.
+    // Zero point with the motor at rest. Must be measured in coast, otherwise
+    // the quiescent current ends up in the offset and every later reading is too low.
     if (cmd == "iz") {
         setMotorCommand(MOTOR_COAST, false, 0);
         vTaskDelay(300 / portTICK_PERIOD_MS);
         csZeroMv = (int)lroundf(readMotorCsMv());
         prefs.putInt("csoff", csZeroMv);
-        Serial.printf("-> Nullpunkt = %d mV (gespeichert)\n", csZeroMv);
+        Serial.printf("-> zero point = %d mV (saved)\n", csZeroMv);
         return;
     }
 
@@ -2398,12 +2398,12 @@ void handleDebugCommand(String cmd) {
 
     if (cmd.startsWith("vm")) {
         long ms = cmd.substring(2).toInt();
-        if (cmd.length() == 2) ms = g_battMonMs ? 0 : 250;   // "vm" schaltet um
+        if (cmd.length() == 2) ms = g_battMonMs ? 0 : 250;   // "vm" toggles
         g_battMonMs = (ms > 0) ? (uint32_t)max(ms, 50L) : 0;
         g_battMonLast = 0;
-        if (g_battMonMs) Serial.printf("-> Akku-Live-Ausgabe alle %lu ms (vm0 = aus)\n",
+        if (g_battMonMs) Serial.printf("-> battery live output every %lu ms (vm0 = off)\n",
                                        (unsigned long)g_battMonMs);
-        else             Serial.println("-> Akku-Live-Ausgabe aus");
+        else             Serial.println("-> battery live output off");
         return;
     }
 
@@ -2412,39 +2412,39 @@ void handleDebugCommand(String cmd) {
         if (f > 1.0f && f < 50.0f) {
             battDivider = f;
             prefs.putFloat("bdiv", battDivider);
-            Serial.printf("-> Teilerfaktor = %.4f (gespeichert)\n", battDivider);
+            Serial.printf("-> divider factor = %.4f (saved)\n", battDivider);
         } else {
-            Serial.printf("-> aktueller Teilerfaktor = %.4f (nominal %.4f)\n",
+            Serial.printf("-> current divider factor = %.4f (nominal %.4f)\n",
                           battDivider, BATT_DIVIDER_NOMINAL);
         }
         return;
     }
 
-    // --- Servo/Lenkung direkt (muss vor den einbuchstabigen Befehlen stehen) ---
+    // --- Direct servo/steering (must come before the single-letter commands) ---
     if (cmd.startsWith("sv")) {
         String arg = cmd.substring(2);
         if (arg.length() == 0) {
-            servoDiagnose(&sc09Servo);                 // "sv" = Diagnose
+            servoDiagnose(&sc09Servo);                 // "sv" = diagnostics
         } else if (arg == "s") {
-            servoScanProtocols(&sc09Servo);            // "svs" = Protokoll-Scan
-        } else if (arg.startsWith("baud")) {           // "svbaud<n>" fuer Oszi
+            servoScanProtocols(&sc09Servo);            // "svs" = protocol scan
+        } else if (arg.startsWith("baud")) {           // "svbaud<n>" for the scope
             long b = arg.substring(4).toInt();
             if (b >= 1200 && b <= 1000000) {
                 g_servoBaud = (uint32_t)b;
                 servoBusRestart(&sc09Servo);
-                Serial.printf("-> Servo-Baud = %lu (fuer echten Betrieb wieder svbaud1000000!)\n",
+                Serial.printf("-> servo baud = %lu (for real operation set svbaud1000000 again!)\n",
                               (unsigned long)g_servoBaud);
             } else {
-                Serial.printf("-> aktuell %lu Baud. Bereich 1200..1000000.\n",
+                Serial.printf("-> currently %lu baud. Range 1200..1000000.\n",
                               (unsigned long)g_servoBaud);
             }
-        } else if (arg == "tx") {                       // "svtx" Dauer-0x55 fuers Oszi
+        } else if (arg == "tx") {                       // "svtx" continuous 0x55 for the scope
             g_servoTxTest = !g_servoTxTest;
-            Serial.printf("-> TX-Testmuster 0x55 %s (an IO%d messen)%s\n",
-                          g_servoTxTest ? "AN" : "AUS", g_servoTx,
+            Serial.printf("-> TX test pattern 0x55 %s (measure at IO%d)%s\n",
+                          g_servoTxTest ? "ON" : "OFF", g_servoTx,
                           g_servoTxTest ? "" : "");
             if (g_servoTxTest && g_servoBaud > 115200)
-                Serial.println("   Hinweis: fuer langsame Oszis erst 'svbaud9600'.");
+                Serial.println("   Note: for slow scopes run 'svbaud9600' first.");
         } else if (arg.startsWith("pin")) {            // "svpin<rx>,<tx>"
             String rest = arg.substring(3);
             rest.replace(",", " ");
@@ -2454,21 +2454,21 @@ void handleDebugCommand(String cmd) {
                 int tx = rest.substring(sp + 1).toInt();
                 servoSetPins(&sc09Servo, rx, tx);
             } else {
-                Serial.printf("-> aktuell RX=IO%d TX=IO%d. Format: svpin18,17\n",
+                Serial.printf("-> currently RX=IO%d TX=IO%d. Format: svpin18,17\n",
                               g_servoRx, g_servoTx);
             }
         } else if (arg == "pos") {
-            servoForcePositionMode(&sc09Servo);            // "svpos" = Positions-Modus erzwingen
+            servoForcePositionMode(&sc09Servo);            // "svpos" = force position mode
         } else if (arg == "r") {
-            servoRegisterDump(&sc09Servo);                 // "svr" = Register + Schreibtest
+            servoRegisterDump(&sc09Servo);                 // "svr" = registers + write test
         } else if (arg == "c") {
-            servoWriteRaw(&sc09Servo, SERVO_CENTER_DEF);   // "svc" = Mitte (roh)
+            servoWriteRaw(&sc09Servo, SERVO_CENTER_DEF);   // "svc" = center (raw)
         } else if (arg.charAt(0) == 'e') {
             int on = arg.substring(1).toInt();
             int ret = sc09Servo.EnableTorque(SERVO_ID, on ? 1 : 0);
-            Serial.printf("-> Torque %s (ret=%d)\n", on ? "AN" : "AUS", ret);
+            Serial.printf("-> torque %s (ret=%d)\n", on ? "ON" : "OFF", ret);
         } else {
-            servoWriteRaw(&sc09Servo, arg.toInt());    // "sv700" = feste Position
+            servoWriteRaw(&sc09Servo, arg.toInt());    // "sv700" = fixed position
         }
         return;
     }
@@ -2486,17 +2486,17 @@ void handleDebugCommand(String cmd) {
             case 't': p.tolDeg10 = (int32_t)lroundf(f * 10.0f);           break;
             case 'n': p.settleMs = (uint32_t)f;                           break;
             case 'x': p.timeoutMs = (uint32_t)f;                          break;
-            default: Serial.println("?? unbekannter PID-Parameter");      return;
+            default: Serial.println("?? unknown PID parameter");      return;
         }
         setPid(p);
         printPidParams();
         return;
     }
 
-    // --- Einbuchstabige Befehle ---
+    // --- Single-letter commands ---
     char c = cmd.charAt(0);
 
-    // f/r/b nehmen weiterhin 0-255 (wie im Testskript) und werden auf 10 Bit skaliert.
+    // f/r/b still take 0-255 (as in the test script) and are scaled to 10 bits.
     int val255 = constrain(cmd.substring(1).toInt(), 0, 255);
     uint16_t duty = (uint16_t)((val255 * DUTY_MAX) / 255);
 
@@ -2512,63 +2512,63 @@ void handleDebugCommand(String cmd) {
             break;
 
         case 'e':
-            Serial.printf("enc=%ld (%.1f grad)  rpm=%.1f  duty=%d  I=%.2f A (%.0f mV)\n",
+            Serial.printf("enc=%ld (%.1f deg)  rpm=%.1f  duty=%d  I=%.2f A (%.0f mV)\n",
                           g_encCount, countsToDeg10(g_encCount) / 10.0f,
                           g_rpm, g_dutySigned, readMotorCurrentA(), readMotorCsMv());
             break;
 
-        // --- Motorstrom ---
+        // --- Motor current ---
         case 'i':
-            Serial.printf("Motorstrom: %.2f A  (CS %.0f mV, Null %d mV, %.1f mV/A)\n",
+            Serial.printf("Motor current: %.2f A  (CS %.0f mV, zero %d mV, %.1f mV/A)\n",
                           readMotorCurrentA(), readMotorCsMv(), csZeroMv, csMvPerA);
             break;
 
-        // --- Positionsfahrt ---
+        // --- Position move ---
         case 'g': {
             float grad = cmd.substring(1).toFloat();
             uint8_t id = nextLocalMoveId++;
             if (nextLocalMoveId == 0) nextLocalMoveId = 1;
             startMove(id, (int32_t)lroundf(grad * 10.0f));
-            Serial.printf("-> move id=%u um %.1f grad (ab %.1f)\n",
+            Serial.printf("-> move id=%u by %.1f deg (from %.1f)\n",
                           id, grad, countsToDeg10(g_encCount) / 10.0f);
             break;
         }
 
         case 'q':
             abortMove();
-            Serial.println("-> Fahrt abgebrochen");
+            Serial.println("-> move aborted");
             break;
 
         case 'w': {
             MoveState m = getMoveState();
-            Serial.printf("move id=%u %s  %u%%  ist=%.1f  ziel=%.1f grad\n",
-                          m.id, m.active ? "AKTIV" : "idle", m.progress,
+            Serial.printf("move id=%u %s  %u%%  actual=%.1f  target=%.1f deg\n",
+                          m.id, m.active ? "ACTIVE" : "idle", m.progress,
                           countsToDeg10(g_encCount) / 10.0f,
                           countsToDeg10(m.targetCnt) / 10.0f);
             break;
         }
 
-        // --- Batterie ---
+        // --- Battery ---
         case 'v': {
             float pinMv = readBatteryMv();
             battPackV = (pinMv / 1000.0f) * battDivider;
             battCellV = battPackV / BATT_CELLS;
-            Serial.printf("Akku: %.2f V Pack | %.3f V/Zelle (%dS)%s\n",
+            Serial.printf("Battery: %.2f V pack | %.3f V/cell (%dS)%s\n",
                           battPackV, battCellV, BATT_CELLS,
-                          battCellV < BATT_WARN_CELL ? "  *** NIEDRIG ***" : "");
-            Serial.printf("      GPIO%d: %.1f mV am Teilerabgriff, roh %d/4095, Faktor %.4f\n",
+                          battCellV < BATT_WARN_CELL ? "  *** LOW ***" : "");
+            Serial.printf("      GPIO%d: %.1f mV at divider tap, raw %d/4095, factor %.4f\n",
                           PIN_BATTERY, pinMv, analogRead(PIN_BATTERY), battDivider);
             if (pinMv >= BATT_ADC_CLIP_MV) {
-                Serial.println("      *** ADC AM ANSCHLAG - Packspannung nicht messbar ***");
-                Serial.println("      Multimeter an GPIO1 gegen GND halten:");
-                Serial.println("        ~3,0 V (Pack/5,5) -> Teiler ok, Pack zu hoch fuer den Messbereich");
-                Serial.println("        deutlich hoeher   -> 22k-Zweig gegen GND offen (kalte Loetstelle?)");
+                Serial.println("      *** ADC CLIPPED - pack voltage not measurable ***");
+                Serial.println("      Hold multimeter on GPIO1 against GND:");
+                Serial.println("        ~3.0 V (pack/5.5) -> divider ok, pack too high for measuring range");
+                Serial.println("        clearly higher    -> 22k leg to GND open (cold solder joint?)");
             }
             break;
         }
 
-        // --- Lenkung ---
-        case 'x':   // 'c' ist coast -> Kalibrierung liegt auf 'x'
+        // --- Steering ---
+        case 'x':   // 'c' is coast -> calibration is on 'x'
             calStart(&sc09Servo);
             break;
 
@@ -2576,13 +2576,13 @@ void handleDebugCommand(String cmd) {
             printTorque(&sc09Servo);
             break;
 
-        // --- Servo schrittweise stellen ---
-        // Ohne Zahl gilt die Kalibrier-Schrittweite (bzw. 100 Ticks ausserhalb
-        // der Kalibrierung), mit Zahl der angegebene Wert: "-40", "j25".
+        // --- Move the servo step by step ---
+        // Without a number the calibration step size applies (or 100 ticks outside
+        // of calibration), with a number the given value: "-40", "j25".
         case '+':
         case '-':
-        case 'j':   // Position kleiner
-        case 'l': { // Position groesser
+        case 'j':   // position lower
+        case 'l': { // position higher
             bool plus = (c == '+' || c == 'l');
             int n = cmd.substring(1).toInt();
             if (n <= 0) n = g_cal.active ? g_cal.step : 100;
@@ -2592,50 +2592,50 @@ void handleDebugCommand(String cmd) {
             break;
         }
 
-        case 'm':   // Mitte anfahren
+        case 'm':   // go to center
             if (g_cal.active) calGoCenter(&sc09Servo);
             else              servoWriteRaw(&sc09Servo, softwareCenterPos);
             break;
 
-        // Trim verschiebt die Mitte in Rohposition-Ticks. Welche Fahrtrichtung
-        // das ist, haengt am Einbau - deshalb hier bewusst Pos-/Pos+ statt
-        // links/rechts. Vorzeichen wie bisher, damit Muskelgedaechtnis und
-        // CMD_TRIM gleich bleiben.
-        case 'a':   // Trim Position kleiner
+        // Trim shifts the center in raw position ticks. Which steering direction
+        // that is depends on the mounting - hence deliberately Pos-/Pos+ here
+        // instead of left/right. Sign as before, so muscle memory and
+        // CMD_TRIM stay the same.
+        case 'a':   // trim position lower
             trimOffset        -= 20;
             softwareCenterPos  = centerLimit + trimOffset;
             sc09Servo.WritePosEx(SERVO_ID, softwareCenterPos, SERVO_SPEED_FAST, SERVO_ACC);
             servoManualPos = softwareCenterPos;
-            Serial.printf("Trim: %d | Aktuelle Pos: %d\n", trimOffset, softwareCenterPos);
+            Serial.printf("Trim: %d | Current pos: %d\n", trimOffset, softwareCenterPos);
             break;
 
-        case 'd':   // Trim Position groesser
+        case 'd':   // trim position higher
             trimOffset        += 20;
             softwareCenterPos  = centerLimit + trimOffset;
             sc09Servo.WritePosEx(SERVO_ID, softwareCenterPos, SERVO_SPEED_FAST, SERVO_ACC);
             servoManualPos = softwareCenterPos;
-            Serial.printf("Trim: %d | Aktuelle Pos: %d\n", trimOffset, softwareCenterPos);
+            Serial.printf("Trim: %d | Current pos: %d\n", trimOffset, softwareCenterPos);
             break;
 
-        case 's':   // Trim speichern
+        case 's':   // save trim
             prefs.putInt("offset10", trimOffset);
-            Serial.println("ESP: Trim-Offset permanent gespeichert!");
+            Serial.println("ESP: Trim offset saved permanently!");
             break;
 
-        // LED umschalten. Sonst nur ueber CMD_LED vom Jetson erreichbar - beim
-        // Bring-up eines neuen Boards will man sie ohne Jetson pruefen koennen.
+        // Toggle the LED. Otherwise only reachable via CMD_LED from the Jetson -
+        // when bringing up a new board you want to be able to check it without a Jetson.
         case 'o': {
             static bool ledOn = false;
             ledOn = !ledOn;
             digitalWrite(PIN_LED, ledOn ? HIGH : LOW);
-            Serial.printf("-> LED (IO%d) %s\n", PIN_LED, ledOn ? "AN" : "AUS");
+            Serial.printf("-> LED (IO%d) %s\n", PIN_LED, ledOn ? "ON" : "OFF");
             break;
         }
 
         case 'p':
             g_plotMode = !g_plotMode;
-            Serial.printf("-> Plotter %s%s\n", g_plotMode ? "AN" : "AUS",
-                          g_plotMode ? " (soll/ist in Grad, duty in %, 50 Hz)" : "");
+            Serial.printf("-> Plotter %s%s\n", g_plotMode ? "ON" : "OFF",
+                          g_plotMode ? " (target/actual in deg, duty in %, 50 Hz)" : "");
             break;
 
         case 'h':
@@ -2643,12 +2643,12 @@ void handleDebugCommand(String cmd) {
             break;
 
         default:
-            Serial.println("?? unbekannter Befehl ('h' fuer Hilfe)");
+            Serial.println("?? unknown command ('h' for help)");
     }
 }
 
 // ==========================================
-// 11. BATTERIE-UEBERWACHUNG (Core 1)
+// 11. BATTERY MONITORING (Core 1)
 // ==========================================
 
 void batteryTick() {
@@ -2657,10 +2657,10 @@ void batteryTick() {
     if (g_battMonMs && now - g_battMonLast >= g_battMonMs) {
         g_battMonLast = now;
         float mv = readBatteryMv();
-        Serial.printf("vm: GPIO%d %7.1f mV  roh %4d/4095  -> %6.2f V%s\n",
+        Serial.printf("vm: GPIO%d %7.1f mV  raw %4d/4095  -> %6.2f V%s\n",
                       PIN_BATTERY, mv, analogRead(PIN_BATTERY),
                       (mv / 1000.0f) * battDivider,
-                      mv >= BATT_ADC_CLIP_MV ? "  ANSCHLAG" : "");
+                      mv >= BATT_ADC_CLIP_MV ? "  CLIPPED" : "");
     }
 
     if (now - battLastRead < BATT_INTERVAL) return;
@@ -2670,38 +2670,38 @@ void batteryTick() {
     battPackV = (pinMv / 1000.0f) * battDivider;
     battCellV = battPackV / BATT_CELLS;
 
-    // Ein geklippter Wert liegt immer oben - die Unterspannungswarnung koennte
-    // also nie ausloesen, egal wie leer der Akku wirklich ist. Deshalb laut
-    // melden statt eine Messung vorzutaeuschen. Takt wie die Akkuwarnung.
+    // A clipped value always sits at the top - so the undervoltage warning could
+    // never trigger, no matter how empty the battery really is. Therefore report
+    // it loudly instead of faking a measurement. Same interval as the battery warning.
     if (pinMv >= BATT_ADC_CLIP_MV &&
         (battLastWarn == 0 || now - battLastWarn >= BATT_WARN_REPEAT)) {
         battLastWarn = now;
-        Serial.printf("ESP: WARNUNG Akku-ADC am Anschlag (%.0f mV an GPIO%d)! %.2f V ist "
-                      "nur die Obergrenze, keine Messung - Unterspannungsschutz ist "
-                      "blind. 'v' zeigt Details.\n",
+        Serial.printf("ESP: WARNING battery ADC clipped (%.0f mV at GPIO%d)! %.2f V is "
+                      "only the upper limit, not a measurement - undervoltage protection is "
+                      "blind. 'v' shows details.\n",
                       pinMv, PIN_BATTERY, battPackV);
     }
 
     if (!battLow && battCellV < BATT_WARN_CELL) {
         battLow = true;
-        battLastWarn = 0;              // sofort warnen
+        battLastWarn = 0;              // warn immediately
     } else if (battLow && battCellV > BATT_RECOVER_CELL) {
-        battLow = false;               // Hysterese: erst ueber 3,85 V entwarnen
-        Serial.printf("ESP: Akku wieder ok: %.2f V (%.3f V/Zelle)\n", battPackV, battCellV);
+        battLow = false;               // hysteresis: only clear the warning above 3.85 V
+        Serial.printf("ESP: Battery ok again: %.2f V (%.3f V/cell)\n", battPackV, battCellV);
     }
 
     if (battLow && (battLastWarn == 0 || now - battLastWarn >= BATT_WARN_REPEAT)) {
         battLastWarn = now;
-        Serial.printf("ESP: WARNUNG Akku niedrig! %.2f V Pack | %.3f V/Zelle\n",
+        Serial.printf("ESP: WARNING battery low! %.2f V pack | %.3f V/cell\n",
                       battPackV, battCellV);
         jetson.sendBattery(CMD_BATTERY_WARN);
     }
 }
 
-// Fahrtelemetrie im eingestellten Takt. Laeuft auf Core 1 aus dem loop() -
-// der Takt ist deshalb nicht hart, sondern haengt an der Schleifendauer.
-// Genau dafuer traegt das Paket seinen Sendezeitstempel: der Jetson muss den
-// Zeitpunkt nicht aus dem Takt herleiten, sondern liest ihn ab.
+// Drive telemetry at the configured interval. Runs on Core 1 from loop() -
+// so the interval is not hard, but depends on the loop duration.
+// That is exactly why the packet carries its TX timestamp: the Jetson does not
+// have to derive the time from the interval, it simply reads it.
 void telemetryTick() {
     if (g_telemetryMs == 0) return;
 
@@ -2709,11 +2709,11 @@ void telemetryTick() {
     uint32_t now = millis();
     if ((uint32_t)(now - lastSend) < g_telemetryMs) return;
 
-    // Takt fortschreiben statt auf "jetzt" zu setzen: sonst schiebt sich der
-    // Rest jeder loop()-Runde in den Takt und aus 100 Hz werden 90.
+    // Advance the schedule instead of setting it to "now": otherwise the
+    // remainder of each loop() pass creeps into the interval and 100 Hz becomes 90.
     lastSend += g_telemetryMs;
-    // Nach einer laengeren Pause (Positionsfahrt, langer Konsolenausdruck)
-    // nicht die verpassten Pakete nachfeuern, sondern neu aufsetzen.
+    // After a longer pause (position move, long console output) do not
+    // fire off the missed packets, but restart the schedule instead.
     if ((uint32_t)(now - lastSend) > g_telemetryMs) lastSend = now;
 
     jetson.sendTelemetry();
@@ -2727,34 +2727,34 @@ void setup() {
     Serial.begin(115200);
     delay(300);
 
-    // --- Antrieb + Encoder ---
+    // --- Drive + encoder ---
     planetaryMotor.begin();
 
     ESP32Encoder::useInternalWeakPullResistors = puType::up;  // Hall open-drain
-    // Spuren getauscht anhaengen, wenn die Fahrtrichtung gedreht ist - sonst
-    // zaehlt der Encoder beim Vorwaertsfahren rueckwaerts.
+    // Attach the channels swapped when the drive direction is inverted - otherwise
+    // the encoder counts backwards when driving forward.
     encoder.attachFullQuad(DRIVE_INVERT ? PIN_ENC_B : PIN_ENC_A,
                            DRIVE_INVERT ? PIN_ENC_A : PIN_ENC_B);   // 4x in HW
-    // Glitch-Filter in APB-Takten (80 MHz). 250 = ~3,1 us: killt Buersten-Rauschen,
-    // laesst echte Flanken durch (bei Vollspeed ~333 us Abstand).
+    // Glitch filter in APB clock cycles (80 MHz). 250 = ~3.1 us: kills brush noise,
+    // lets real edges through (~333 us apart at full speed).
     encoder.setFilter(250);
     encoder.clearCount();
 
-    // --- Batterie-ADC ---
-    // 12 dB Daempfung: Messbereich bis ~3,1 V am Pin. 4S voll (16,8 V) liegt
-    // ueber den Teiler bei ~3,03 V - also knapp unterhalb der Klippgrenze.
-    // Der erste analogRead haengt den Pin an einen ADC-Kanal. Ohne ihn schlaegt
-    // analogSetPinAttenuation in Core 3.x fehl ("__analogChannelConfig(): Pin
-    // is not ADC pin") und die Daempfung bleibt auf dem Default stehen.
+    // --- Battery ADC ---
+    // 12 dB attenuation: measuring range up to ~3.1 V at the pin. 4S full (16.8 V)
+    // ends up at ~3.03 V through the divider - i.e. just below the clipping limit.
+    // The first analogRead attaches the pin to an ADC channel. Without it,
+    // analogSetPinAttenuation fails in Core 3.x ("__analogChannelConfig(): Pin
+    // is not ADC pin") and the attenuation stays at the default.
     (void)analogRead(PIN_BATTERY);
     analogSetPinAttenuation(PIN_BATTERY, ADC_11db);
 
-    // --- Motorstrom-ADC (VNH5019 CS) ---
-    // Gleiche Reihenfolge wie beim Akku: erst lesen, dann Daempfung setzen.
+    // --- Motor current ADC (VNH5019 CS) ---
+    // Same order as for the battery: read first, then set attenuation.
     (void)analogRead(PIN_MOTOR_CS);
     analogSetPinAttenuation(PIN_MOTOR_CS, ADC_11db);
 
-    // --- Peripherie ---
+    // --- Peripherals ---
     pinMode(PIN_BUTTON, INPUT_PULLUP);
     pinMode(PIN_LED, OUTPUT);
     attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), buttonISR, FALLING);
@@ -2765,25 +2765,25 @@ void setup() {
     sc09Servo.pSerial = &Serial2;
     delay(500);
 
-    // --- NVS: Lenkung, PID, Batterie-Kalibrierung ---
+    // --- NVS: steering, PID, battery calibration ---
     prefs.begin("steering", false);
-    // 10-Bit-Keys (SC-Servo 0..1023). Alte *12-Keys aus der STS-Fehlannahme
-    // werden bewusst ignoriert - sie liegen im 0..4095-Bereich.
+    // 10-bit keys (SC servo 0..1023). Old *12 keys from the mistaken STS assumption
+    // are deliberately ignored - they are in the 0..4095 range.
     leftLimit   = prefs.getInt("lLim10", SERVO_POS_MAX);
     rightLimit  = prefs.getInt("rLim10", 0);
     trimOffset  = prefs.getInt("offset10", 0);
     if (prefs.isKey("bdiv"))  battDivider = prefs.getFloat("bdiv", BATT_DIVIDER_NOMINAL);
     if (prefs.isKey("csmv"))  csMvPerA    = prefs.getFloat("csmv", CS_MV_PER_A_NOMINAL);
     if (prefs.isKey("csoff")) csZeroMv    = prefs.getInt("csoff", 0);
-    // Die Mitte wird seit der manuellen Kalibrierung eigenstaendig gesetzt.
-    // Fehlt der Schluessel (Kalibrierung von frueher), gilt wie bisher die
-    // rechnerische Mitte zwischen den Anschlaegen.
+    // Since the manual calibration, the center is set independently.
+    // If the key is missing (calibration from earlier), the computed center
+    // between the end stops applies as before.
     centerLimit = prefs.getInt("cLim10", (leftLimit + rightLimit) / 2);
     softwareCenterPos = centerLimit + trimOffset;
     loadPidParams();
 
-    // --- Motortask auf Core 0 ---
-    // Queue und Pins muessen vor dem Task stehen.
+    // --- Motor task on Core 0 ---
+    // Queue and pins must be set up before the task.
     g_moveResultQueue = xQueueCreate(8, sizeof(MoveResult));
     setMotorCommand(MOTOR_COAST, false, 0);
     xTaskCreatePinnedToCore(
@@ -2796,38 +2796,38 @@ void setup() {
         0                        // Core 0
     );
 
-    // Torque explizit einschalten. Ohne das nimmt der SC09 Positionsbefehle
-    // zwar entgegen, haelt sie aber nicht - die Lenkung reagiert erst, nachdem
-    // 'cal' oder 'tq1' den Torque gesetzt hat.
+    // Enable torque explicitly. Without this the SC09 accepts position commands
+    // but does not hold them - the steering only responds after
+    // 'cal' or 'tq1' has set the torque.
     sc09Servo.EnableTorque(SERVO_ID, 1);
 
-    // Aktuelle Servoposition halten, um Startup-Spannung zu vermeiden
+    // Hold the current servo position to avoid startup strain
     int startPos = sc09Servo.ReadPos(SERVO_ID);
     if (startPos != -1) {
         sc09Servo.WritePosEx(SERVO_ID, startPos, SERVO_SPEED_FAST, SERVO_ACC);
     }
 
-    // Erste Batteriemessung sofort, danach im 15-s-Raster
+    // First battery measurement immediately, then every 15 s
     battPackV = readBatteryVolts();
     battCellV = battPackV / BATT_CELLS;
     battLastRead = millis();
 
-    // Pinbelegung beim Start ausgeben - beim Bring-up eines neuen Boards die
-    // erste Kontrolle, ob die Firmware ueberhaupt die richtigen Pins bedient.
+    // Print the pin assignment at startup - when bringing up a new board, the
+    // first check whether the firmware is driving the right pins at all.
     Serial.printf("Pins: Motor PWM%d INA%d INB%d CS%d | Enc %d/%d | Servo TX%d RX%d @%lu"
-                  " | Jetson RX%d TX%d | Akku %d | LED %d | Taster %d\n",
+                  " | Jetson RX%d TX%d | Batt %d | LED %d | Button %d\n",
                   PIN_MOTOR_PWM, PIN_MOTOR_INA, PIN_MOTOR_INB, PIN_MOTOR_CS,
                   DRIVE_INVERT ? PIN_ENC_B : PIN_ENC_A,
                   DRIVE_INVERT ? PIN_ENC_A : PIN_ENC_B, g_servoTx, g_servoRx,
                   (unsigned long)g_servoBaud, PIN_JETSON_RX, PIN_JETSON_TX,
                   PIN_BATTERY, PIN_LED, PIN_BUTTON);
     if (DRIVE_INVERT) {
-        Serial.println("Fahrtrichtung gedreht (DRIVE_INVERT) - Motor und Encoder.");
+        Serial.println("Drive direction inverted (DRIVE_INVERT) - motor and encoder.");
     }
-    Serial.printf("System Ready. Lenkung: Mitte:%d L:%d R:%d | Trim: %d | Akku: %.2f V (%.3f V/Zelle)\n",
+    Serial.printf("System Ready. Steering: center:%d L:%d R:%d | Trim: %d | Battery: %.2f V (%.3f V/cell)\n",
                   centerLimit, leftLimit, rightLimit, trimOffset, battPackV, battCellV);
     if (!prefs.isKey("cLim10")) {
-        Serial.println("Hinweis: Lenkung noch nie manuell kalibriert - 'cal' starten.");
+        Serial.println("Note: steering never calibrated manually - run 'cal'.");
     }
     printHelp();
 }
@@ -2837,31 +2837,31 @@ void loop() {
     if (buttonTriggered) {
         buttonTriggered = false;
         static unsigned long lastPressTime = 0;
-        if (millis() - lastPressTime > 200) {   // 200 ms Entprellzeit
+        if (millis() - lastPressTime > 200) {   // 200 ms debounce time
             lastPressTime = millis();
             jetson.sendButtonEvent();
         }
     }
 
-    // --- Ergebnisse abgeschlossener Positionsfahrten an den Jetson melden ---
+    // --- Report results of completed position moves to the Jetson ---
     MoveResult r;
     while (xQueueReceive(g_moveResultQueue, &r, 0) == pdTRUE) {
-        // Auto-Plotter endet mit der Fahrt - erst abschalten, dann melden,
-        // sonst landet die Meldung noch im Kurvenstrom.
+        // Auto plotter ends with the move - switch it off first, then report,
+        // otherwise the message still ends up in the curve stream.
         if (g_plotAuto) { g_plotMode = false; g_plotAuto = false; }
         jetson.sendMoveDone(r);
         const char* txt = (r.status == MOVE_OK)      ? "DONE"
                         : (r.status == MOVE_TIMEOUT) ? "TIMEOUT"
                                                      : "ABORTED";
-        Serial.printf("-> move id=%u %s bei %.1f grad\n", r.id, txt, r.finalDeg10 / 10.0f);
+        Serial.printf("-> move id=%u %s at %.1f deg\n", r.id, txt, r.finalDeg10 / 10.0f);
     }
 
-    // --- USB-Debug-Konsole ---
-    // Eingaben werden zurueckgeschickt. Ohne Echo laesst sich nicht
-    // unterscheiden, ob der Monitor nichts sendet oder ob nur das Zeilenende
-    // fehlt und der Befehl deshalb nie ausgefuehrt wird.
+    // --- USB debug console ---
+    // Input is echoed back. Without an echo there is no way to tell
+    // whether the monitor sends nothing at all or whether only the line ending
+    // is missing and the command is therefore never executed.
     static uint32_t lastCharMs = 0;
-    static bool sawLineEnding = false;   // Monitor haengt ein \n oder \r an?
+    static bool sawLineEnding = false;   // does the monitor append a \n or \r?
 
     while (Serial.available()) {
         char ch = Serial.read();
@@ -2874,38 +2874,38 @@ void loop() {
         } else {
             cmdBuf += ch;
             if (!g_plotMode) Serial.print(ch);
-            if (cmdBuf.length() > 40) cmdBuf = "";   // Ueberlauf verwerfen
+            if (cmdBuf.length() > 40) cmdBuf = "";   // discard on overflow
         }
     }
 
-    // Notausgang fuer Monitore, die kein Zeilenende senden (z.B. die
-    // VS-Code-Serial-Monitor-Erweiterung mit "Line ending: None"): nach einer
-    // Sendepause den Puffer trotzdem ausfuehren.
-    // Nur solange noch NIE ein Zeilenende kam - sonst wuerde bei jemandem, der
-    // zeichenweise in ein Terminal tippt, jede Denkpause ein halbes Kommando
-    // ausloesen. Sobald der Monitor sich einmal als zeilenbasiert zu erkennen
-    // gibt, ist dieser Pfad fuer immer aus.
+    // Emergency exit for monitors that send no line ending (e.g. the
+    // VS Code Serial Monitor extension with "Line ending: None"): after a
+    // pause in transmission, execute the buffer anyway.
+    // Only as long as NO line ending has EVER arrived - otherwise, for someone
+    // typing character by character into a terminal, every pause to think would
+    // trigger half a command. As soon as the monitor has once identified itself
+    // as line-based, this path is off for good.
     if (!sawLineEnding && cmdBuf.length() > 0 && millis() - lastCharMs > 400) {
-        if (!g_plotMode) Serial.println("   (ohne Zeilenende empfangen)");
+        if (!g_plotMode) Serial.println("   (received without line ending)");
         handleDebugCommand(cmdBuf);
         cmdBuf = "";
     }
 
-    // --- Jetson-Protokoll ---
+    // --- Jetson protocol ---
     jetson.process();
 
-    // --- Akku alle 15 s ---
+    // --- Battery every 15 s ---
     batteryTick();
 
-    // --- Fahrtelemetrie (Position, Tempo, Duty, Strom) ---
+    // --- Drive telemetry (position, speed, duty, current) ---
     telemetryTick();
 
-    // --- Plotter-Ausgabe (nur wenn mit "p" eingeschaltet) ---
+    // --- Plotter output (only when enabled with "p") ---
     plotTick();
 
-    // --- Servo-TX-Testmuster fuers Oszilloskop (svtx) ---
-    // Fuellt den Sendepuffer mit 0x55, damit an IO_TX ein Dauer-Rechteck liegt.
-    // begrenzt pro loop, sonst blockiert write() bei niedriger Baudrate.
+    // --- Servo TX test pattern for the oscilloscope (svtx) ---
+    // Fills the TX buffer with 0x55 so that a continuous square wave appears on IO_TX.
+    // Limited per loop, otherwise write() blocks at low baud rates.
     if (g_servoTxTest) {
         for (int i = 0; i < 8 && Serial2.availableForWrite() > 0; i++) {
             Serial2.write(0x55);
