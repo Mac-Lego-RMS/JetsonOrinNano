@@ -122,31 +122,24 @@ against an independent reference during an unrelated test.
 ### Dual-input power path
 
 ```mermaid
-flowchart LR
-  B1["J12 · XT30<br/>battery / bench supply"] --> Q1["Q1 AO4407A<br/>P-channel"]
-  B2["J9 · XT30<br/>battery"] --> Q4["Q4 AO4407A<br/>P-channel"]
-  U4["U4 LTC4412"] -. gate .-> Q1
-  U5["U5 LTC4412"] -. gate .-> Q4
-  Q1 --> RAIL["15Vin"]
+flowchart TB
+  subgraph IN["Inputs, hot-swappable"]
+    direction LR
+    B1["J12 · XT30<br/>battery / bench supply"] --> Q1["Q1 AO4407A<br/>driven by U4 LTC4412"]
+    B2["J9 · XT30<br/>battery"] --> Q4["Q4 AO4407A<br/>driven by U5 LTC4412"]
+  end
+  Q1 --> RAIL["15Vin · 12.0–16.8 V"]
   Q4 --> RAIL
-  RAIL --> J16["J16 · XT30<br/>→ Jetson A603"]
+  RAIL --> J16["J16 · XT30<br/>to Jetson A603"]
   RAIL --> U7["U7 VNH5019<br/>motor driver"]
-  RAIL --> SW["J1 · main switch<br/>10 A toggle"]
-  SW --> SWR["15Vsw"]
-  SWR --> U2["U2 MAX17504<br/>step-down"]
-  U2 --> RAIL5F["5V Fuse ≈ 4.97 V"]
-  RAIL5F --> U10["U10 TPS259230<br/>eFuse"]
-  U10 --> RAIL5["5Vout"]
-  USB["J8 USB-C VBUS"] --> D7["D7 Schottky"] --> RAIL5
-  RAIL5 --> LIDAR["J14 LiDAR"]
-  RAIL5 --> SERVO["J3 servo"]
-  RAIL5 --> LED["J11 addressable LED"]
-  RAIL5 --> U6["U6 AMS1117-3.3"]
-  U6 --> RAIL3["3VOut"]
-  RAIL3 --> ESP["ESP32-S3"]
-  RAIL3 --> BUF["U8/U9 bus buffers"]
-  RAIL3 --> GYRO["J15 IMU"]
-  RAIL3 --> ENC["encoder supply"]
+  RAIL --> SW["J1 · main switch<br/>10 A"]
+  SW -- 15Vsw --> U2["U2 MAX17504<br/>step-down, 4.97 V"]
+  U2 --> U10["U10 TPS259230 eFuse<br/>6.1 V clamp, current limit"]
+  U10 --> R5["5Vout"]
+  USB["J8 USB-C VBUS"] --> D7["D7 Schottky"] --> R5
+  R5 --> L5["J14 LiDAR · J3 servo<br/>J11 status LED"]
+  R5 --> U6["U6 AMS1117-3.3"]
+  U6 --> L3["3VOut: ESP32-S3 · U8/U9 buffers<br/>J15 IMU · encoder supply"]
 ```
 
 Two XT30 inputs are combined by a pair of **LTC4412 ideal-diode controllers**
@@ -320,7 +313,8 @@ unaffected by this and always worked.
 the system as 0.265 A at 14.8 V = 3.9 W. At an assumed converter efficiency of
 ~90 %, the 5 V rail therefore carries about 3.5 W, or **≈0.7 A**.
 
-**Change applied:** `R29 = 45.3 kΩ` → 2.05 A typical, a value characterised
+<!-- TODO: confirm that R29 has been swapped on the vehicle -->
+**Correction:** `R29 = 45.3 kΩ` → 2.05 A typical, a value characterised
 directly in the datasheet rather than interpolated. The limit now sits below the
 regulator's 3.5 A rating, and retains roughly three times the headroom over the
 0.7 A measured load.
@@ -476,26 +470,27 @@ noise floor — the converter is unusable below roughly 100–150 mV — so the 
 never leaves its dead zone. R22 was estimated rather than calculated, and it is an
 order of magnitude too small.
 
-Enlarging R22 would move the signal out of the dead zone. It would still not make
-current-based collision detection work on this vehicle, and the reason is
-mechanical rather than electrical:
+Enlarging R22 would move the signal out of the dead zone. Whether a current
+threshold is then the right collision detector is a separate question, and its
+answer is mechanical rather than electrical:
 
 > **The drivetrain has more torque than the tyres have grip.** When the vehicle
 > runs into an obstacle the wheels break traction and spin. The motor never
-> approaches its stall current, so a collision produces almost no current rise at
-> all.
+> approaches its stall current: a collision lifts the drive current only from
+> about 0.2 A to about 0.53 A, and the wheels are already spinning.
 
-The measured collision case confirms this quantitatively. At the traction-limited
-maximum of 0.53 A the sense voltage is
+With the resistor as fitted, even the traction-limited maximum of 0.53 A gives a
+sense voltage of only
 
 $$
 0.53\,\mathrm{A} \cdot 95\,\mathrm{mV/A} = 50\,\mathrm{mV}
 $$
 
 which is still below the ADC's 140 mV noise floor. **Even a full-speed collision
-produces no measurable signal on this input.** Current-based collision detection
-could not have worked on this vehicle at any sense-resistor value that also
-tolerates the stall case.
+produces no measurable signal on this input as fitted.** A resistor sized for the
+traction limit would resolve it, but a detector would then have to separate 0.2 A
+of normal driving from 0.53 A of wheelspin — a factor of 2.6 that moves with load,
+floor grip and supply voltage.
 
 Obstacle and collision handling therefore uses the sensors that do see the
 condition:
@@ -583,15 +578,13 @@ maximum, which the 5 V rail absorbs without measurable sag.
 
 ```mermaid
 flowchart LR
-  TX["ESP32-S3 IO17<br/>Servo TX"] --> R7["R7 10k"] --> Q2["Q2 S8550 PNP"]
-  Q2 --> TXEN["TXEnable"]
-  TXEN --> U8["U8 74LVC1G126<br/>OE active HIGH"]
-  TXEN --> U9["U9 74LVC1G125<br/>OE active LOW"]
-  TX --> U8
-  U8 --> BUS["J3 · Data<br/>pulled up by R23 10k"]
+  TX["ESP32-S3<br/>IO17 TX"] --> U8["U8 LVC1G126<br/>OE active high"]
+  TX --> Q2["Q2 PNP via R7<br/>makes TXEnable"]
+  Q2 -- TXEnable --> U8
+  Q2 -- TXEnable --> U9["U9 LVC1G125<br/>OE active low"]
+  U8 --> BUS["J3 Data<br/>R23 10k pull-up"]
   BUS --> U9
-  U9 --> RX["ESP32-S3 IO18<br/>Servo RX"]
-  TXEN --> DIV["R9 + R10 = 20k<br/>pull-down to GND"]
+  U9 --> RX["ESP32-S3<br/>IO18 RX"]
 ```
 
 The direction of the bus is derived **from the TX line itself**, with no GPIO
