@@ -63,8 +63,8 @@ The 60 C rating is not required by the average current — it is required so tha
 the pack voltage does not sag during motor acceleration, which would otherwise
 propagate into the 5 V rail and into the low-voltage warning.
 
-<!-- [FIGURE 8 / MP4] Discharge curves of both packs, voltage over time, with one
-vertical marker per completed run and a horizontal line at the warning threshold. -->
+<!-- TODO figure: discharge curves of both packs, recorded with
+ros2 bag record /esp_serial_bridge/battery over a full session per pack. -->
 
 #### Battery monitoring
 
@@ -164,9 +164,6 @@ vehicle is running:
 **Reverse-polarity protection** comes for free: in this topology the P-channel
 body diode is oriented so that a reversed pack reverse-biases it and the gate
 never turns on.
-
-<!-- [FIGURE MP5] Screenshot of an uninterrupted ROS 2 log across a live battery
-swap, together with the Jetson's uptime afterwards. -->
 
 ### Switching and the emergency stop concept
 
@@ -334,7 +331,7 @@ current.
 
 Data: [`data/manual/mp1_power_budget.csv`](../data/manual/mp1_power_budget.csv).
 
-<!-- [FIGURE 7] Stacked bar chart, one bar per operating state. -->
+![Current at the battery rail per operating state, split into the Jetson, the rest of the system and motion.](../figures/power_budget.svg)
 
 #### The compute platform dominates, not the drivetrain
 
@@ -400,7 +397,7 @@ $$
 I_\mathrm{supply} - I_\mathrm{baseline} \approx D \cdot I_\mathrm{winding}
 $$
 
-| duty | D | I_supply | Δ | I_winding = Δ/D |
+| duty (0–255) | D | I_supply | Δ | I_winding = Δ/D |
 | ---: | ---: | ---: | ---: | ---: |
 | 25 | 0.098 | 152 mA | 14 mA | 143 mA |
 | 50 | 0.196 | 161 mA | 23 mA | 117 mA |
@@ -428,8 +425,7 @@ is set by friction and windage, not by the duty cycle, which only sets speed. Th
 outlier at duty 25 is consistent with the bridge operating near the edge of
 discontinuous conduction, where the motor barely turns.
 
-<!-- [FIGURE 12] Supply current and derived winding current over PWM duty — one
-curve linear, one flat. -->
+![Supply current above baseline and the derived winding current over PWM duty. The supply current rises linearly with duty; the winding current stays flat.](../figures/drive_current.svg)
 
 #### The operating envelope is bounded by traction, not by stall
 
@@ -565,9 +561,11 @@ attaches with one cable.
 The USB-C port is used for firmware upload, steering calibration and maintenance.
 The LiDAR is never active on this path — it only runs when the Jetson is powered.
 
-<!-- [FIGURE 5] Vehicle-level wiring diagram: which connector goes to which
-physical component, with cable lengths.
-[FIGURE 6] Photograph of the board installed on the Jetson, connectors labelled. -->
+![Vehicle-level wiring: which connector of the main PCB goes to which component. Drawn from the schematic by `draw_wiring.py`.](../figures/wiring.svg)
+
+![The main PCB stacked on the Jetson in the vehicle. The background of this photo was generated with AI, so the image may contain artefacts.](../figures/board_stack.jpg){width=55%}
+
+<!-- TODO: cable lengths for the wiring diagram -->
 
 ### Steering servo — half-duplex interface
 
@@ -628,9 +626,13 @@ signal-integrity argument as much as a routing one.
 Power is distributed on wide traces rather than on dedicated power planes, so the
 inner layers remain available as ground reference.
 
-<!-- [FIGURE 2] Schematic export (PDF).
-[FIGURE 3] Layout, top and bottom.
-[FIGURE 4] 3D render of the assembled board. -->
+![Schematic of the main PCB, V5. The figure is a vector graphic and can be zoomed; the full-size sheet is `schemes/MainPCB-schematic.pdf`.](../figures/schematic.svg)
+
+![All four copper layers of the main PCB.](../figures/pcb_all_layers.png){width=85%}
+
+![The copper layers individually: top, the two inner layers, bottom.](../figures/pcb_layers.jpg)
+
+![3D render of the assembled board, top and bottom. The 40-pin header on the underside mates with the Jetson.](../figures/board_3d.png)
 
 ### Design evolution
 
@@ -650,8 +652,7 @@ motor driver and the ESP32-S3 module.
 **No revision failed on first power-up.** Each was released only after a clean DRC
 run and a manual net-by-net review against the schematic.
 
-<!-- [FIGURE 14] Photograph of all five boards side by side, one caption line per
-revision. All five physical boards are still available. -->
+![The five revisions. Bottom: V1 and V2, bare through-hole boards with sockets for the ESP32 DevKit. Top, right to left: V3 with the first ideal-diode inputs, V4 with the ESP32-S3 module on the board, V5 for the stack.](../figures/boards_v1_v5.jpg){width=75%}
 
 #### Protection: PTC + TVS → eFuse
 
@@ -729,7 +730,7 @@ coasting phases — the motor is switched off while the wheels are still spinnin
 down, so the drivetrain turns at full speed with the PWM stage completely idle.
 Comparing driven against coasting windows at matched speed:
 
-| Drive-axle speed | Gyro σ driven | Gyro σ coasting | Ratio |
+| Drive-axle speed | Gyro σ driven [rad/s] | Gyro σ coasting [rad/s] | Ratio |
 | ---: | ---: | ---: | ---: |
 | 1–10 rad/s | 0.0042 | 0.0042 | 0.99 |
 | 10–20 rad/s | 0.0064 | 0.0067 | 1.05 |
@@ -757,8 +758,7 @@ Vibration isolation for the IMU would therefore buy nothing for localisation. Th
 is why the LiDAR and IMU are both bolted down rigidly, and why no damping was
 added.
 
-<!-- [FIGURE 11] Gyroscope noise per axis over drive-axle speed, with the coasting
-points overlaid on the driven points. Data: [data/mp3_noise_vs_speed.csv](../data/mp3_noise_vs_speed.csv). -->
+![Left: gyroscope noise per axis over drive-axle speed, log scale. Right: at the same speed, driven and coasting give the same noise.](../figures/imu_noise.svg)
 
 **The LiDAR is unaffected as well.** The sweeps in the following section also
 logged `/scan` (RPLIDAR S3, 3240 beams, 15 Hz). With the vehicle stationary and the
@@ -793,7 +793,7 @@ procedure ([`pwm_sweep`](../../src/esp_bridge/esp_bridge/pwm_sweep.py)), the sam
 stand, the same supply voltage and the same eight setpoints, so the runs are
 directly comparable.
 
-| v setpoint | Axle speed | Duty before → after | Pitch σ before → after | Change |
+| v setpoint | Axle speed | Duty before → after (0–1023) | Pitch σ before → after | Change |
 | ---: | ---: | ---: | ---: | ---: |
 | 0.2 m/s | 13.6 rad/s | 140 → 168 | 3.724 → 0.530 °/s | **−86 %** |
 | 0.4 m/s | 27.0 rad/s | 247 → 279 | 4.384 → 1.186 °/s | −73 % |
@@ -830,9 +830,7 @@ being fitted. The testable prediction is that duty returns to the pre-repair lev
 while the pitch noise stays at the post-repair level — which would confirm that the
 friction came from the adapter and not from the gear mesh. <!-- TODO measure: third sweep, same procedure -->
 
-<!-- [FIGURE 13] Pitch noise over axle speed, one curve per iteration, with the
-coasting points overlaid. Data:
-[data/mp3_before_after.csv](../data/mp3_before_after.csv). -->
+![Pitch noise and commanded duty before and after the gear repair, identical sweep.](../figures/gear_repair.svg)
 
 ## Calibration
 
@@ -897,7 +895,6 @@ Open measurements
 | ~~MP3~~ | ~~IMU noise against PWM duty~~ | Rosbag, wheels free | **Done** — §2.11. No PWM coupling; vibration only, and not on the yaw axis |
 | ~~MP3b~~ | ~~LiDAR scan quality against PWM duty~~ | Same sweeps, `/scan` | **Done** — §2.11. 1.5 mm at rest, ≤4.2 mm driving, no speed dependence |
 | MP4 | Pack discharge curves | IO1 telemetry, multimeter cross-check | §2.3 |
-| MP5 | Live battery swap, functional | Log + `uptime` | §2.4 |
 | MP6 | Servo bus turnaround | 2-channel oscilloscope | §2.10 |
 | MP7 | Rail droop at motor start | Oscilloscope, repeating start | §2.6 |
 
