@@ -54,7 +54,7 @@ Most of the software described in chapter 4 is a reaction to one of these rows.
 | Interface | What we found | Consequence |
 |---|---|---|
 | Steering linkage → control | servo-to-wheel curve not linear and not symmetric: full lock +21.9° left, −24.7° right at 0.35 m/s, 19.4° left at 0.75 m/s; right steers ~40 % more per servo percent | measured steering table per speed in the bridge; arcs planned with R ≥ 0.30 m, well above the drivable minimum |
-| Short wheelbase → control | first measured 241–260 ms from command to yaw rate (167 ms median over 55 runs later); with 0.10 m wheelbase only little phase margin, disturbances ring out with ~1 s period | dead-time prediction in both control laws |
+| Short wheelbase → control | about 250 ms from command to effect in the pose (servo, gyro, EKF, control loop); with 0.10 m wheelbase only ~28° phase margin, disturbances ring out with ~1 s period | dead-time prediction in both control laws |
 | Encoder → power | with the encoder closing the speed loop, the motor voltage no longer has to be constant | the 12 V motor rail was removed from the PCB (chapter 3) |
 | Jetson → power | the Jetson draws 76 % of the idle current; driving adds only 18 % | runtime is almost independent of speed, so speed is limited by control, not by energy |
 | Jetson CPU → perception | fusion, estimation and control share six cores (~92 % load); scans waiting in a queue made wall corrections 0.35–0.6 s late | fusion limited to 7 Hz, CPU load down to ~53 %; scan queue depth 1 and grid clustering for the latency |
@@ -75,15 +75,15 @@ mount, LiDAR height vs. wall height, ...) once chapter 2 is written. -->
 
 | Constraint | Consequence |
 |---|---|
-| Ties are broken by time (national final: same points as two other teams, 4th place on time) | faster driving needed a pose that does not depend on every single scan → EKF |
-| The time runs until the robot stands in the bay; the rules ask for no pause | no halt before parking; approach under closed-loop control instead of a stop and a blind move |
+| Ties are broken by time. At the German national final the sum of the best open and obstacle challenge times decided (same points as two other teams, 4th place on time); the international rules compare the points and then the time of the best obstacle round, the open challenge time only comes last | faster driving, above all in the obstacle challenge, needed a pose that does not depend on every single scan → EKF |
+| The time runs until the robot stands in the bay, the international rules ask for no pause. The German rules differ: a 3 s stop after three laps, the time is taken there, and parking only has to be finished within the 3 minutes | no halt before parking; approach under closed-loop control instead of a stop and a blind move |
 | Points before time: a run that fails costs more than a slow one | scan halts in lap 1 accepted although they cost time |
 | Colour is only reliable at standstill (frame rate 15.5 → 2.5 Hz, coloured points 38 → 2 % while driving) | scan halts in lap 1 only; map frozen after lap 1 |
 | Colour only reliable up to 1.60 m (red read as green beyond ~1.7 m) | votes from further away count as "something there" only |
 | Six CPU cores shared by fusion, estimation and control | CPU load while driving reduced from 91.7 % to 53.1 % (commit a14524e, runs 48/49) |
 | Wall corrections arrived 0.35–0.6 s after their scan (30–50° heading in a 90°/s corner) | queue depth 1 and grid clustering; remaining latency not compensated |
 | The field is fourfold symmetric | global scan matching finds poses rotated by 90°; the start pose must come from start detection |
-| Steering: 0.10 m wheelbase, 19–25° full lock, ~170–260 ms dead time | smallest drivable radius ~0.22 m; arcs ≥ 0.30 m; dead-time prediction |
+| Steering: 0.10 m wheelbase, 19–25° full lock, ~250 ms dead time | smallest drivable radius ~0.22 m; arcs ≥ 0.30 m; dead-time prediction |
 | LiDAR blind below 0.15 m | encoder moves in the bay |
 | Start procedure (rules 9.10–9.14): one switch, one start button, nothing measured before it | container and controller start from the autostart (boot 85–90 s) and wait for the button; direction, position and bay are detected after it |
 
@@ -102,13 +102,13 @@ against recorded bags first. -->
 | Only the newest scan (queue depth 1) | process every scan | a late wall correction pulls the heading back in a corner | corrections were 0.35–0.6 s late, 30–50° heading in a 90°/s corner |
 | Colour per LiDAR point (fusion) | YOLOv11n on the camera image (national final) | lower latency; distance and colour in one measurement; camera and LiDAR see the same 270°, so a pixel exists for every LiDAR point | the old set-up no longer exists, so no direct latency comparison; field of view: 3 vs. 6 of 6 seats at the scan halt (fov_coverage) |
 | Fisheye camera (270° horizontal view) | 120° CSI camera | sees the next straight before the corner | 3 vs. 6 of 6 seats at the scan halt |
-| RPLIDAR S3 | LD09 | higher resolution and scan rate at a similar size | – |
+| RPLIDAR S3 | STL-19P (used first), LakiBeam 1S | resolution, scan rate and range on the black walls; the LakiBeam is too large and blind to the rear | comparison table in [chapter 3](03-power-sensors.md#lidar-selection) |
 | Colour limit 1.60 m | colour at any distance | beyond ~1.7 m red is read as green | test with a red pillar: 10/0 red/green votes at 1.2–1.6 m, 2/8 at 1.6–2.0 m, 0/16 beyond; pooled over 59 bags green is read as red for 25 % of its points at 1.4 m |
 | See-through clearing of seats | keep every seat once occupied | phantom pillars caused unnecessary lane changes | replayed on the failed bags with phantom pillars: removed them there |
-| Stanley on straights | PD on lateral and heading error | one law for straights and ramps, steering angle directly | – |
-| Dead-time prediction | tune gains only | the dead time leaves little phase margin with the short wheelbase | simulated: ±2° instead of ±18° steering oscillation; measured dead time 167 ms (55 runs), the controller still assumes 260 ms |
+| One extended Stanley law for everything driven along a line (straights, obstacle ramps, start straight, parking approach); own laws for corners and for reversing | PD on lateral and heading error commanding a yaw rate; Stanley also in the corners | Stanley turns lateral and heading error directly into a steering angle for a front-steered car. Extended by a speed-scaled heading gain, the curvature feed-forward of the path, the dead-time prediction and a smoothed pose. A corner needs a constant feed-forward and ends on a heading, not at a point; Stanley is unstable backwards | the PD law had problems with the lateral offset; see the next rows for the extensions |
+| Dead-time prediction | tune gains only | the dead time leaves little phase margin with the short wheelbase | simulated: ±2° instead of ±18° steering oscillation; 260 ms set, effective dead time measured at 235–250 ms |
 | Curvature command in corners | feed-forward with the nominal corner speed | from standstill the old formula gave 58° steering (full lock) | full lock in corners 1 and 3 before the change |
-| Feed-forward blended out over 20° | 7° | 7° at 1.5 rad/s are 80 ms, less than the dead time | simulated overshoot 1° instead of 6.5°; before, it kept turning 13–34° |
+| Feed-forward of the arc faded out over the last 20° before the exit heading | fading it out over only the last 7° (previous value) | at 1.5 rad/s the car turns 7° in 80 ms, less than the dead time: the steering still held the full arc curvature when the car reached the exit heading | before, it kept turning 13–34° past the exit; simulated overshoot 1° instead of 6.5° |
 | Tangential arcs, cosine ramps | front-loaded ramp | constant curvature = constant feed-forward; ramps tangential at both ends | front-loaded ramp: ~15° kink |
 | Collect detections over several views while driving, halts in lap 1 only | stop at the end of every straight in every lap | stopping costs time; one view cannot resolve two pillars in one row | TODO A/B test scan halt |
 | No halt before parking | stop, then park (old behaviour) | the time runs until the robot is parked | – |
@@ -187,7 +187,7 @@ The most important cycles:
 | Battery voltage not measured | the reported value is a constant 17.518 V in all bags; a link between charge and failures cannot be checked | – | see chapter 3 |
 | Camera re-enumerates on USB | no colour | – | fixed device name via udev |
 | ESP reboot / clock jump | wrong time stamps | time sync detects the reboot | resync |
-| Wall contact | robot pushes against the wall | LiDAR < 4 cm in front | stop and back up (max. 2 per corner) |
+| Wall contact | robot pushes against the wall | LiDAR < 4 cm in front | stop, back up and re-plan; at most two manoeuvres per corner, then emergency stop |
 
 <!-- CHECK (team): the build chat reports a last-move timeout of 4 s against the
 wall and a first unpark move that drove ~5 cm backwards because the ESP kept

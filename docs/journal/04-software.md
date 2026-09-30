@@ -394,33 +394,38 @@ turns both errors directly into a steering angle for a front-steered car.
 
 Two additions came from test runs:
 
-- **Dead-time prediction.** In the first two measurements (cross-correlation of
-  the commanded yaw rate with the gyro) we found 241 and 260 ms and a yaw-rate
-  gain of 0.84. With the short wheelbase (0.10 m) that leaves only about 28°
-  phase margin, and every disturbance rang out with a period of about 1 s. The
-  controller therefore computes with the pose the robot will have when the
-  command takes effect. In simulation the steering oscillation dropped from
-  ±18° to ±2°. The later evaluation of all bags gives a lower value: 167 ms
-  median over 55 runs (IQR 160–178 ms), stable over 18 days, while the
-  controller still assumes 260 ms. The two numbers do not measure exactly the
-  same thing: the bag value runs from the command to the gyro, while the
-  prediction starts from the latest EKF pose, which is itself already a few
-  tens of milliseconds old (sensor transport, filter, 50 Hz output, 30 Hz
-  control tick). The right horizon therefore lies somewhat above 167 ms, but
-  most likely below 260 ms; the value was set after the first measurement and
-  has not been re-tuned since. Since the steering calibration was updated
-  (22.09.), the measured yaw-rate gain is also 1.13 instead of 0.84, i.e. the
+- **Dead-time prediction.** With the short wheelbase (0.10 m) the heading
+  reacts fast (3.5 rad/s yaw rate per radian of steering), and with the delay
+  between command and reaction only about 28° phase margin remained: every
+  disturbance rang out with a period of about 1 s. The controller therefore
+  predicts the pose for the moment a command computed now takes effect: it
+  integrates the commands of the last 260 ms (`steer_dead_time`) with the
+  measured steering gain. In simulation the steering oscillation dropped from
+  ±18° to ±2°. The 260 ms come from two early measurements (241 and 260 ms) and
+  were not re-tuned; four later runs, evaluated by cross-correlation, confirm
+  them within 10 %:
+  - command → gyro reaction: 190 ms on average, including the travel time of
+    the steering servo (the first reaction comes earlier);
+  - gyro → EKF pose: another 26–34 ms (15 ms sorting window, 50 Hz output);
+  - EKF pose → used by the controller (30 Hz): another ~16 ms on average.
+
+  The effective dead time is therefore about 235–250 ms, and the 260 ms set in
+  the controller lie 10–25 ms above it. The evaluation of all bags gives
+  167 ms (median over 55 runs) for the first stage alone, measured on the
+  recorder's time stamps; with the two other stages that would be about
+  210 ms. Since the steering calibration was updated (22.09.), the measured
+  yaw-rate gain is 1.13 instead of the 0.84 used in the prediction, i.e. the
   car turns in more than the predictor assumes.
 - **Smoothed steering pose.** Wall corrections move the pose by 1–1.5 cm several
   times per second, which gave 2–3° steering jumps on calm straights. For the
   steering law they are blended in over 0.30 s; larger jumps are taken over at
   once.
 
-![Steering dead time per run: measured 167 ms (median) against the 260 ms the controller assumes.](../figures/dead_time_across_runs.png)
+![Delay from the command to the gyro reaction per run, from all bags (median 167 ms). The 260 ms of the controller also cover the delays of the EKF and the control loop.](../figures/dead_time_across_runs.png)
 
-<!-- CHECK (team): re-tune steer_dead_time (~0.17 s + pose age) and
-steer_gain_pred (~1.1) with a test corner? If yes, replace the last sentences
-of the dead-time paragraph with the new values. -->
+<!-- CHECK (team): the four-run measurement (190 ms) and the bag evaluation
+(167 ms) differ by ~25 ms for the same stage. Which method / time stamps did
+the four runs use? And: steer_gain_pred 0.84 vs. measured 1.13, re-tune? -->
 
 **Corners** are tangential circular arcs between the entry and exit lane lines
 and are driven in the state `TURN` with their own law: the feed-forward
@@ -670,8 +675,8 @@ If after: add it to the table and to the known limitations. -->
 | Gyro failure (I2C) | no messages > 0.5 s or exact zeros > 1 s → `gyro_ok = false`; the run does not start without it |
 | Odometry gaps | the controller repeats its last command; the bridge stops the motor after 0.5 s without `/ekf/odom` or `/cmd_vel`; the ESP itself stops after 5 s without a packet |
 | Contradicting direction | unparking does not start |
-| Turn-in point missed | re-anchor the arc; if not drivable: back up and re-plan (max. 2 per corner); more than 0.5 m past or 0.6 m beside: emergency stop |
-| Touching a wall or pillar | 3 LiDAR points within 4 cm in front of the nose: stop and back up (max. 2 per corner) |
+| Turn-in point missed | re-anchor the arc; if not drivable: back up and re-plan (same budget of two manoeuvres per corner as below); more than 0.5 m past or 0.6 m beside: emergency stop |
+| Touching a wall or pillar | 3 LiDAR points within 4 cm in front of the nose: stop, back up 8–40 cm while steering towards the direction of the straight, re-plan and drive on. At most two such manoeuvres per corner (the counter is shared with the missed turn-in and reset after every corner); a third one ends the run with an emergency stop instead of pushing against the wall |
 | Robot moved before the start, map of the previous run | before every run the controller restarts ekf_node and scan_processor and waits up to 40 s for gyro, map and localisation `ok` |
 | Duplicate nodes | ekf_node and the controller check at start whether their output topic is already served |
 
@@ -738,7 +743,7 @@ turn-in point was missed by 1.46 m sideways.
 ![Run parken_test_42: emergency stop after corner 3.](../figures/trajectory_parken_test_42.png)
 
 Almost all of these runs were driven with a cruise speed of 0.35 m/s; the
-faster speed profile (0.75 m/s on straights) was only set on 28.09. (commit
+faster speed profile (0.75 m/s on straights) was only set afterwards (commit
 3f3a22d).
 
 <!-- CHECK (team): which speed and lap times did you drive after 28.09.? The
