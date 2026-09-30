@@ -244,6 +244,12 @@ closing the speed loop, the motor supply voltage no longer needs to be constant 
 the controller compensates for it.
 
 This removed an entire regulator, its inductor, its capacitors and its board area.
+
+The motor itself is a 12 V type. Because the speed loop sets the duty, the
+effective motor voltage follows the demanded speed rather than the pack voltage:
+at the highest setpoint used, 1.6 m/s, the controller commands about 90 % duty,
+which at 14.8 V is roughly 13.3 V — slightly above the rating, at the top of the
+speed range only.
 It is the clearest example in this project of a software capability paying for
 itself in hardware.
 
@@ -522,7 +528,10 @@ with 4.7 kΩ pull-ups to 3.3 V. Motor power, ground, encoder supply and both
 encoder channels share a single 6-pin JST connector (J5), so the drivetrain
 attaches with one cable.
 
-<!-- TODO: highest expected count rate 408 * v / (pi * d_wheel) - needs the wheel diameter, compare against the 15.9 kHz corner frequency. -->
+The fastest axle speed measured in the sweeps is 121 rad/s, i.e. 19.3 revolutions
+per second. With 102 pulses per channel and revolution that is about 2 kHz per
+channel — eight times below the 15.9 kHz corner frequency, so the filter removes
+spikes without touching the signal.
 
 ## Wiring
 
@@ -565,7 +574,8 @@ The LiDAR is never active on this path — it only runs when the Jetson is power
 
 ![The main PCB stacked on the Jetson in the vehicle. The background of this photo was generated with AI, so the image may contain artefacts.](../figures/board_stack.jpg){width=55%}
 
-<!-- TODO: cable lengths for the wiring diagram -->
+Sensor and actuator cables are about 10 cm long, the servo cable 20 cm. The I²C
+pair to the IMU is twisted.
 
 ### Steering servo — half-duplex interface
 
@@ -671,7 +681,94 @@ replaced in the following revisions by a **TPS259230 eFuse**:
 The deliberate split: **the Jetson owns all perception, the ESP32 owns all
 actuation.** No sensor used for perception is routed through the microcontroller.
 
-### LiDAR — RPLIDAR S3 via on-board USB bridge
+### Sensor set
+
+| Sensor | Task | Rate | Interface | Position |
+| --- | --- | --- | --- | --- |
+| Slamtec RPLIDAR S3 | walls, pillars, localisation | 15 Hz, ≈2 520 points per scan | UART 1 Mbaud → on-board CP2102N → USB | front, centred on the front axle, ≈7 cm ahead of the vehicle centre; scan plane 55 mm above the floor |
+| PiCam360, 270° fisheye | colour of the pillars | 15 fps, 1280 × 960 | USB | above the LiDAR, lens facing the ceiling |
+| Bosch BNO055 | yaw rate for the EKF | 100 Hz | I²C to the Jetson | on the rear axle |
+| Hall encoder | wheel speed and distance | 408 counts per wheel revolution | ESP32, IO15/IO16 | on the drive motor |
+| Voltage and current sense | battery and motor telemetry | telemetry rate | ESP32 ADC, IO1/IO8 | on the board |
+
+**What was left out, and why.** Ultrasonic distance sensors were rejected as too
+imprecise and awkward to use: the LiDAR already measures every direction at once.
+The orange and blue lines on the floor are not used either. The LiDAR, in
+combination with the EKF, localises the vehicle in the field
+([chapter 4](04-software.md)), so a line sensor would add a second source for
+information the vehicle already has.
+
+### LiDAR: selection
+
+Three candidates were compared:
+
+| | InnoMaker STL-19P | RichBeam LakiBeam 1S | Slamtec RPLIDAR S3 |
+| --- | --- | --- | --- |
+| Principle | direct time of flight | direct time of flight | direct time of flight |
+| Field of view | 360° | 270°, 90° blind to the rear | 360° |
+| Range | 12 m | ≥ 10 m at 10 % reflectivity | 15 m at 10 % reflectivity |
+| Measurement rate | 5 000 /s | — | 32 000 /s |
+| Scan rate | 10 Hz | 10 or 20 Hz | 10–20 Hz, used at 15 Hz |
+| Angular resolution | ≈0.7° at 10 Hz (5 000 / 10 per turn) | 0.2° at 10 Hz | 0.1125° |
+| Interface | UART | Ethernet (UDP), 12 V supply | UART up to 1 Mbaud |
+| Price | 79 € | 309 € | 650 € |
+| Outcome | used first; too slow, unreliable on the black walls | rejected: too large and too tall, rear blind zone | chosen |
+
+Sources: manufacturer data
+([STL-19P](https://www.amazon.de/dp/B09VKZ9YNT),
+[LakiBeam 1S](https://www.dfrobot.com/product-2667.html),
+[RPLIDAR S3](https://www.mouser.com/datasheet/2/744/datasheet_SLAMTEC_rplidar_datasheet_S3_v1_0_en-3314332.pdf));
+prices as paid.
+
+**The STL-19P set the pace of the whole vehicle.** In the first software
+generation the control loop was driven by incoming scans, so its 10 Hz were the
+10 Hz of the vehicle — too slow. It also returned unreliable ranges on the black
+walls. Today the EKF runs at 100 Hz on gyro and encoder and no longer waits for
+scans, but a higher scan rate still means fresher and denser position fixes.
+
+**The LakiBeam 1S would have been capable**, but it is too large and too tall
+for the chassis, and its 90° blind zone to the rear made us unsure for a
+vehicle that has to leave a parking bay backwards and localise on walls in every
+direction.
+
+**The RPLIDAR S3** covers all 360°, keeps 15 m of range on 10 % reflectivity —
+the black walls — and at 15 Hz runs in its DenseBoost mode, which is the
+setting with the best accuracy; on our vehicle it delivers ≈2 520 valid points
+per turn. At 650 € it is the most expensive part of the vehicle, which is the
+reason the 5 V rail it hangs on is protected by the eFuse (see
+[Protection](#protection)). The black walls remain a small residual problem.
+
+### LiDAR: placement
+
+**Height.** Walls and pillars are 100 mm high (general rules, 50 × 50 × 100 mm
+pillars). The scan plane has to cut both, and it must not touch the floor. At
+55 mm it keeps 45 mm to the top of the walls and 55 mm to the floor. Across the
+field, at 3 m distance, that leaves
+
+$$
+\arctan\frac{45\,\mathrm{mm}}{3\,\mathrm{m}} \approx 0.86^\circ
+\quad\text{upwards}, \qquad
+\arctan\frac{55\,\mathrm{mm}}{3\,\mathrm{m}} \approx 1.05^\circ
+\quad\text{downwards}
+$$
+
+of tilt before the beam passes over a far wall or into the floor. That is why
+55 mm is the sweet spot — close to the middle of the band — and why the sensor is
+bolted down rigidly: a mount that tilts by one degree loses the far walls.
+
+**Position.** Front and centred, on the front axle, about 7 cm ahead of the
+vehicle centre.
+
+**Field of view.** Measured on the vehicle: about **305° are usable**. Two blind
+sectors are fixed to the vehicle — they appear at the same angles in independent
+recordings — at −38° to −17° and +47° to +59°. They are the cables to the PCB
+and the camera holder. The scan processor rotates the scan into the vehicle
+frame. The previous chassis left about 250°.
+
+**Noise.** A few millimetres, independent of drive speed and motor operation —
+see [Interference](#interference-measured-and-it-is-mechanical).
+
+### LiDAR: connection
 
 The LiDAR is *not* connected to the ESP32. It connects to J14, and its UART is
 converted by an on-board **CP2102N** (U3) into USB, which leaves the board through
@@ -689,23 +786,69 @@ Routing the LiDAR through the board's own USB bridge satisfies all three: the
 sensor appears to the Jetson as an ordinary USB serial device (consumed by
 `sllidar_ros2`), and the vehicle needs exactly one USB cable internally.
 
-The LiDAR is rigidly bolted to the chassis, with no vibration isolation. This has
-caused no measurable problems.
-
-### IMU — BNO055 on the Jetson's I²C bus
-
-The BNO055 breakout connects to J15 and is routed straight through to the Jetson's
-40-pin header (pins 3/5, I²C), at address **0x28**. It is deliberately *not* on the
-ESP32: the IMU is a perception sensor, and putting it on the microcontroller would
-have added its data to the already-loaded serial link to the Jetson.
-
-The I²C run is under 10 cm and twisted. Pull-ups are provided by the breakout.
-
 ### Camera
 
-USB camera (PiCam 360 class, fisheye). A CSI version with the required field of
-view exists only for the Raspberry Pi, which made USB the only option. Handled in
-[chapter 4](04-software.md).
+A **PiCam360** with a 270° fisheye lens, facing the ceiling. It sees the full
+circle around the vehicle and reaches 45° below the horizon. The lens sits 5 cm
+above the scan plane, at about 105 mm — practically at the top edge of the walls.
+The colour fusion relies on exactly this: seen from that height the top edge of
+a wall projects onto a circle of constant radius in the image.
+
+**Why this camera.** The comparison against the previous 120° camera — which
+seats of the next straight are visible before a corner — is in
+[chapter 4](04-software.md). A CSI camera with this field of view exists only for
+the Raspberry Pi, which made USB the only option.
+
+**Why no neural network.** The first vehicle detected pillars with a YOLO model:
+about 200 ms from image to result. The current pipeline projects every LiDAR
+point into the image and reads its colour, in 10–20 ms. Every pillar then has a
+distance and a colour at the same time.
+
+**Light.** Exposure (50 ms), gain and white balance are fixed at start-up
+(`src/start_robot.sh`). With automatic exposure the colour detection fell apart
+whenever the camera re-enumerated. The exposure is deliberately bright: green
+pillars otherwise sink towards black. Direct sunlight remains the camera's weak
+spot for the same reason.
+
+### IMU
+
+**Why the BNO055.** It fuses gyroscope, accelerometer and magnetometer on the
+chip and delivers a bias-compensated yaw rate. A cheaper IMU used before drifted
+too much. The EKF uses only the yaw rate at 100 Hz, scaled by a factor from a
+calibration over five full turns ([chapter 4](04-software.md)).
+
+**Measured drift.** Standing still for 141 s, the integrated yaw rate ran to
+−4.6°, i.e. **−1.95° per minute**, or about 6° over a three-minute round. That is
+small, but not zero, and it is why the heading is corrected continuously from the
+LiDAR ([chapter 4](04-software.md)).
+
+**Position.** On the rear axle. It is the one place not covered by the Jetson and
+the farthest from the rest of the electronics. For the EKF the position costs
+nothing: the yaw rate is the same anywhere on a rigid chassis.
+
+**Connection.** The breakout connects to J15 and is routed straight through to
+the Jetson's 40-pin header (pins 3/5, I²C) at address **0x28**. It is deliberately
+*not* on the ESP32: the IMU is a perception sensor, and on the microcontroller its
+data would have loaded the serial link to the Jetson. The I²C run is under 10 cm
+and twisted; the breakout provides the pull-ups.
+
+**Failure.** The only dropouts seen came from a loose cable. The EKF monitors the
+gyro (no message for 0.5 s, or exactly zero on all axes for 1 s) and carries on
+with the encoder and the LiDAR.
+
+### Wheel encoder
+
+A Hall encoder on the drive motor (BORDSTRACT 12 V, 1 000 rpm gear motor). It was
+already fitted, and Hall sensing is the most reliable option. Counting both edges
+of both channels gives 408 counts per wheel revolution; with the 32 mm wheel
+that is
+
+$$
+\frac{\pi \cdot 32\,\mathrm{mm}}{408} \approx 0.25\,\mathrm{mm}\ \text{per count}.
+$$
+
+The electrical interface and its filter are described under
+[Encoder interface](#encoder-interface).
 
 ### Interference: measured, and it is mechanical
 
@@ -879,6 +1022,9 @@ src/camera_lidar_fusion/README.md; BNO055 calibration status
 | Jetson–ESP link drops | Vehicle drives uncontrolled | Checksummed protocol, watchdog zeroes the motor | Implemented |
 | Abrupt Jetson power loss | Filesystem corruption | Jetson intentionally not on the main switch; hot-swap path | Implemented |
 | Motor stalls against a wall | Overheating, energy loss | Encoder-based stall detection | Implemented. Current sense on IO8 is instrumentation only — see [Motor drive](#why-current-is-not-used-for-collision-detection) |
+| IMU dropout | Heading from the gyro missing | EKF gyro monitor (0.5 s timeout, 1 s of zeros); EKF continues on encoder and LiDAR | Implemented; seen only with a loose cable |
+| Weak LiDAR returns on the black walls | Gaps in the wall scan | RPLIDAR S3 chosen for 15 m range at 10 % reflectivity | Small residual problem |
+| Sunlight on the camera | Green pillars read as black | Fixed bright exposure, pinned white balance, white-point correction | Residual in direct sunlight |
 | Inrush at power-on | Rail collapse, connector arcing | eFuse dV/dT (C19 = 180 pF) | Implemented |
 | Drivetrain run-out | Vibration into the IMU, mechanical wear | Gear mounting repaired; measured, see [Iteration](#iteration-locating-and-removing-the-vibration-source) | Pitch noise down 23–86 %, third iteration pending |
 
