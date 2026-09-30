@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,10 @@ CHAPTER_LINK = re.compile(r'\[([^\]]+)\]\((\d\d-[\w-]+\.md)(#[\w-]+)?\)')
 # HTML labels of mermaid's SVG, and plain SVG text gets wrapped mid-word.
 MERMAID_CONFIG = {'theme': 'neutral'}
 MERMAID_SCALE = '3'
+# Diagrams are drawn at most 75 % of the text width, and never taller than
+# DIAGRAM_MAX_HEIGHT - a tall flowchart at full width runs off the page.
+TEXT_WIDTH_CM = 21.0 - 2 * 2.2      # A4 minus the margins in metadata.yaml
+DIAGRAM_MAX_HEIGHT_CM = 15.0
 # Words that almost never show up in English text. Used to find paragraphs
 # that still have to be translated before the submission.
 GERMAN_HINT = re.compile(
@@ -82,6 +87,14 @@ def render_mermaid(source, mmdc, out_dir):
     return img
 
 
+def diagram_width(img):
+    """Width in percent of the text width, capped so the height fits."""
+    with open(img, 'rb') as fh:
+        w, h = struct.unpack('>II', fh.read(24)[16:24])   # PNG IHDR
+    fit = 100.0 * DIAGRAM_MAX_HEIGHT_CM * w / h / TEXT_WIDTH_CM
+    return int(min(75, fit))
+
+
 def join_chapters(mmdc):
     mermaid_dir = BUILD / 'mermaid'
     mermaid_dir.mkdir(parents=True, exist_ok=True)
@@ -93,7 +106,8 @@ def join_chapters(mmdc):
             if mmdc is None:
                 return match.group(0)
             img = render_mermaid(match.group(1), mmdc, mermaid_dir)
-            return '![](%s){width=75%%}\n' % os.path.relpath(img, BUILD)
+            return '![](%s){width=%d%%}\n' % (os.path.relpath(img, BUILD),
+                                              diagram_width(img))
 
         text = MERMAID_BLOCK.sub(replace, text)
         # Links between chapter files only make sense on GitHub.

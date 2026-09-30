@@ -577,7 +577,7 @@ half-duplex asynchronous protocol. Current draw is 0.1 A typical and 0.2 A
 maximum, which the 5 V rail absorbs without measurable sag.
 
 ```mermaid
-flowchart TB
+flowchart LR
   TX["ESP32-S3<br/>IO17 TX"] --> U8["U8 LVC1G126<br/>OE active high"]
   TX --> Q2["Q2 PNP via R7<br/>makes TXEnable"]
   Q2 -- TXEnable --> U8
