@@ -1,0 +1,5 @@
+# EXAMPLE DATA -- FAKE NUMBERS, only for trying plot_manual.py --example
+bag,front_axle_cm,rear_axle_cm,bay_front_cm,bay_rear_cm,notes
+example_1,6.4,5.9,3.1,4.0,EXAMPLE
+example_2,7.8,5.1,2.2,5.1,EXAMPLE
+example_3,5.2,5.6,,,EXAMPLE

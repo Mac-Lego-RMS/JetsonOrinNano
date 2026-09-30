@@ -121,7 +121,7 @@ def main(argv=None):
                 failures.append('plot_parking')
         if not step('plot_steer_lut', plot_steer_lut.run, ['--out-dir', str(fig_dir)]):
             failures.append('plot_steer_lut')
-        if not step('plot_manual', plot_manual.run, ['--out-dir', str(fig_dir)]):
+        if not step('plot_manual', plot_manual.run, ['--out-dir', str(fig_dir), '--runs-csv', str(runs_csv)]):
             failures.append('plot_manual')
         print(f'\nmake_all finished: {len(failures)} failed step(s)'
               + (': ' + ', '.join(failures) if failures else ''))

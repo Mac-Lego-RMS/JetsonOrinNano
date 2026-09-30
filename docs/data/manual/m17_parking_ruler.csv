@@ -1,0 +1,7 @@
+# M17 parking measured with a ruler, one row per parked run. Measure BEFORE touching the car.
+# bag: bag name exactly as recorded (joins with docs/data/runs.csv).
+# front_axle_cm / rear_axle_cm: outer wall -> side of the car, at the front / rear axle,
+#   always to the same edge of the chassis (the two points are 10.5 cm apart).
+# bay_front_cm / bay_rear_cm (optional): gap between the car and the front / rear magenta wall.
+# Example values are in m17_parking_ruler_example.csv -- do NOT put fake rows here.
+bag,front_axle_cm,rear_axle_cm,bay_front_cm,bay_rear_cm,notes

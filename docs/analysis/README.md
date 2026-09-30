@@ -54,7 +54,7 @@ contains many bags, or a CSV export directory written by `bag_export.py`.
 | `plot_colour_distance.py` | `python3 plot_colour_distance.py BAG...` - M4 colour classification vs range (needs `/camera_lidar/colored_scan`) |
 | `plot_steer_lut.py` | `python3 plot_steer_lut.py [--calib ...steer_calib.json]` - M12 steering characteristic, no bag needed |
 | `plot_parking.py` | `python3 plot_parking.py [../data/runs.csv] [--range-size 10]` - M17 parking results over the runs |
-| `plot_manual.py` | `python3 plot_manual.py [--example] [--true-frame field]` - M1 / M3 from the CSVs in `docs/data/manual/`; `--gyro-integral BAG --t0 T --t1 T` helps filling M3 |
+| `plot_manual.py` | `python3 plot_manual.py [--example] [--true-frame field] [--side-to-centre-cm W]` - M1 / M3 / M17 ruler from the CSVs in `docs/data/manual/`; `--gyro-integral BAG --t0 T --t1 T` helps filling M3 |
 | `make_all.py` | `python3 make_all.py BAGS...` - everything above |
 
 All plot tools take `--out-dir` (default `docs/figures/`) and `--msg-dir`.
@@ -76,6 +76,7 @@ Shared code: `bagio.py` (reading, flattening, topic names), `metrics.py`
 | M14 | Serial latency and time sync | `plot_latency.py`, runs.csv `latency_*` | `latency_<bag>`, `clocksync_<bag>` |
 | M15 | CPU / thermal | `plot_cpu.py`, runs.csv `cpu_*`, `temp_max_c` | `cpu_<bag>` |
 | M17 | Parking | `summarize_runs.py` -> `plot_parking.py` | `parking` |
+| M17 | Parking measured with a ruler vs the robot's estimate | `plot_manual.py` + `m17_parking_ruler.csv` + runs.csv | `manual_m17_parking` |
 | - | Trajectory (replaces an overhead camera) | `plot_trajectory.py` | `trajectory_<bag>`, `trajectory_laps_<bag>` |
 | - | Run summary | `summarize_runs.py` | `data/runs.csv` |
 
@@ -164,6 +165,18 @@ Definitions used in `runs.csv` (see `summarize_runs.py`):
   `integrated_deg` with `python3 plot_manual.py --gyro-integral BAG --t0 T0 --t1 T1`
   (raw /bno055/imu, standing still before T0 and after T1). Result:
   scale = 360 N / integrated_deg vs |GYRO_SCALE| = 0.9674 in `ekf_node.py`.
+
+**M17 - parking measured with a ruler** (`m17_parking_ruler.csv`)
+- After every parked run, before anybody touches the car: measure the distance
+  from the outer wall to the side of the car at the front axle and at the rear
+  axle, always to the same edge of the chassis (`front_axle_cm`,
+  `rear_axle_cm`). Optionally the gap from the car to the front and rear
+  magenta wall (`bay_front_cm`, `bay_rear_cm`). Put the bag name in `bag`.
+- Result: axle difference |front - rear| against the 2 cm rule and the heading,
+  each compared with the robot's own estimate from runs.csv (the
+  "EINGEPARKT/PARKED" log line). Measure the half width of the car at the rear
+  axle once and pass it as `--side-to-centre-cm` to compare the distance of
+  base_link to the outer wall as well.
 
 The `*_example.csv` files contain FAKE numbers for trying the tool
 (`plot_manual.py --example`); the real templates contain only the header.

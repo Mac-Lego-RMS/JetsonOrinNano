@@ -272,7 +272,10 @@ def test_steer_lut_parking_manual(env):
     assert abs(r['m3_encoder'][0] - 0.0150) < 0.0002
     assert abs(r['m3_gyro'][0] - 0.9675) < 0.002
     assert len(r['m1']) == 4 and (r['m1']['pos_err_cm'] < 3).all()
-    for stem in ('manual_m1_pose', 'manual_m3_encoder', 'manual_m3_gyro'):
+    pk = r['m17_parking']                               # no matching runs.csv: ruler values only
+    assert len(pk) == 3 and int(pk['ruler_within_2cm'].sum()) == 2
+    assert abs(pk['ruler_axle_diff_cm'].iloc[1] - 2.7) < 1e-9 and pk['park_axle_diff_cm'].isna().all()
+    for stem in ('manual_m1_pose', 'manual_m3_encoder', 'manual_m3_gyro', 'manual_m17_parking'):
         figs_exist(out, stem)
     deg = plot_manual.run(['--gyro-integral', str(env['de'])])['integrated_deg']
     assert abs(deg - 3 * 360 / 0.9674) < 5            # 3 CW laps, raw sign/scale

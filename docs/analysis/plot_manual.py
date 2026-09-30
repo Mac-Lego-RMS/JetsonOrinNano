@@ -26,10 +26,23 @@ Files (lines starting with '#' are comments and ignored):
          0.9674 in src/ekf/ekf/ekf_node.py. integrated_deg = |integral of the
          RAW /bno055/imu angular_velocity.z| in degrees (no scale applied);
          --gyro-integral BAG prints it for a bag (between --t0 and --t1).
+  m17_parking_ruler.csv    bag, front_axle_cm, rear_axle_cm, bay_front_cm,
+                           bay_rear_cm, notes
+      -> the parked car measured with a ruler: distance from the outer wall
+         to the side of the car at the front and at the rear axle (the same
+         edge of the chassis, the two points are PARK_WHEELBASE apart).
+         axle difference = |front - rear| (WRO rule: at most 2 cm), heading
+         = atan2(front - rear, wheelbase), positive = nose away from the
+         outer wall. bay_front_cm / bay_rear_cm (optional): gap between the
+         car and the front / rear magenta wall. Joined on `bag` with runs.csv
+         (--runs-csv) to compare with the robot's own estimate. With
+         --side-to-centre-cm (half the car width at the rear axle) the rear
+         value is also compared with park_dist_outer_cm (base_link).
 --example uses the *_example.csv files (fake numbers, for trying the tool).
 
-Figures: manual_m1_pose, manual_m3_encoder, manual_m3_gyro. Printed: mean /
-max errors, r_eff and gyro scale with their spread.
+Figures: manual_m1_pose, manual_m3_encoder, manual_m3_gyro,
+manual_m17_parking. Printed: mean / max errors, r_eff and gyro scale with
+their spread, parking ruler vs EKF.
 """
 import argparse
 import math
@@ -42,7 +55,8 @@ import pandas as pd
 import bagio
 import style
 from bagio import T
-from robot_constants import GYRO_SCALE, R_EFF, RAD_PER_TICK_DEFAULT, START_POSES, field_to_map
+from robot_constants import (GYRO_SCALE, PARK_AXLE_RULE_CM, PARK_WHEELBASE, R_EFF,
+                             RAD_PER_TICK_DEFAULT, START_POSES, field_to_map)
 
 MANUAL_DIR = bagio.DEFAULT_DATA_DIR / 'manual'
 
@@ -144,6 +158,85 @@ def m3_gyro(df, out_dir, src):
     return m, s
 
 
+def m17_parking(df, out_dir, src, runs_csv=None, side_to_centre_cm=None):
+    df = df.copy()
+    df['bag'] = df['bag'].astype(str).str.strip()
+    d = df['front_axle_cm'] - df['rear_axle_cm']
+    df['ruler_axle_diff_cm'] = d.abs()
+    df['ruler_heading_deg'] = np.degrees(np.arctan2(d, PARK_WHEELBASE * 100))
+    df['ruler_within_2cm'] = df['ruler_axle_diff_cm'] <= PARK_AXLE_RULE_CM + 1e-9
+    ekf_cols = ['park_axle_diff_cm', 'park_heading_deg', 'park_dist_outer_cm',
+                'park_bay_front_cm', 'park_bay_rear_cm']
+    runs = pd.read_csv(runs_csv) if runs_csv and Path(runs_csv).exists() else None
+    if runs is not None:
+        runs = runs[['bag'] + [c for c in ekf_cols if c in runs]].copy()
+        runs['bag'] = runs['bag'].astype(str).str.strip()
+        df = df.merge(runs, on='bag', how='left')
+    for c in ekf_cols:
+        if c not in df:
+            df[c] = np.nan
+    have_ekf = df['park_axle_diff_cm'].notna()
+
+    fig, (a1, a2) = style.figure(1, 2, width=8.0, height=3.4)
+    x = np.arange(len(df))
+    a1.axhline(PARK_AXLE_RULE_CM, color=style.INK_2, lw=0.9)
+    a1.text(len(df) - 0.6, PARK_AXLE_RULE_CM, 'rule: 2 cm ', color=style.INK_2, fontsize=7, va='bottom', ha='right')
+    a1.scatter(x, df['ruler_axle_diff_cm'], s=40, color=style.CAT[0], edgecolors=style.SURFACE,
+               linewidths=1.2, zorder=3, label='ruler')
+    if have_ekf.any():
+        a1.scatter(x[have_ekf], df.loc[have_ekf, 'park_axle_diff_cm'], s=40, facecolors='none',
+                   edgecolors=style.CAT[1], linewidths=1.4, zorder=3, label='robot estimate (EKF)')
+    a1.set_xticks(x)
+    a1.set_xlim(-0.6, len(df) - 0.4)
+    a1.set_xticklabels(df['bag'], rotation=60, ha='right', fontsize=7)
+    a1.set_ylabel('axle difference [cm]')
+    a1.set_ylim(0, max(3.0, float(np.nanmax(df[['ruler_axle_diff_cm', 'park_axle_diff_cm']].to_numpy(float))) * 1.2))
+    a1.set_title('Axle difference per run')
+    a1.legend(loc='upper left', fontsize=7, frameon=False)
+    if have_ekf.any():
+        g = df[have_ekf]
+        lim = max(3.0, float(np.nanmax(g[['ruler_axle_diff_cm', 'park_axle_diff_cm']].to_numpy(float))) * 1.15)
+        a2.plot([0, lim], [0, lim], color=style.AXIS, lw=0.8)
+        a2.axvline(PARK_AXLE_RULE_CM, color=style.INK_2, lw=0.6, ls='--')
+        a2.axhline(PARK_AXLE_RULE_CM, color=style.INK_2, lw=0.6, ls='--')
+        a2.scatter(g['ruler_axle_diff_cm'], g['park_axle_diff_cm'], s=40, color=style.CAT[0],
+                   edgecolors=style.SURFACE, linewidths=1.2, zorder=3)
+        a2.set_xlim(0, lim)
+        a2.set_ylim(0, lim)
+        a2.set_xlabel('ruler [cm]')
+        a2.set_ylabel('robot estimate [cm]')
+        a2.set_title('Robot estimate vs ruler')
+    else:
+        a2.set_axis_off()
+        a2.text(0.5, 0.5, 'no matching runs in runs.csv', ha='center', va='center',
+                color=style.INK_2, transform=a2.transAxes)
+    style.save(fig, out_dir, 'manual_m17_parking', f'Source: {src}  |  plot_manual.py')
+
+    n, ok = len(df), int(df['ruler_within_2cm'].sum())
+    print(f'M17 parking by ruler ({n} runs): {ok}/{n} within the 2 cm rule, axle difference median '
+          f'{df["ruler_axle_diff_cm"].median():.1f} cm, max {df["ruler_axle_diff_cm"].max():.1f} cm')
+    if have_ekf.any():
+        g = df[have_ekf]
+        da = (g['park_axle_diff_cm'] - g['ruler_axle_diff_cm']).abs()
+        dh = (g['park_heading_deg'].abs() - g['ruler_heading_deg'].abs()).abs()
+        print(f'  vs robot estimate ({len(g)} runs): axle difference off by mean {da.mean():.1f} cm, '
+              f'max {da.max():.1f} cm; |heading| off by mean {dh.mean():.1f} deg, max {dh.max():.1f} deg; '
+              f'rule verdict agrees in {int((g["ruler_within_2cm"] == (g["park_axle_diff_cm"] <= PARK_AXLE_RULE_CM + 1e-9)).sum())}/{len(g)}')
+        if side_to_centre_cm is not None and g['park_dist_outer_cm'].notna().any():
+            dl = g['park_dist_outer_cm'] - (g['rear_axle_cm'] + side_to_centre_cm)
+            print(f'  base_link to the outer wall: robot estimate - ruler = mean {dl.mean():+.1f} cm, '
+                  f'max |.| {dl.abs().max():.1f} cm')
+        for side in ('front', 'rear'):
+            col, ecol = f'bay_{side}_cm', f'park_bay_{side}_cm'
+            if col in g and g[col].notna().any() and g[ecol].notna().any():
+                db = g[ecol] - g[col]
+                print(f'  gap to the {side} magenta wall: robot estimate - ruler = mean {db.mean():+.1f} cm, '
+                      f'max |.| {db.abs().max():.1f} cm')
+    else:
+        print('  no matching bag names in runs.csv -- ruler values only')
+    return df
+
+
 def gyro_integral(bag, t0=None, t1=None, msg_dir=None):
     r = bagio.load_run(bag, [T['imu']], msg_dir=msg_dir)
     d = r.get(T['imu'])
@@ -173,6 +266,10 @@ def run(argv=None):
                     help='frame of x_true_m / y_true_m / yaw_true_deg in m1 (default map)')
     ap.add_argument('--start-pose', choices=sorted(START_POSES), default='cw_pos1',
                     help='start pose for --true-frame field')
+    ap.add_argument('--runs-csv', default=str(bagio.DEFAULT_DATA_DIR / 'runs.csv'),
+                    help='runs.csv of summarize_runs.py, for the parking comparison (m17)')
+    ap.add_argument('--side-to-centre-cm', type=float, default=None,
+                    help='half the car width at the rear axle; compares base_link to the outer wall (m17)')
     ap.add_argument('--gyro-integral', metavar='BAG', default=None)
     ap.add_argument('--t0', type=float, default=None)
     ap.add_argument('--t1', type=float, default=None)
@@ -186,7 +283,9 @@ def run(argv=None):
     for key, fname, fn in (('m1', 'm1_pose_checkpoints', lambda df, src: m1(df, a.out_dir, src, a.true_frame, a.start_pose)),
                            ('m3_encoder', 'm3_encoder_distance',
                             lambda df, src: m3_encoder(df, a.out_dir, src, a.rad_per_tick)),
-                           ('m3_gyro', 'm3_gyro_turns', lambda df, src: m3_gyro(df, a.out_dir, src))):
+                           ('m3_gyro', 'm3_gyro_turns', lambda df, src: m3_gyro(df, a.out_dir, src)),
+                           ('m17_parking', 'm17_parking_ruler',
+                            lambda df, src: m17_parking(df, a.out_dir, src, a.runs_csv, a.side_to_centre_cm))):
         p = d / f'{fname}{suffix}.csv'
         df = read_csv(p)
         if df is None:
