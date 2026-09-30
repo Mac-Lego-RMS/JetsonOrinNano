@@ -25,3 +25,16 @@ TODO
 ## Team
 
 TODO
+
+## Use of AI tools
+
+We used AI assistants (Claude, by Anthropic) while preparing this journal and
+the repository. They helped us collect material from our code, schematics,
+measurements and notes into a structured document, draft and translate text,
+write the scripts that turn our recordings into figures and the bench-test tool,
+and check the documentation against the code. That made our work faster and
+better organised.
+
+The vehicle itself is our own work: the mechanical design, the electronics and
+the PCB, the software architecture and its algorithms, every measurement and
+every engineering decision. We reviewed what is written here and can explain it.

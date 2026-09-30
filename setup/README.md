@@ -21,7 +21,8 @@ exposure measured on the field) and [`bno055_params.yaml`](../bno055_params.yaml
 Flash JetPack 6.2 (L4T R36.4.3) on the Jetson Orin Nano, then on the host:
 
 ```bash
-sudo apt install -y git tmux docker.io
+sudo apt install -y git git-lfs tmux docker.io
+git lfs install                             # src/ holds CAD files stored with Git LFS
 sudo pip3 install -U jetson-stats          # jtop and jtop.service
 git clone https://github.com/dusty-nv/jetson-containers
 bash jetson-containers/install.sh           # provides `jetson-containers run`
