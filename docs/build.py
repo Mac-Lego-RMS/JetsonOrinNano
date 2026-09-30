@@ -67,13 +67,18 @@ def render_mermaid(source, mmdc, out_dir):
     cfg.write_text(json.dumps(MERMAID_CONFIG))
     cmd = mmdc + ['-i', str(src), '-o', str(img), '-c', str(cfg), '-b', 'white',
                   '-s', MERMAID_SCALE]
+    # Chrome's sandbox needs unprivileged user namespaces, which Ubuntu 24.04
+    # (and with it the GitHub runner) blocks - so it is always switched off.
+    puppeteer = {'args': ['--no-sandbox']}
     chromium = os.environ.get('PUPPETEER_EXECUTABLE_PATH')
     if chromium:
-        pp = out_dir / 'puppeteer.json'
-        pp.write_text(json.dumps({'executablePath': chromium,
-                                  'args': ['--no-sandbox']}))
-        cmd += ['-p', str(pp)]
-    subprocess.run(cmd, check=True, capture_output=True)
+        puppeteer['executablePath'] = chromium
+    pp = out_dir / 'puppeteer.json'
+    pp.write_text(json.dumps(puppeteer))
+    cmd += ['-p', str(pp)]
+    run = subprocess.run(cmd, capture_output=True, text=True)
+    if run.returncode != 0:
+        sys.exit('mermaid-cli failed on %s:\n%s' % (src, run.stderr or run.stdout))
     return img
 
 
