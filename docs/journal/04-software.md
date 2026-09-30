@@ -39,7 +39,7 @@ the ESP.
 flowchart TB
   subgraph Sensors
     lidar[RPLIDAR S3]
-    cam[Fisheye camera 270 deg]
+    cam[Fisheye camera]
     imu[BNO055 gyro]
   end
   subgraph Jetson["Jetson Orin Nano - ROS 2"]
@@ -98,12 +98,18 @@ The main topics between the nodes:
 | `/ekf/odom` | ekf_node → all | pose and velocity |
 | `/wall_matches` | scan_processor → ekf_node | walls matched to the map (Hesse normal form) |
 | `/wall_distances` | scan_processor → controller | distances to front and side walls (start straight before the map exists) |
-| `/front_wall_x`, `/race_direction`, `/corner_geometry`, `/inner_geometry` | scan_processor → controller | start section, direction, corner and lane geometry (latched) |
-| `/obstacles`, `/obstacles_live` | scan_processor → controller | pillar map (voted, snapped to seats) and current detections |
-| `/localization_state`, `/start_scan_state` | scan_processor → controller | `ok` / `recovering` / `lost`; result of the start-straight scan from the bay |
+| `/front_wall_x` | scan_processor → controller | distance to the front wall at the start (latched) |
+| `/race_direction` | scan_processor → controller | clockwise or counter-clockwise (latched) |
+| `/corner_geometry` | scan_processor → controller | corners and outer walls of the field (latched) |
+| `/inner_geometry` | scan_processor → controller | inner walls, from the start or learned in the open challenge (latched) |
+| `/obstacles` | scan_processor → controller | pillar map: voted and snapped to seats |
+| `/obstacles_live` | scan_processor → controller | current pillar detections, unfiltered |
+| `/localization_state` | scan_processor → controller | `ok` / `recovering` / `lost` |
+| `/start_scan_state` | scan_processor → controller | result of the start-straight scan from the bay |
 | `/round1_controller/lap_state` | controller → scan_processor | corner and lap counter (lane-width learning, map freeze) |
 | `/cmd_vel` | controller → bridge | speed and yaw rate, 30 Hz |
-| `/esp_serial_bridge/move`, `…/move_done` | controller ↔ bridge | ESP position moves and their acknowledgement |
+| `/esp_serial_bridge/move` | controller → bridge | ESP position move (distance) |
+| `/esp_serial_bridge/move_done` | bridge → controller | acknowledgement of a position move with status |
 
 The whole robot starts from one script ([`src/start_robot.sh`](../../src/start_robot.sh)),
 which runs every node in its own tmux window, so that the log of each node stays
@@ -120,8 +126,8 @@ still, e.g. during a scan halt.
 ### Controller
 
 The first diagram shows the race, the second the parking at the end. Emergency
-stops can happen from several states and are listed under Edge cases instead of
-being drawn.
+stops can happen from several states and are listed under [Edge cases](#edge-cases)
+instead of being drawn.
 
 ```mermaid
 stateDiagram-v2
@@ -231,8 +237,9 @@ pillar) are dropped. The remaining points are clustered in scan order by gap
 (0.15 m, at least 45 points), each cluster is split recursively at the point of
 largest deviation until no point is further than 4 cm from its segment (at least
 65 points per segment), and every segment gets a total-least-squares line fit
-(SVD). A cluster that is short (< 150 points) **and** bent (RMS > 6 mm) is
-dropped: straight walls smear to 4–7 mm in a moving scan, but corner fragments
+(SVD). A cluster that is short (< 150 points) **and** bent is
+dropped (root mean square, RMS, of the point distances to the fitted line
+above 6 mm; the RMS is the square root of the mean of the squared deviations): straight walls smear to 4–7 mm in a moving scan, but corner fragments
 are short and bent.
 
 The LiDAR delivers the points ordered by angle and the field consists of a few
@@ -274,7 +281,7 @@ standard deviation of 2.2 cm, of the wall angle 2.7°. `lost` occurred in 13 run
 in 5 of the 6 runs with a logged transition only after parking had started,
 because inside the bay the LiDAR sees only 0–2 walls. The only run that lost the
 localisation during the race was `parken_test_14` (the duplicate scan_processor,
-see Edge cases).
+see [Edge cases](#edge-cases)).
 
 ![Localisation state and wall matching quality per run.](../figures/localization_across_runs.png)
 
@@ -282,24 +289,32 @@ see Edge cases).
 
 ## Perception: start, direction, pillars and colour
 
-**Start section** ([`start_detection.py`](../../src/ekf/ekf/start_detection.py)).
-The front wall and the two side walls are taken from the extracted walls. The
+### Start section
+
+[`start_detection.py`](../../src/ekf/ekf/start_detection.py): the front wall and the two side walls are taken from the extracted walls. The
 distance to the front wall gives the start section. In the obstacle challenge
 the robot starts in the parking bay; there the bay walls would be closer than
 the front wall, so a front wall must be at least 0.50 m long and 0.60 m away
 (before this rule, a bay wall was once taken as the front wall and the map lay
 0.9 m off).
 
-**Direction** ([`direction_detection.py`](../../src/ekf/ekf/direction_detection.py)).
-The front wall is intersected with each side wall. On the open side (where the
+### Direction
+
+[`direction_detection.py`](../../src/ekf/ekf/direction_detection.py): the front
+wall is intersected with each side wall. On the open side (where the
 inner wall ends) the front wall reaches more than 0.10 m past that intersection.
 Right open and left closed means clockwise, and vice versa. This already works
 on the start straight as soon as the far corner is visible: in one run the right
 side opened at $x = 0.84$ m and the direction latched at $x = 1.02$ m. The map
 is switched to the full field at the latest 0.40 m before the front wall.
 
-**Colour** ([`lidar_pixel_mapper.py`](../../src/camera_lidar_fusion/camera_lidar_fusion/lidar_pixel_mapper.py)).
-The camera is a 270° fisheye mounted above the LiDAR. Instead of detecting
+### Colour
+
+[`lidar_pixel_mapper.py`](../../src/camera_lidar_fusion/camera_lidar_fusion/lidar_pixel_mapper.py):
+the fisheye camera sits above the LiDAR with its lens facing the ceiling
+(opening angle 197°, calibrated; see chapter 3). It sees the full circle around
+the car except the rear 90°, which the LiDAR mount blocks for the camera and the
+LiDAR alike, so both sensors cover the same 270°. Instead of detecting
 pillars in the image, every LiDAR point is projected into the image
 (equidistant fisheye model $r = f\theta$, image circle found by a least-squares
 circle fit) and the pixels around it vote for a colour label. Before the
@@ -308,11 +323,13 @@ history, so that the robot's own motion does not shift the colours. Red and gree
 are separated by the index $(G - R)/\max(R, G, B)$ with a saturation gate and a
 minimum of $|G - R| \ge 10$, after a white-point correction measured on the white
 mat in 12 sectors. Only red and green are searched; magenta is switched off (see
-Edge cases). The result is a point cloud with a colour per LiDAR point, so every
+[Edge cases](#edge-cases)). The result is a point cloud with a colour per LiDAR point, so every
 pillar has a distance and a colour at the same time. The camera delivers 15 fps;
 the fusion is limited to 7 Hz to leave CPU for estimation and control.
 
-**Pillars** ([`obstacle_map.py`](../../src/ekf/ekf/obstacle_map.py)) are found by
+### Pillars
+
+[`obstacle_map.py`](../../src/ekf/ekf/obstacle_map.py): pillars are found by
 region growing on the red/green points (4 cm grid, at least 5 points, at most
 9 cm extent) and snapped to the 24 seats the rules allow (at most 12 cm away).
 The map is a vote per seat:
@@ -339,10 +356,10 @@ mask pillars before the wall extraction.
 
 Why the fisheye instead of the old 120° camera: at the scan halt 1.10 m
 before the front wall, the 120° camera sees 3 of the 6 seats of the next
-straight, the fisheye all 6. The robot can plan the next straight before it
+straight, the fisheye with its 270° horizontal view all 6. The robot can plan the next straight before it
 turns.
 
-![Seats of the next straight in view before the corner, 120° vs. 270° field of view (geometry only).](../figures/fov_coverage.svg)
+![Seats of the next straight in view before the corner, 120° vs. 270° horizontal field of view (geometry only).](../figures/fov_coverage.svg)
 
 Pooled over 59 bags (1.15 million points on red, 0.96 million on green pillars,
 reference: the robot's own final map), red is classified correctly for 48–63 %
@@ -350,8 +367,10 @@ of its points up to 1.1 m and almost never as the other colour (at most 5 %).
 Green is recognised less often (18–36 % up to 1 m), and at 1.4 m 25 % of its
 points are read as red, at 1.6 m still 13 %. A wrong colour is more dangerous
 than no colour, which is why a seat needs several votes and the colour is the
-majority of the close votes. "Not classified" is high because the LiDAR sees
-360° but the camera only the front.
+majority of the close votes. The share of "not classified" points says little
+on its own: the reference is the robot's own map, and most points were recorded
+while driving, when only a small share of points gets a colour at all. The
+reliable figure is the wrong-colour rate.
 
 ![Colour classification against range, pooled over all bags.](../figures/colour_distance_pooled.png)
 
@@ -383,13 +402,25 @@ Two additions came from test runs:
   command takes effect. In simulation the steering oscillation dropped from
   ±18° to ±2°. The later evaluation of all bags gives a lower value: 167 ms
   median over 55 runs (IQR 160–178 ms), stable over 18 days, while the
-  controller still assumes 260 ms. Since the steering calibration was updated
-  (22.09.), the measured yaw-rate gain is 1.13 instead of 0.84, i.e. the car
-  turns in more than the predictor assumes.
+  controller still assumes 260 ms. The two numbers do not measure exactly the
+  same thing: the bag value runs from the command to the gyro, while the
+  prediction starts from the latest EKF pose, which is itself already a few
+  tens of milliseconds old (sensor transport, filter, 50 Hz output, 30 Hz
+  control tick). The right horizon therefore lies somewhat above 167 ms, but
+  most likely below 260 ms; the value was set after the first measurement and
+  has not been re-tuned since. Since the steering calibration was updated
+  (22.09.), the measured yaw-rate gain is also 1.13 instead of 0.84, i.e. the
+  car turns in more than the predictor assumes.
 - **Smoothed steering pose.** Wall corrections move the pose by 1–1.5 cm several
   times per second, which gave 2–3° steering jumps on calm straights. For the
   steering law they are blended in over 0.30 s; larger jumps are taken over at
   once.
+
+![Steering dead time per run: measured 167 ms (median) against the 260 ms the controller assumes.](../figures/dead_time_across_runs.png)
+
+<!-- CHECK (team): re-tune steer_dead_time (~0.17 s + pose age) and
+steer_gain_pred (~1.1) with a test corner? If yes, replace the last sentences
+of the dead-time paragraph with the new values. -->
 
 **Corners** are tangential circular arcs between the entry and exit lane lines
 and are driven in the state `TURN` with their own law: the feed-forward
@@ -422,21 +453,40 @@ table** per speed (0.35 / 0.50 / 0.75 m/s, [`steer_lut.py`](../../src/esp_bridge
 because the servo-to-wheel-angle curve is neither linear nor symmetric: at
 0.35 m/s full lock is +21.9° to the left and −24.7° to the right, the right side
 steers about 40 % more per servo percent, and at +35 % servo the curve deviates
-3.3° from a straight line. At 0.75 m/s left full lock drops to 19.4°. The driving speed is controlled on the Jetson
+3.3° from a straight line. At 0.75 m/s left full lock drops to 19.4°.
+
+The table is measured with
+[`steer_calib_node.py`](../../src/ekf/ekf/steer_calib_node.py): the car drives
+circles with a fixed servo command at each of the three speeds, and the
+effective wheel angle is calculated from the measured yaw rate $\omega$ and
+speed $v$ as $\delta = \arctan(L\,\omega / v)$. The figure below shows the
+result in three ways:
+
+- **Steering angle:** the effective wheel angle $\delta$ over the servo command,
+  one line per speed. The curve is steeper to the right (negative) than to the
+  left, and at high speed the car reaches less effective lock, presumably because
+  the tyres slip more.
+- **Curvature:** the same data as path curvature $\tan\delta / L$ in 1/m, which
+  is what the controller actually asks for. At full lock the car drives a
+  circle of about 0.22–0.25 m radius (curvature 4–4.5 1/m).
+- **Nonlinearity per side:** the deviation of each point from a straight line
+  fitted separately for the left and the right side. A linear steering model
+  would be wrong by up to 3.3° (at +35 % servo) and about 2° near full lock.
+  This is why the bridge interpolates in the measured table instead of using
+  one gain per side.
+
+![Measured steering characteristic at three speeds: wheel angle, curvature and deviation from a linear fit per side.](../figures/steer_lut.svg)
+
+The driving speed is controlled on the Jetson
 (PI with feed-forward, 50 Hz, acceleration limited to 0.8 m/s²) on the EKF speed.
 The position moves for unparking and parking run on the ESP32 with its own PID
 directly on the encoder: there the controller sits at the source and has no
 round trip through the serial link, so it reacts faster and stops more
 precisely.
 
-![Measured steering characteristic at three speeds.](../figures/steer_lut.svg)
-
-![Steering dead time per run: measured 167 ms (median) against the 260 ms the controller assumes.](../figures/dead_time_across_runs.png)
-
-<!-- CHECK (team): change steer_dead_time to ~0.17 s and steer_gain_pred to
-~1.1 after a test corner? If yes, update this paragraph. -->
-
-**Tracking accuracy.** The lateral error to the planned arc was 3.9 cm RMS in the
+**Tracking accuracy.** For every run the error is summarised as its RMS over the
+run (square root of the mean squared error), which weights large deviations more
+than a plain mean. The lateral error to the planned arc was 3.9 cm RMS in the
 median of the runs (4.3 cm in the `cw_pos1` series); the four runs above 18 cm
 all ended early (stuck turn, emergency stop). On the straights the heading error
 was 5.8° RMS (12.8° in `cw_pos1`), including the lane changes around pillars.
@@ -491,7 +541,7 @@ pulled the arc onto the inner line.
 at the start of the start straight" is our reading of the rules. Has it been
 confirmed by the judges / Q&A? If not, say so here. -->
 
-**Speed.** The speed profile `fast` (since 28.09.) sets 0.35 m/s on the start
+**Speed.** The speed profile `fast` sets 0.35 m/s on the start
 straight, 0.75 m/s on straights without pillars, 0.55 m/s in corners and on
 straights with pillars, 0.35 m/s on steep lane changes and 0.30 m/s on the last
 corner and the finish straight. Almost all test runs evaluated below were
@@ -506,7 +556,7 @@ its start section and the lane width at standstill and builds a reduced map of
 the three walls it sees. The widths 0.60 and 1.00 m are only used to check that
 a measurement is plausible (±0.15 m); map and start pose use the measured
 distances, because the lane width may vary. The direction is detected on the
-start straight (see Perception). While driving the robot measures the width of
+start straight (see [Direction](#direction)). While driving the robot measures the width of
 every straight (sum of both side distances) and, as soon as all four are known,
 reconstructs the inner walls from the median widths and adds them to the map.
 About 27 s for three laps.

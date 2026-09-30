@@ -59,7 +59,7 @@ Most of the software described in chapter 4 is a reaction to one of these rows.
 | Jetson → power | the Jetson draws 76 % of the idle current; driving adds only 18 % | runtime is almost independent of speed, so speed is limited by control, not by energy |
 | Jetson CPU → perception | fusion, estimation and control share six cores (~92 % load); scans waiting in a queue made wall corrections 0.35–0.6 s late | fusion limited to 7 Hz, CPU load down to ~53 %; scan queue depth 1 and grid clustering for the latency |
 | Camera → strategy | while driving the camera frame rate drops from 15.5 to 2.5 Hz and coloured points from 38 to 2 % | scan halts in lap 1 only; map frozen after lap 1 |
-| Camera and LiDAR placement → perception | the camera sits above the LiDAR and sees 270° | every LiDAR point gets a colour; one rotation calibration links both |
+| Camera and LiDAR placement → perception | the camera sits above the LiDAR, lens facing the ceiling; the LiDAR mount blocks the rear 90° for both, so both see the same 270° around the car | every LiDAR point in view gets a colour; one rotation calibration links both |
 | LiDAR minimum range → unparking | the LiDAR sees nothing closer than 0.15 m, the bay walls are exactly there | unparking and the last parking moves run as encoder moves on the ESP |
 | Serial link → motor control | a round trip Jetson ↔ ESP adds delay | position moves controlled on the ESP, driving speed on the Jetson where the EKF speed is |
 | Drive gear vibration → IMU | pitch noise grew with speed up to 3.4 °/s; the cause was an adapter running out of true (chapter 3) | the adapter was fixed (−86 % pitch noise at 0.2 m/s); the EKF uses only yaw, which stayed below 0.1 °/s |
@@ -100,8 +100,8 @@ against recorded bags first. -->
 | Staged gate for wall matching | gate from the EKF covariance | covariance grew 0.2 → 5.8 cm in 30 s while the real error reached metres | before: 2.6 s from level 2 to 3 alone, 1.2 m blind; now worst case 10 scans (~0.7 s) from level 0 to 3 |
 | Overlap check along the wall | distance/angle gate only | a segment beyond the end of a wall must not match it | `parken_test_20`: a pushed pillar 60 cm past the inner wall was matched, the pose stuck 50 cm behind |
 | Only the newest scan (queue depth 1) | process every scan | a late wall correction pulls the heading back in a corner | corrections were 0.35–0.6 s late, 30–50° heading in a 90°/s corner |
-| Colour per LiDAR point (fusion) | YOLOv11n on the camera image (national final) | lower latency; distance and colour in one measurement; with the 270° lens a pixel and a LiDAR point exist for every angle | the old set-up no longer exists, so no direct latency comparison; field of view: 3 vs. 6 of 6 seats at the scan halt (fov_coverage) |
-| 270° fisheye | 120° CSI camera | sees the next straight before the corner | 3 vs. 6 of 6 seats at the scan halt |
+| Colour per LiDAR point (fusion) | YOLOv11n on the camera image (national final) | lower latency; distance and colour in one measurement; camera and LiDAR see the same 270°, so a pixel exists for every LiDAR point | the old set-up no longer exists, so no direct latency comparison; field of view: 3 vs. 6 of 6 seats at the scan halt (fov_coverage) |
+| Fisheye camera (270° horizontal view) | 120° CSI camera | sees the next straight before the corner | 3 vs. 6 of 6 seats at the scan halt |
 | RPLIDAR S3 | LD09 | higher resolution and scan rate at a similar size | – |
 | Colour limit 1.60 m | colour at any distance | beyond ~1.7 m red is read as green | test with a red pillar: 10/0 red/green votes at 1.2–1.6 m, 2/8 at 1.6–2.0 m, 0/16 beyond; pooled over 59 bags green is read as red for 25 % of its points at 1.4 m |
 | See-through clearing of seats | keep every seat once occupied | phantom pillars caused unnecessary lane changes | replayed on the failed bags with phantom pillars: removed them there |

@@ -67,7 +67,7 @@ def render_mermaid(source, mmdc, out_dir):
     if img.exists():
         return img
     src = out_dir / ('mermaid-%s.mmd' % digest)
-    src.write_text(source)
+    src.write_text(source, encoding='utf-8')
     cfg = out_dir / 'mermaid-config.json'
     cfg.write_text(json.dumps(MERMAID_CONFIG))
     cmd = mmdc + ['-i', str(src), '-o', str(img), '-c', str(cfg), '-b', 'white',
@@ -100,14 +100,15 @@ def join_chapters(mmdc):
     mermaid_dir.mkdir(parents=True, exist_ok=True)
     parts = []
     for path in chapters():
-        text = path.read_text()
+        text = path.read_text(encoding='utf-8')
 
         def replace(match):
             if mmdc is None:
                 return match.group(0)
             img = render_mermaid(match.group(1), mmdc, mermaid_dir)
-            return '![](%s){width=%d%%}\n' % (os.path.relpath(img, BUILD),
-                                              diagram_width(img))
+            # typst only accepts forward slashes, also on Windows
+            rel = Path(os.path.relpath(img, BUILD)).as_posix()
+            return '![](%s){width=%d%%}\n' % (rel, diagram_width(img))
 
         text = MERMAID_BLOCK.sub(replace, text)
         # Links between chapter files only make sense on GitHub.
@@ -149,7 +150,7 @@ def check():
     """Checks that cost points if they fail. Returns the number of problems."""
     problems = 0
     readme = REPO / 'README.md'
-    n = len(readme.read_text()) if readme.exists() else 0
+    n = len(readme.read_text(encoding='utf-8')) if readme.exists() else 0
     if n < README_MIN_CHARS:
         print('README.md has %d characters, the rules ask for at least %d'
               % (n, README_MIN_CHARS))
@@ -159,7 +160,7 @@ def check():
         if not path.exists():
             continue
         in_comment = False
-        for no, line in enumerate(path.read_text().splitlines(), 1):
+        for no, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
             # Author notes in <!-- --> are not rendered, skip them.
             if '<!--' in line:
                 in_comment = True
