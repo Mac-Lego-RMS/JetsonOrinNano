@@ -53,8 +53,8 @@ Most of the software described in chapter 4 is a reaction to one of these rows.
 
 | Interface | What we found | Consequence |
 |---|---|---|
-| Steering linkage → control | servo-to-wheel curve not linear, left and right differ by up to 4°; full lock measured at 19.4–24.7° instead of the nominal 25° | measured steering table per speed in the bridge; arcs planned with R ≥ 0.30 m, well above the drivable minimum |
-| Short wheelbase → control | 260 ms from command to yaw rate; with 0.10 m wheelbase only ~28° phase margin, disturbances ring out with ~1 s period | dead-time prediction in both control laws |
+| Steering linkage → control | servo-to-wheel curve not linear and not symmetric: full lock +21.9° left, −24.7° right at 0.35 m/s, 19.4° left at 0.75 m/s; right steers ~40 % more per servo percent | measured steering table per speed in the bridge; arcs planned with R ≥ 0.30 m, well above the drivable minimum |
+| Short wheelbase → control | first measured 241–260 ms from command to yaw rate (167 ms median over 55 runs later); with 0.10 m wheelbase only little phase margin, disturbances ring out with ~1 s period | dead-time prediction in both control laws |
 | Encoder → power | with the encoder closing the speed loop, the motor voltage no longer has to be constant | the 12 V motor rail was removed from the PCB (chapter 3) |
 | Jetson → power | the Jetson draws 76 % of the idle current; driving adds only 18 % | runtime is almost independent of speed, so speed is limited by control, not by energy |
 | Jetson CPU → perception | fusion, estimation and control share six cores (~92 % load); scans waiting in a queue made wall corrections 0.35–0.6 s late | fusion limited to 7 Hz, CPU load down to ~53 %; scan queue depth 1 and grid clustering for the latency |
@@ -65,6 +65,7 @@ Most of the software described in chapter 4 is a reaction to one of these rows.
 | Drive gear vibration → IMU | pitch noise grew with speed up to 3.4 °/s; the cause was an adapter running out of true (chapter 3) | the adapter was fixed (−86 % pitch noise at 0.2 m/s); the EKF uses only yaw, which stayed below 0.1 °/s |
 | Motor current sense → safety | the current signal stays in the ADC's dead zone (chapter 3) | wall contact is detected with the LiDAR instead (4 cm in front of the nose) |
 | ESP move overshoot → parking | position moves overshoot ~1.1 cm forwards but only 0.4 cm backwards | forward parking moves are 1.5 cm shorter |
+| ESP position moves → reliability | a move that does not reach its target within 4 s aborts the run: 10 of 37 failed runs | open, see Risks |
 | Start pose in the bay → whole run | the map origin is the pose in the bay; parking returns to it | estimation restarted before every run; the robot must not be moved after it |
 
 <!-- CHECK (Clemens): add the mechanical interfaces (chassis stiffness, camera
@@ -79,10 +80,10 @@ mount, LiDAR height vs. wall height, ...) once chapter 2 is written. -->
 | Points before time: a run that fails costs more than a slow one | scan halts in lap 1 accepted although they cost time |
 | Colour is only reliable at standstill (frame rate 15.5 → 2.5 Hz, coloured points 38 → 2 % while driving) | scan halts in lap 1 only; map frozen after lap 1 |
 | Colour only reliable up to 1.60 m (red read as green beyond ~1.7 m) | votes from further away count as "something there" only |
-| Six CPU cores shared by fusion, estimation and control | CPU load reduced from ~92 % to ~53 % (commit a14524e) |
+| Six CPU cores shared by fusion, estimation and control | CPU load while driving reduced from 91.7 % to 53.1 % (commit a14524e, runs 48/49) |
 | Wall corrections arrived 0.35–0.6 s after their scan (30–50° heading in a 90°/s corner) | queue depth 1 and grid clustering; remaining latency not compensated |
 | The field is fourfold symmetric | global scan matching finds poses rotated by 90°; the start pose must come from start detection |
-| Steering: 0.10 m wheelbase, 19–25° full lock, 260 ms dead time | smallest drivable radius ~0.22 m; arcs ≥ 0.30 m; dead-time prediction |
+| Steering: 0.10 m wheelbase, 19–25° full lock, ~170–260 ms dead time | smallest drivable radius ~0.22 m; arcs ≥ 0.30 m; dead-time prediction |
 | LiDAR blind below 0.15 m | encoder moves in the bay |
 | Start procedure (rules 9.10–9.14): one switch, one start button, nothing measured before it | container and controller start from the autostart (boot 85–90 s) and wait for the button; direction, position and bay are detected after it |
 
@@ -102,10 +103,10 @@ against recorded bags first. -->
 | Colour per LiDAR point (fusion) | YOLOv11n on the camera image (national final) | lower latency; distance and colour in one measurement; with the 270° lens a pixel and a LiDAR point exist for every angle | the old set-up no longer exists, so no direct latency comparison; field of view: 3 vs. 6 of 6 seats at the scan halt (fov_coverage) |
 | 270° fisheye | 120° CSI camera | sees the next straight before the corner | 3 vs. 6 of 6 seats at the scan halt |
 | RPLIDAR S3 | LD09 | higher resolution and scan rate at a similar size | – |
-| Colour limit 1.60 m | colour at any distance | beyond ~1.7 m red is read as green | test with a red pillar: 10/0 red/green votes at 1.2–1.6 m, 2/8 at 1.6–2.0 m, 0/16 beyond |
+| Colour limit 1.60 m | colour at any distance | beyond ~1.7 m red is read as green | test with a red pillar: 10/0 red/green votes at 1.2–1.6 m, 2/8 at 1.6–2.0 m, 0/16 beyond; pooled over 59 bags green is read as red for 25 % of its points at 1.4 m |
 | See-through clearing of seats | keep every seat once occupied | phantom pillars caused unnecessary lane changes | replayed on the failed bags with phantom pillars: removed them there |
 | Stanley on straights | PD on lateral and heading error | one law for straights and ramps, steering angle directly | – |
-| Dead-time prediction | tune gains only | 260 ms dead time leaves ~28° phase margin | simulated: ±2° instead of ±18° steering oscillation |
+| Dead-time prediction | tune gains only | the dead time leaves little phase margin with the short wheelbase | simulated: ±2° instead of ±18° steering oscillation; measured dead time 167 ms (55 runs), the controller still assumes 260 ms |
 | Curvature command in corners | feed-forward with the nominal corner speed | from standstill the old formula gave 58° steering (full lock) | full lock in corners 1 and 3 before the change |
 | Feed-forward blended out over 20° | 7° | 7° at 1.5 rad/s are 80 ms, less than the dead time | simulated overshoot 1° instead of 6.5°; before, it kept turning 13–34° |
 | Tangential arcs, cosine ramps | front-loaded ramp | constant curvature = constant feed-forward; ramps tangential at both ends | front-loaded ramp: ~15° kink |
@@ -126,9 +127,27 @@ against recorded bags first. -->
 |---|---|---|---|
 | v0 | season 2025 | Raspberry Pi 4 → Jetson | – |
 | v1.0 (tag, commit 40f0dad) | national final, June 2026 | LiDAR wall follower (PID), YOLOv11n, IMU turn counting | full driving score, 29/30 documentation, 4th place on time |
-| v2 (now) | after the national final | EKF + map, RPLIDAR S3, fisheye, camera-LiDAR fusion, Stanley, encoder | TODO numbers from runs.csv |
+| v2 (now) | after the national final | EKF + map, RPLIDAR S3, fisheye, camera-LiDAR fusion, Stanley, encoder | 71 recorded test runs: 17/22 races finished; parking 13/45 within 2 cm overall, 5/5 in runs 35–46 (chapter 4) |
 
-Within v2 every change was driven by a recorded run. The most important cycles:
+Within v2 every change was driven by a recorded run. The CPU optimisation is a
+typical cycle: the load had crept up to 92 % over the test day, the fusion got
+only 2.8 camera images per second and paired scans with images 176 ms apart.
+After commit a14524e the same measurement gives 53 % load, 8.9 images per second
+and 23 ms between scan and image.
+
+![CPU load while driving over all runs, and run 48 (before) against run 49 (after).](../figures/cpu_before_after.png)
+
+| | Run 48 (before) | Run 49 (after) |
+|---|---|---|
+| mean load of the 6 cores | 91.7 % | 53.1 % |
+| hottest core (p95 / max) | 98 % / 100 % | 65 % / 68 % |
+| camera images in the fusion | 2.8 Hz | 8.9 Hz |
+| offset image – scan (median) | 176 ms | 23 ms |
+
+Only one run was recorded after the change; the temperature stayed uncritical
+(junction at most 60.7 °C, 9–10 W).
+
+The most important cycles:
 
 | Problem seen in a run | First attempt | Final solution |
 |---|---|---|
@@ -143,7 +162,7 @@ Within v2 every change was driven by a recorded run. The most important cycles:
 | Full lock at the start of a corner | – | curvature command |
 | Overshoot at the end of a corner | feed-forward blended over 7° | 20°, end on the predicted heading |
 | Parking start pose 12 cm / 17° off | blind 55 cm ESP move | closed-loop approach |
-| Parking accuracy 6/8 → 2/6 | – | slow approach and heading correction: 5/5 (table in chapter 4) |
+| Parking accuracy 6/8 → 2/7 | – | heading correction at the start pose (run 35), closed-loop reverse (run 38): 5/5, median 0.3 cm (chapter 4) |
 | Wrong unpark side with a green pillar in front | fixed pillar row | nearest pillar in front, filtered by its lateral position |
 | IMU pitch noise up to 3.4 °/s | – | drive-gear adapter fixed (chapter 3) |
 
@@ -151,6 +170,8 @@ Within v2 every change was driven by a recorded run. The most important cycles:
 
 | Failure mode | Effect | Detection | Mitigation |
 |---|---|---|---|
+| ESP position move does not reach its target | run aborted (10 of 37 failed runs, the most frequent cause) | move timeout 4 s, status in the acknowledgement | open: raise the minimum duty (90) or accept a small remaining travel; timeouts only appear from run 19 although the parameters are unchanged since run 9 |
+| Turn does not end | robot keeps turning at ~70° heading error (runs 20, 36) | – | open |
 | Colour misread while moving | pillar passed on the wrong side | – | colour only at standstill / low yaw rate, votes, 1.60 m limit |
 | Phantom pillar | unnecessary lane change, crash into the inner wall | LiDAR sees through the seat | seat cleared after 6 see-throughs |
 | Camera misclassification without a pillar | the live mask cuts pieces out of a wall, fewer wall matches | – | open: only mask detections that would snap to a seat (not built) |
@@ -163,6 +184,7 @@ Within v2 every change was driven by a recorded run. The most important cycles:
 | EKF speed outlier (−1.93 to +2.16 m/s seen) | the bridge converts yaw rate to steering with the EKF speed: wrong angle, full lock when starting | – | corner command curvature-based; speed clamped to 0.2–1.2 m/s in the Stanley law; no filter in the bridge yet |
 | ESP keeps its last position target | after the next reset it drives back towards the old target | – | the controller sends motor 0 after parking |
 | Last park move against the wall | pushes until the ESP timeout (4 s), costs time | move acknowledgement with status | forward moves 1.5 cm shorter; per-move correction |
+| Battery voltage not measured | the reported value is a constant 17.518 V in all bags; a link between charge and failures cannot be checked | – | see chapter 3 |
 | Camera re-enumerates on USB | no colour | – | fixed device name via udev |
 | ESP reboot / clock jump | wrong time stamps | time sync detects the reboot | resync |
 | Wall contact | robot pushes against the wall | LiDAR < 4 cm in front | stop and back up (max. 2 per corner) |
@@ -178,7 +200,9 @@ its old target. Neither is in the code comments; confirm or delete the row. -->
 - The LiDAR scan is not de-skewed for the wall extraction, and wall matches are
   applied with the current pose, not the pose at scan time. The fusion does
   compensate the motion between scan and image for the colour.
-- Parking depends on the start pose in the bay.
+- Parking depends on the start pose in the bay, and the ESP position moves are
+  the least reliable part of the run.
+- Almost all test runs were driven at 0.35 m/s; the faster profile is new.
 - The end of the three laps (switch at 1.915 m) is our reading of the rules.
 - A gyro failure during the run is not handled yet.
 - Parts of the algorithms are complex and need good sensor data.

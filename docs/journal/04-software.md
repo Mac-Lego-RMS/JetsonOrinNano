@@ -7,8 +7,9 @@ described and reproducible.
 6 points: state machine WITH rationale; justified algorithms; edge cases
 handled; testing and tuning process with the metrics used.
 Status 30.09.: every number below was checked against the code on main
-(ceebae5), including the review feedback from the two build chats. Figures
-marked TODO come from docs/analysis once the bags have been evaluated.
+(ceebae5), including the review feedback from the two build chats. Metrics
+and figures come from the evaluation of all 71 bags (11.-29.09., repo e740c8a)
+with docs/analysis.
 Comments starting with CHECK need an answer from the team.
 -->
 
@@ -22,7 +23,13 @@ used for unparking and parking and stops the motor on its own if the Jetson
 falls silent. Both talk over UART (115200 baud) with a binary protocol. The
 clocks are synchronised every 10 s (NTP-style ping-pong, least-squares fit of
 offset and drift, ESP reboots are detected), so that encoder samples from the
-ESP and IMU/LiDAR samples on the Jetson share one time base.
+ESP and IMU/LiDAR samples on the Jetson share one time base. Over all
+recorded runs the one-way latency from the ESP to the Jetson was 1.6 ms
+(median of the run medians, p95 8.2 ms) and the round trip 0.66 ms.
+
+<!-- CHECK (Jannik): in 10 runs the estimated clock drift is above 30 ppm (up to
+±150 ppm), which is implausible for a crystal and points to jumps in the offset
+estimator (clocksync_<bag> plots on the Jetson). -->
 
 The split follows one rule: everything that needs the map or the camera runs on
 the Jetson, everything that must react within milliseconds to the motor runs on
@@ -260,7 +267,17 @@ node and a pillar clustering that compared all point pairs. Now the node keeps
 only the newest scan (queue depth 1) and the pillar clustering uses a 4 cm grid.
 Wall matches are still applied with the current pose, not the pose at scan time.
 
-<!-- TODO figure: localisation quality from a bag (plot_localization.py) -->
+**Result.** In the 42 driving runs with a recorded localisation state, the
+state was `ok` for 100 % of the time in the median (mean 96.3 %). On average
+3.7 walls were matched per scan; the innovation of the wall distance had a
+standard deviation of 2.2 cm, of the wall angle 2.7°. `lost` occurred in 13 runs,
+in 5 of the 6 runs with a logged transition only after parking had started,
+because inside the bay the LiDAR sees only 0–2 walls. The only run that lost the
+localisation during the race was `parken_test_14` (the duplicate scan_processor,
+see Edge cases).
+
+![Localisation state and wall matching quality per run.](../figures/localization_across_runs.png)
+
 <!-- TODO figure: EKF vs. folding-rule measurement (M1, plot_manual.py) -->
 
 ## Perception: start, direction, pillars and colour
@@ -327,7 +344,20 @@ turns.
 
 ![Seats of the next straight in view before the corner, 120° vs. 270° field of view (geometry only).](../figures/fov_coverage.svg)
 
-<!-- TODO figure: colour classification vs. distance from more bags (plot_colour_distance.py) -->
+Pooled over 59 bags (1.15 million points on red, 0.96 million on green pillars,
+reference: the robot's own final map), red is classified correctly for 48–63 %
+of its points up to 1.1 m and almost never as the other colour (at most 5 %).
+Green is recognised less often (18–36 % up to 1 m), and at 1.4 m 25 % of its
+points are read as red, at 1.6 m still 13 %. A wrong colour is more dangerous
+than no colour, which is why a seat needs several votes and the colour is the
+majority of the close votes. "Not classified" is high because the LiDAR sees
+360° but the camera only the front.
+
+![Colour classification against range, pooled over all bags.](../figures/colour_distance_pooled.png)
+
+<!-- CHECK (team): the pooled data shows green read as red at 1.2-1.7 m, i.e.
+inside the 1.60 m colour limit. Keep the limit (votes handle it) or lower it to
+~1.2 m? -->
 
 ## Lane following
 
@@ -345,12 +375,17 @@ turns both errors directly into a steering angle for a front-steered car.
 
 Two additions came from test runs:
 
-- **Dead-time prediction.** From the command to the yaw rate we measured 260 ms
-  (cross-correlation in a bag, steering gain 0.84). With the short wheelbase
-  (0.10 m) that leaves only about 28° phase margin, and every disturbance rang
-  out with a period of about 1 s. The controller therefore computes with the
-  pose the robot will have when the command takes effect. In simulation the
-  steering oscillation dropped from ±18° to ±2°.
+- **Dead-time prediction.** In the first two measurements (cross-correlation of
+  the commanded yaw rate with the gyro) we found 241 and 260 ms and a yaw-rate
+  gain of 0.84. With the short wheelbase (0.10 m) that leaves only about 28°
+  phase margin, and every disturbance rang out with a period of about 1 s. The
+  controller therefore computes with the pose the robot will have when the
+  command takes effect. In simulation the steering oscillation dropped from
+  ±18° to ±2°. The later evaluation of all bags gives a lower value: 167 ms
+  median over 55 runs (IQR 160–178 ms), stable over 18 days, while the
+  controller still assumes 260 ms. Since the steering calibration was updated
+  (22.09.), the measured yaw-rate gain is 1.13 instead of 0.84, i.e. the car
+  turns in more than the predictor assumes.
 - **Smoothed steering pose.** Wall corrections move the pose by 1–1.5 cm several
   times per second, which gave 2–3° steering jumps on calm straights. For the
   steering law they are blended in over 0.30 s; larger jumps are taken over at
@@ -384,8 +419,10 @@ re-anchored at the actual pose.
 The bridge ([`esp_serial_bridge.py`](../../src/esp_bridge/esp_bridge/esp_serial_bridge.py))
 converts the commanded yaw rate into a steering angle with a **measured steering
 table** per speed (0.35 / 0.50 / 0.75 m/s, [`steer_lut.py`](../../src/esp_bridge/esp_bridge/steer_lut.py)),
-because the servo-to-wheel-angle curve is not linear and differs between left
-and right by up to 4° at full lock. The driving speed is controlled on the Jetson
+because the servo-to-wheel-angle curve is neither linear nor symmetric: at
+0.35 m/s full lock is +21.9° to the left and −24.7° to the right, the right side
+steers about 40 % more per servo percent, and at +35 % servo the curve deviates
+3.3° from a straight line. At 0.75 m/s left full lock drops to 19.4°. The driving speed is controlled on the Jetson
 (PI with feed-forward, 50 Hz, acceleration limited to 0.8 m/s²) on the EKF speed.
 The position moves for unparking and parking run on the ESP32 with its own PID
 directly on the encoder: there the controller sits at the source and has no
@@ -394,9 +431,22 @@ precisely.
 
 ![Measured steering characteristic at three speeds.](../figures/steer_lut.svg)
 
-<!-- TODO figure: dead time from a bag (plot_dead_time.py) -->
-<!-- TODO figure: tracking error on straights and in corners (plot_tracking.py);
-at least one number for the lateral error is needed for 6 points -->
+![Steering dead time per run: measured 167 ms (median) against the 260 ms the controller assumes.](../figures/dead_time_across_runs.png)
+
+<!-- CHECK (team): change steer_dead_time to ~0.17 s and steer_gain_pred to
+~1.1 after a test corner? If yes, update this paragraph. -->
+
+**Tracking accuracy.** The lateral error to the planned arc was 3.9 cm RMS in the
+median of the runs (4.3 cm in the `cw_pos1` series); the four runs above 18 cm
+all ended early (stuck turn, emergency stop). On the straights the heading error
+was 5.8° RMS (12.8° in `cw_pos1`), including the lane changes around pillars.
+The lateral error on the straights was not recorded, because its debug topic
+was switched off.
+
+![Lateral error in the corners and heading error on the straights per run.](../figures/tracking_across_runs.png)
+
+<!-- TODO (Jannik): re-enable the e_ct publish in _stanley_steer so the next runs
+record the lateral error on the straights. -->
 
 ## Obstacle strategy
 
@@ -419,6 +469,8 @@ heading step; a front-loaded variant was rejected because of a kink of about
 15°. The path is re-planned whenever the obstacle map changes and after every
 scan halt.
 
+![EKF trajectory of run parken_test_46: two laps around six pillars, then parked with 0.3 cm axle difference.](../figures/trajectory_parken_test_46.png)
+
 **Corners with pillars.** The side before and after a corner comes from the
 nearest pillar on the straight before and after it. The arc is checked against
 the car outline; if a pillar is closer than 8 cm, the radius is searched between
@@ -439,9 +491,11 @@ pulled the arc onto the inner line.
 at the start of the start straight" is our reading of the rules. Has it been
 confirmed by the judges / Q&A? If not, say so here. -->
 
-**Speed.** The start straight is driven at 0.35 m/s. Straights without pillars
-are driven at 0.75 m/s, corners and straights with pillars at 0.55 m/s, steep
-lane changes at 0.35 m/s, the last corner and the finish straight at 0.30 m/s.
+**Speed.** The speed profile `fast` (since 28.09.) sets 0.35 m/s on the start
+straight, 0.75 m/s on straights without pillars, 0.55 m/s in corners and on
+straights with pillars, 0.35 m/s on steep lane changes and 0.30 m/s on the last
+corner and the finish straight. Almost all test runs evaluated below were
+driven before, with a cruise speed of 0.35 m/s.
 Before every halt the robot brakes along $v = \sqrt{2ad}$, and the halt is
 triggered early by the coasting distance $v \cdot 0.10\,\text{s} + v^2/(2 \cdot 0.57\,\text{m/s}^2)$.
 
@@ -529,13 +583,19 @@ of moves (steering, distance) into poses.
   0.4 cm backwards (one run hit the wall after 3.3 of 4.5 cm). Moves without
   travel are skipped.
 
-| Runs | With final pose | Axle difference ≤ 2 cm | Heading error | Lateral deviation |
+| Runs | Within 2 cm | Median axle difference | Median heading error | Median lateral deviation |
 |---|---|---|---|---|
-| 2–19 | 8 | 6/8 | up to 14° | up to 4.8 cm |
-| 22–33 | 6 | 2/6 | 13–23° (outliers) | up to 4.1 cm |
-| 35–46 (slow approach + heading correction) | 5 | 5/5 | ≤ 7° | 0.2–1.4 cm |
+| 2–19 | 6 / 8 | 1.5 cm | 8.0° | 1.3 cm |
+| 22–33 | 2 / 7 | 3.2 cm | 17.5° | 2.9 cm |
+| 35–46 (heading correction at the start pose, closed-loop reverse) | 5 / 5 | 0.3 cm | 1.7° | 0.6 cm |
 
-Values are the robot's own estimate (EKF), not measured with a ruler.
+The 2 cm rule (axle difference $= 0.105\,\text{m}\cdot|\sin\psi|$) depends only
+on the heading and is met for $|\psi| \le 11°$; the lateral deviation stayed
+within ±5 cm in all 20 runs. The heading correction at the start pose appears in
+the logs from run 35, the closed-loop reverse from run 38. Values are the
+robot's own estimate (EKF), not measured with a ruler.
+
+![Final pose after parking and axle difference per run.](../figures/parking_final_pose.png)
 
 <!-- CHECK (team): the build chat reports a run after an unpark VARIANT that
 ended with 16.6° and 3.0 cm axle difference (rule broken), because there was
@@ -599,5 +659,41 @@ sectors. The reasoning behind a parameter is written as a comment next to it,
 with the measured value and the run it came from; the controller alone refers to
 specific test runs 14 times. The evaluation scripts are in `docs/analysis`.
 
-<!-- TODO: metrics table from runs.csv (success rate, failure causes, lap
-times) and the A/B test of the scan halt. -->
+### Results over all test runs
+
+The outcome of every run is taken from its log (`summarize_runs.py`). 71 bags
+from 11.–29.09. were evaluated: `cw_pos1_1…22` (race only, three laps) and
+`parken_test_1…49` (race and parking).
+
+| Series | Result |
+|---|---|
+| `cw_pos1` (race only) | 17 of 22 runs finished three laps (77 %) |
+| `parken_test` (race and parking) | 20 of 45 runs parked (44 %), 13 of them within 2 cm (29 %) |
+| `parken_test_35…46` | 5 of 5 parked runs within 2 cm |
+
+![Outcome of every run and success rate over the iterations.](../figures/runs_outcomes.png)
+
+The most frequent cause of failure is not the parking geometry but the ESP
+position moves: in 10 runs (27 % of all failures) a move did not reach its
+target before the 4 s timeout. In the last block (runs 34–49) parking was precise
+whenever the robot got there, but only 5 of 16 runs got that far. Eight runs end
+in the log while driving without an emergency stop; in `parken_test_20` and `_36`
+the turn was stuck at about 70° heading error. Four runs ended with an emergency
+stop at a corner, e.g. `parken_test_42`: a red pillar stood in the arc of corner
+3, no radius kept 8 cm clearance, the obstacle path led far outwards and the
+turn-in point was missed by 1.46 m sideways.
+
+![Why runs did not reach the goal (37 of 71 runs).](../figures/runs_failure_pareto.png)
+
+![Run parken_test_42: emergency stop after corner 3.](../figures/trajectory_parken_test_42.png)
+
+Almost all of these runs were driven with a cruise speed of 0.35 m/s; the
+faster speed profile (0.75 m/s on straights) was only set on 28.09. (commit
+3f3a22d).
+
+<!-- CHECK (team): which speed and lap times did you drive after 28.09.? The
+27 s (open) and 80 s (obstacle) in this chapter need a source. Were the
+position-move timeouts fixed (minduty raised)? The logs of "log ends while
+driving" cannot tell a manual stop from a hanging robot; check run_outcomes.csv
+against your notes. -->
+<!-- TODO: A/B test of the scan halt. -->
