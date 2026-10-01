@@ -8,10 +8,11 @@ table:
         race_450=Entladung_450 endurance_1150=Entladung_1150 \\
         --out docs/data/discharge.csv
 
-Readings above the 4S maximum of 16.8 V (plus a margin for the measurement)
-cannot come from the pack: they appear while a second source is plugged into
-the other power input, which the ideal-diode OR then selects. Those readings
-are dropped and reported. Time starts at the first reading kept.
+Readings above the 4S maximum of 16.8 V cannot come from the pack: they
+appear while a second source is plugged into the other power input, which
+the ideal-diode OR then selects. Those readings are dropped and reported.
+The margin covers the reading itself, which is up to 1 % high at the top of
+the range (data/manual/battery_divider.csv). Time starts at the first reading kept.
 
 Each path is a bag directory or a single .db3 file; only sqlite3 and the
 standard library are needed.
@@ -24,7 +25,7 @@ import sys
 from pathlib import Path
 
 PACK_MAX_V = 16.8
-MARGIN_V = 0.15
+MARGIN_V = 0.25
 
 
 def voltage(b):

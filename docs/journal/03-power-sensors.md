@@ -110,7 +110,6 @@ capacity: 26.0 / 10.0 = 2.60 against 1150 / 450 = 2.56, within 2 %. The race pac
 also starts 0.36 V lower at the same current. That is expected: 1.10 A is a
 2.4 C load for the small pack but only about 1 C for the large one, so its
 voltage sags further.
-<!-- TODO: endurance pack (Entladung_1150) into the same figure -->
 
 #### Battery monitoring
 
@@ -159,7 +158,8 @@ tolerate.
 
 **Fix:** the failed resistor was replaced. After the repair the bridge reports
 15.56 V and a state of charge of 65 % — the percentage is no longer pinned at 100 %,
-so the divider is back in its linear range. <!-- TODO confirm: reported value against a multimeter at the pack terminals -->
+so the divider is back in its linear range. Against a multimeter it is now
+accurate to ±1.1 % (see [Calibration](#battery-voltage)).
 
 The fault is documented here rather than silently repaired because of how it was
 found: not by the warning misbehaving, but by cross-checking one measurement
@@ -1121,12 +1121,29 @@ the LiDAR against a pillar at known distances.
 ### Battery voltage
 
 The divider on IO1 was checked against the bench supply. That cross-check is what
-found the failed resistor described under [Battery monitoring](#battery-monitoring);
-after the repair the reading is back in its linear range.
+found the failed resistor described under [Battery monitoring](#battery-monitoring).
+After the repair it was checked again over the whole range of a 4S pack, against
+a multimeter at the input:
 
-<!-- TODO: record reported vs. multimeter at 12.0 / 14.0 / 16.0 / 16.8 V into
-data/manual/battery_divider.csv. If the slope is off, add a two-point
-correction to the ESP firmware. -->
+| Multimeter | Reported | Error |
+| ---: | ---: | ---: |
+| 12.0 V | 11.87 V | −0.13 V (−1.1 %) |
+| 14.0 V | 13.90 V | −0.10 V (−0.7 %) |
+| 16.0 V | 16.08 V | +0.08 V (+0.5 %) |
+| 16.8 V | 16.96 V | +0.16 V (+1.0 %) |
+
+Data: [`data/manual/battery_divider.csv`](../data/manual/battery_divider.csv).
+
+The reading is linear — a straight line, reported = 1.062 × actual − 0.91 V, fits
+all four points within 0.06 V — with a slope 6 % too steep, the typical gain error
+of the ESP32-S3's ADC. **We decided not to correct it in the firmware.** The point
+that matters is the warning: a reported 15.2 V is an actual 15.17 V, 3.79 V per
+cell instead of 3.80 V. A correction would move the warning by 0.03 V, which on
+the race pack's discharge curve is about 20 seconds.
+
+The check also explains a reading in the [discharge curve](#discharge-curve): the
+endurance pack starts at a reported 16.89 V, above the 16.8 V of a full 4S pack.
+Corrected, that is 16.76 V — a full pack, as expected.
 
 ### Motor current
 
