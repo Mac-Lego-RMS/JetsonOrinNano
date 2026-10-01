@@ -35,7 +35,7 @@ The start script expects the repository at `/home/macjetson/ros2_ws`
 for another path).
 
 ```bash
-git clone --recurse-submodules https://github.com/Mac-Lego-RMS/JetsonOrinNano ~/ros2_ws
+git clone --recurse-submodules https://github.com/Mac-Lego-RMS/MaecLEGO-WRO-FE-2026 ~/ros2_ws
 cd ~/ros2_ws
 ln -s src/start_robot.sh start_robot.sh    # the path robot.service calls
 ```
