@@ -23,7 +23,7 @@ rubric for criterion 2:
 | The rubric asks for | Section | Key evidence |
 | --- | --- | --- |
 | Power architecture, planned distribution | [Dual-input power path](#dual-input-power-path), [Regulation](#regulation) | two hot-swappable inputs, two regulated rails, Jetson deliberately unswitched |
-| Power budget, current draw | [Power budget](#power-budget) | 1.10–1.30 A measured per state; Jetson 76 %; matches the pack runtimes within 7 % |
+| Power budget, current draw | [Power budget](#power-budget) | 1.10–1.30 A measured per state; Jetson 76 %; consistent with the recorded discharge curve |
 | Wiring diagram | [Wiring](#wiring) | vehicle-level wiring, schematic, all four copper layers, pin map |
 | Sensor selection and trade-offs | [Sensor set](#sensor-set), [LiDAR: selection](#lidar-selection) | three LiDARs compared; YOLO replaced for latency; why no ultrasonic or line sensor |
 | Placement justified with the field geometry | [LiDAR: placement](#lidar-placement), [Camera](#camera) | 55 mm scan plane against 100 mm walls, ±0.9° tilt tolerance; scan plane in the camera's view from 0.18 m |
@@ -57,24 +57,22 @@ The board carries four jobs:
 
 ### Energy source
 
-<!-- TODO reconcile: the discharge curve reaches the 3.8 V/cell warning after 10 min; was ≈22 min observed while the divider read 18 % high (warning effectively at 3.21 V/cell)? -->
-
 | | Race pack | Endurance pack |
 | --- | --- | --- |
 | Type | Ovonic 4S LiPo | Ovonic 4S LiPo |
 | Capacity | 450 mAh | 1150 mAh |
 | Discharge rating | 60 C (≈27 A) | 60 C (≈69 A) |
 | Stored energy | 6.7 Wh | 17.0 Wh |
-| Observed runtime | ≈22 min | ≈50 min |
-| Implied average current | **≈1.2 A** | **≈1.4 A** |
+| Time to the 3.8 V/cell warning, measured | **10.0 min** | – |
 
-The two runtimes were measured independently and agree on an average system draw
-of roughly **1.2–1.4 A, i.e. 18–20 W**. This is the figure that
-[Power budget](#power-budget) has to reproduce component by component.
+<!-- TODO: endurance pack time to warning from Entladung_1150 -->
+
+The system draws **1.10 A standing and 1.30 A at full speed, 16–19 W**, measured
+state by state in [Power budget](#power-budget).
 
 The smaller pack is used for competition runs, where its lower mass matters and
-22 minutes is far beyond a 3-minute round. The larger pack is used for
-development and testing, where runtime dominates.
+its 10 minutes to the warning cover a 3-minute round with a large reserve. The
+larger pack is used for development and testing, where runtime dominates.
 
 The 60 C rating is not required by the average current — it is required so that
 the pack voltage does not sag during motor acceleration, which would otherwise
@@ -83,15 +81,19 @@ propagate into the 5 V rail and into the low-voltage warning.
 #### Discharge curve
 
 With the battery monitoring repaired (see below), the race pack was recorded from
-full charge with the vehicle standing and the motor off.
+full charge with the vehicle standing, all nodes running and the LiDAR turning,
+motor off — the *full system idle* state of the power budget, 1.10 A.
 
 ![Pack voltage of the race pack over time, against the low-voltage warning.](../figures/discharge.svg)
 
 Data: bag `Entladung_450` via [`battery_curve.py`](../analysis/battery_curve.py)
-into [`data/discharge.csv`](../data/discharge.csv). The vehicle lost power before
-the recording was stopped, so the bag was recovered with `sqlite3 .recover`; the
-readings at the very start and end show 17.4 V, more than a 4S pack can deliver,
-because a second source was plugged into the other input, and are dropped.
+into [`data/discharge.csv`](../data/discharge.csv). The discharge was ended by hand
+at 3.72 V per cell: under load we do not take a LiPo lower than 3.7 V per cell.
+While switching over to the bench supply afterwards a cable tore off and the
+Jetson lost power before the recorder had closed the bag, so the bag was recovered
+with `sqlite3 .recover`. The readings at the very start and end show 17.4 V, more
+than a 4S pack can deliver: the bench supply on the second input was on. They are
+dropped.
 
 | Time | Pack voltage | Per cell |
 | ---: | ---: | ---: |
@@ -102,7 +104,7 @@ because a second source was plugged into the other input, and are dropped.
 
 A round takes 3 minutes and leaves the pack at 4.0 V per cell, far above the
 warning, which arrives only after 10 minutes. A freshly charged race pack
-therefore covers a round with a large reserve. <!-- TODO confirm: was the whole stack running (≈1.1 A)? why was the recording ended at 14.9 V? -->
+therefore covers a round with a large reserve.
 <!-- TODO: endurance pack (Entladung_1150) into the same figure -->
 
 #### Battery monitoring
@@ -394,19 +396,28 @@ Two consequences follow, and both shaped later decisions:
    non-motor share at ~90 % converter efficiency. This is the figure the eFuse
    current limit was set against (see [Protection](#protection)).
 
-#### Cross-check against observed runtime
+#### Cross-check against the discharge curve
 
-The power budget and the observed pack runtimes were measured independently. They
-agree:
+The [discharge curve](#discharge-curve) was recorded in the *full system idle*
+state, 1.10 A. Combining the two measurements:
 
-| Pack | Capacity | Predicted at 1.15 A | Observed |
-| --- | --- | --- | --- |
-| Race | 450 mAh | 23.5 min | ≈22 min |
-| Endurance | 1150 mAh | 60 min | ≈50 min |
+| Point on the curve | Time | Charge drawn at 1.10 A | Share of 450 mAh |
+| --- | ---: | ---: | ---: |
+| One round | 3.0 min | 55 mAh | 12 % |
+| Warning, 3.8 V/cell | 10.0 min | 183 mAh | 41 % |
+| End of recording, 3.72 V/cell | 14.5 min | 266 mAh | 59 % |
 
-The race pack matches within 7 %. The endurance pack falls short of the prediction
-because a run is ended at the 3.8 V/cell warning rather than at full discharge,
-leaving usable capacity unused.
+Two conclusions follow:
+
+1. **The warning is conservative.** It fires with more than half of the nominal
+   charge still in the pack. That is deliberate: a LiPo that is run deep loses
+   capacity, and the vehicle must not lose its compute during a scored run.
+2. **Driving barely shortens it.** Driving at full speed raises the draw by 18 %,
+   so on the field the warning comes after roughly 10.0 min × 1.10 / 1.30 ≈
+   8.5 minutes — an estimate from the two measurements, not a separate recording.
+
+An earlier version of this journal gave runtimes of ≈22 and ≈50 minutes. Those
+were estimates; the recorded curve replaces them.
 
 ### Motor drive
 

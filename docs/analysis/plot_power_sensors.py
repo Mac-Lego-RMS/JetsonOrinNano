@@ -247,7 +247,7 @@ def discharge(out_dir):
         t_end = max(t_end, t[-1])
     ax.set_xlim(0, np.ceil(t_end + 0.5))
     ax.set_ylim(14.4, 16.8)
-    ax.set_xlabel('time [min], vehicle standing, motor off')
+    ax.set_xlabel('time [min], vehicle standing, all nodes running, motor off (1.10 A)')
     ax.set_ylabel('pack voltage under load [V]')
     cell = ax.secondary_yaxis('right', functions=(lambda x: x / 4, lambda x: x * 4))
     cell.set_ylabel('per cell [V]')
