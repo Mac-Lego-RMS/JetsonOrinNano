@@ -63,9 +63,7 @@ The board carries four jobs:
 | Capacity | 450 mAh | 1150 mAh |
 | Discharge rating | 60 C (≈27 A) | 60 C (≈69 A) |
 | Stored energy | 6.7 Wh | 17.0 Wh |
-| Time to the 3.8 V/cell warning, measured | **10.0 min** | – |
-
-<!-- TODO: endurance pack time to warning from Entladung_1150 -->
+| Time to the 3.8 V/cell warning, measured | **10.0 min** | **26.0 min** |
 
 The system draws **1.10 A standing and 1.30 A at full speed, 16–19 W**, measured
 state by state in [Power budget](#power-budget).
@@ -80,31 +78,38 @@ propagate into the 5 V rail and into the low-voltage warning.
 
 #### Discharge curve
 
-With the battery monitoring repaired (see below), the race pack was recorded from
+With the battery monitoring repaired (see below), both packs were recorded from
 full charge with the vehicle standing, all nodes running and the LiDAR turning,
 motor off — the *full system idle* state of the power budget, 1.10 A.
 
-![Pack voltage of the race pack over time, against the low-voltage warning.](../figures/discharge.svg)
+![Pack voltage of both packs over time at the same load, against the low-voltage warning.](../figures/discharge.svg)
 
-Data: bag `Entladung_450` via [`battery_curve.py`](../analysis/battery_curve.py)
-into [`data/discharge.csv`](../data/discharge.csv). The discharge was ended by hand
-at 3.72 V per cell: under load we do not take a LiPo lower than 3.7 V per cell.
-While switching over to the bench supply afterwards a cable tore off and the
-Jetson lost power before the recorder had closed the bag, so the bag was recovered
-with `sqlite3 .recover`. The readings at the very start and end show 17.4 V, more
-than a 4S pack can deliver: the bench supply on the second input was on. They are
+Data: bags `Entladung_450` and `Entladung_1150` via
+[`battery_curve.py`](../analysis/battery_curve.py) into
+[`data/discharge.csv`](../data/discharge.csv). Both discharges were ended by hand
+at about 3.7 V per cell: under load we do not take a LiPo lower than that. After
+the race pack, a cable tore off while switching over to the bench supply and the
+Jetson lost power before the recorder had closed the bag, so that bag was
+recovered with `sqlite3 .recover`. Readings of 17.4 V at the start and end, more
+than a 4S pack can deliver, are the bench supply on the second input; they are
 dropped.
 
-| Time | Pack voltage | Per cell |
-| ---: | ---: | ---: |
-| start | 16.53 V | 4.13 V |
-| 3 min, one round | 16.0 V | 4.00 V |
-| 10.0 min | 15.2 V | 3.80 V — **warning** |
-| 14.5 min, end of recording | 14.90 V | 3.72 V |
+| | Race pack, 450 mAh | Endurance pack, 1150 mAh |
+| --- | ---: | ---: |
+| Start | 16.53 V (4.13 V/cell) | 16.89 V (4.22 V/cell) |
+| After 3 min, one round | 16.00 V (4.00 V/cell) | 16.64 V (4.16 V/cell) |
+| **Warning, 15.2 V (3.8 V/cell)** | **after 10.0 min** | **after 26.0 min** |
+| End of recording | 14.90 V after 14.5 min | 14.82 V after 39.9 min |
 
-A round takes 3 minutes and leaves the pack at 4.0 V per cell, far above the
-warning, which arrives only after 10 minutes. A freshly charged race pack
-therefore covers a round with a large reserve.
+A round takes 3 minutes and leaves the race pack at 4.0 V per cell, far above the
+warning. A freshly charged race pack therefore covers a round with a large
+reserve.
+
+**The two curves check each other.** The time to the warning scales with the
+capacity: 26.0 / 10.0 = 2.60 against 1150 / 450 = 2.56, within 2 %. The race pack
+also starts 0.36 V lower at the same current. That is expected: 1.10 A is a
+2.4 C load for the small pack but only about 1 C for the large one, so its
+voltage sags further.
 <!-- TODO: endurance pack (Entladung_1150) into the same figure -->
 
 #### Battery monitoring
@@ -398,15 +403,18 @@ Two consequences follow, and both shaped later decisions:
 
 #### Cross-check against the discharge curve
 
-The [discharge curve](#discharge-curve) was recorded in the *full system idle*
+The [discharge curves](#discharge-curve) were recorded in the *full system idle*
 state, 1.10 A. Combining the two measurements:
 
-| Point on the curve | Time | Charge drawn at 1.10 A | Share of 450 mAh |
-| --- | ---: | ---: | ---: |
-| One round | 3.0 min | 55 mAh | 12 % |
-| Warning, 3.8 V/cell | 10.0 min | 183 mAh | 41 % |
-| End of recording, 3.72 V/cell | 14.5 min | 266 mAh | 59 % |
+| Point on the curve | Race pack, 450 mAh | Endurance pack, 1150 mAh |
+| --- | ---: | ---: |
+| One round, 3 min | 55 mAh, 12 % | 55 mAh, 5 % |
+| Warning, 3.8 V/cell | 183 mAh, **41 %** | 477 mAh, **41 %** |
+| End of recording, ≈3.7 V/cell | 266 mAh, 59 % | 731 mAh, 64 % |
 
+Two packs of very different size reach the warning at the same share of their
+nominal charge. That is what a correct current figure and a correct voltage
+reading together predict; an error in either would show up as a mismatch here.
 Two conclusions follow:
 
 1. **The warning is conservative.** It fires with more than half of the nominal
@@ -414,7 +422,8 @@ Two conclusions follow:
    capacity, and the vehicle must not lose its compute during a scored run.
 2. **Driving barely shortens it.** Driving at full speed raises the draw by 18 %,
    so on the field the warning comes after roughly 10.0 min × 1.10 / 1.30 ≈
-   8.5 minutes — an estimate from the two measurements, not a separate recording.
+   8.5 minutes on the race pack and 22 minutes on the endurance pack — estimates
+   from the measurements, not separate recordings.
 
 An earlier version of this journal gave runtimes of ≈22 and ≈50 minutes. Those
 were estimates; the recorded curve replaces them.

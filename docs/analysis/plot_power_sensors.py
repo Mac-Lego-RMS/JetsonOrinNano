@@ -226,11 +226,9 @@ def discharge(out_dir):
              ('endurance_1150', '1150 mAh endurance pack', style.CAT[1]))
     fig, ax = style.figure(1, 1, width=7.0, height=3.2)
     ax.axvspan(0, 3, color=style.GRID, alpha=0.6, lw=0)
-    ax.text(1.5, 16.75, 'one round\n(3 min)', ha='center', va='top', fontsize=7.5,
+    ax.text(1.5, 14.47, 'one\nround', ha='center', va='bottom', fontsize=7.5,
             color=style.INK_2)
     ax.axhline(15.2, color=style.STATUS['serious'], lw=1.0, ls='--')
-    ax.text(0.2, 15.23, 'low-voltage warning, 3.8 V/cell', fontsize=7.5, va='bottom',
-            color=style.STATUS['serious'])
     t_end = 0
     for key, lbl, col in packs:
         sel = [r for r in rows if r['pack'] == key]
@@ -242,19 +240,22 @@ def discharge(out_dir):
         below = t[v < 15.2]
         if len(below):
             ax.plot(below[0], 15.2, 'o', color=col, ms=style.MARKER_S, mec=style.SURFACE)
-            ax.annotate(f'{below[0]:.1f} min', (below[0], 15.2), xytext=(4, -12),
-                        textcoords='offset points', fontsize=8, color=col)
+            ax.annotate(f'{below[0]:.1f} min', (below[0], 15.2), xytext=(-6, -13),
+                        textcoords='offset points', ha='right', fontsize=8, color=col)
         t_end = max(t_end, t[-1])
     ax.set_xlim(0, np.ceil(t_end + 0.5))
-    ax.set_ylim(14.4, 16.8)
+    ax.set_ylim(14.4, 17.0)
+    ax.text(t_end, 15.23, 'low-voltage warning, 3.8 V/cell', ha='right', va='bottom',
+            fontsize=7.5, color=style.STATUS['serious'])
     ax.set_xlabel('time [min], vehicle standing, all nodes running, motor off (1.10 A)')
     ax.set_ylabel('pack voltage under load [V]')
+    ax.set_yticks(np.arange(14.5, 17.01, 0.5))
     cell = ax.secondary_yaxis('right', functions=(lambda x: x / 4, lambda x: x * 4))
     cell.set_ylabel('per cell [V]')
-    ax.set_title('Discharge of the race pack')
+    ax.set_title('Both packs reach the warning at the same share of their charge')
     ax.legend(loc='upper right')
     style.save(fig, out_dir, 'discharge',
-               'Source: bag Entladung_450 via data/discharge.csv (battery_curve.py)  |  '
+               'Source: bags Entladung_450, Entladung_1150 via data/discharge.csv (battery_curve.py)  |  '
                'plot_power_sensors.py')
 
 
