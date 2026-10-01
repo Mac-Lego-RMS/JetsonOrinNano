@@ -10,7 +10,8 @@ and writes four figures:
   imu_noise        gyroscope noise per axis over drive-axle speed, and the
                    driven/coasting comparison that separates vibration from
                    electrical interference (MP3)
-  gear_repair      pitch noise and duty before and after the gear repair
+  gear_repair      pitch and yaw noise and duty over the three drive-gear
+                   mountings, and with the tyres removed
 
     python docs/analysis/plot_power_sensors.py
 """
@@ -149,24 +150,35 @@ def imu_noise(out_dir):
 def gear_repair(out_dir):
     rows = read(DATA / 'mp3_before_after.csv')
     v = [float(r['axle_rad_s']) for r in rows]
-    fig, (a1, a2) = style.figure(1, 2, width=7.0, height=3.2)
+    runs = (('adapter', 'improvised adapter', style.CAT[1], 'o', '-'),
+            ('repaired', 'adapter repaired', style.CAT[3], 'D', '-'),
+            ('newgear', 'new gear, no adapter', style.CAT[0], 's', '-'),
+            ('newgear_notyres', 'new gear, tyres off', style.CAT[0], '', ':'))
+    fig, axes = style.figure(1, 3, width=7.0, height=3.0)
     for ax, key, unit, title in (
-            (a1, 'pitch_sd', 'pitch noise σ [°/s]', 'Pitch noise: −23 % to −86 %'),
-            (a2, 'duty', 'duty, controller scale [0-1023]', 'Cost: 4 % to 20 % more duty')):
-        before = [float(r[f'{key}_before' + ('_dps' if key == 'pitch_sd' else '')]) for r in rows]
-        after = [float(r[f'{key}_after' + ('_dps' if key == 'pitch_sd' else '')]) for r in rows]
-        ax.plot(v, before, '-o', color=style.CAT[1], lw=style.LINE_W, ms=style.MARKER_S - 1,
-                mec=style.SURFACE, mew=1.0, label='improvised adapter')
-        ax.plot(v, after, '-s', color=style.CAT[0], lw=style.LINE_W, ms=style.MARKER_S - 1,
-                mec=style.SURFACE, mew=1.0, label='adapter repaired')
-        ax.set_xlabel('drive-axle speed [rad/s]')
+            (axes[0], 'pitch_sd_{}_dps', 'pitch noise σ [°/s]', 'Pitch: vibration'),
+            (axes[1], 'yaw_sd_{}_dps', 'yaw noise σ [°/s]', 'Yaw: used for heading')):
+        for run, lbl, col, mk, ls in runs:
+            ax.plot(v, [float(r[key.format(run)]) for r in rows], ls + mk, color=col,
+                    lw=style.LINE_W, ms=style.MARKER_S - 2, mec=style.SURFACE, mew=0.8,
+                    label=lbl)
+        ax.set_ylim(bottom=0)
         ax.set_ylabel(unit)
         ax.set_title(title)
-        ax.set_ylim(bottom=0)
-        style.legend_below(ax, ncol=2)
+    ref = np.array([float(r['duty_adapter']) for r in rows])
+    for run, lbl, col, mk, ls in runs:
+        duty = np.array([float(r[f'duty_{run}']) for r in rows])
+        axes[2].plot(v, (duty / ref - 1) * 100, ls + mk, color=col, lw=style.LINE_W,
+                     ms=style.MARKER_S - 2, mec=style.SURFACE, mew=0.8, label=lbl)
+    axes[2].set_ylim(-15, 25)
+    axes[2].set_ylabel('duty vs. improvised adapter [%]')
+    axes[2].set_title('Duty: friction')
+    for ax in axes:
+        ax.set_xlabel('axle speed [rad/s]')
+    axes[2].legend(loc='upper right', fontsize=6.5, handlelength=2.2, borderaxespad=0.3)
     style.save(fig, out_dir, 'gear_repair',
-               'Source: bags PWM_vorher, PWM_nachher via data/mp3_before_after.csv (identical sweep, '
-               '14.8 V)  |  plot_power_sensors.py')
+               'Source: bags PWM_vorher, PWM_nachher, PWM_neuesZahnrad(_ohneRaeder) via '
+               'data/mp3_before_after.csv (sweep_noise.py)  |  plot_power_sensors.py')
 
 
 def main(argv=None):

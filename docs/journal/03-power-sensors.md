@@ -30,7 +30,7 @@ rubric for criterion 2:
 | Noise, interference, shadows | [Interference](#interference-measured-and-it-is-mechanical), [Camera](#camera) | PWM on and off give identical IMU noise; yaw unaffected; exposure measured on the field |
 | Calibration methods | [Calibration](#calibration) | cross-checked analogue channels; camera–LiDAR zone measured with a pillar at 5–6 distances; lens 197° measured, not 270° from the data sheet |
 | Failure points | [Protection](#protection), [Failure points and mitigation](#failure-points-and-mitigation) | 6.1 V clamp in front of the 650 € LiDAR; failure-mode table |
-| Iteration to improve reliability | [Design evolution](#design-evolution), [Iteration](#iteration-locating-and-removing-the-vibration-source) | five board revisions; gear repair −23 to −86 % pitch noise; three faults found by measurement |
+| Iteration to improve reliability | [Design evolution](#design-evolution), [Iteration](#iteration-locating-and-removing-the-vibration-source) | five board revisions; three drive-gear mountings measured, yaw noise −23 to −73 %; three faults found by measurement |
 
 All electronics of the vehicle sit on a single custom 4-layer PCB that mounts
 directly on top of the Jetson Orin Nano carrier board (Seeed A603) as a **stack**:
@@ -963,26 +963,35 @@ during coasting. That is the vehicle shifting on its stand, not scan noise.
 
 The measurement did more than characterise the noise — it exposed a mechanical
 defect. The rear drive gear sat on its shaft through an improvised adapter and ran
-out of true. Two further sweeps were recorded with the identical automated
-procedure ([`pwm_sweep`](../../src/esp_bridge/esp_bridge/pwm_sweep.py)), the same
-stand, the same supply voltage and the same eight setpoints, so the runs are
-directly comparable.
+out of true. The drivetrain went through three mountings, and each was measured
+with the identical automated procedure
+([`pwm_sweep`](../../src/esp_bridge/esp_bridge/pwm_sweep.py)): the same stand,
+the same bench supply and the same eight setpoints, so the runs are directly
+comparable. <!-- TODO confirm: third run also at 14.8 V? battery telemetry (fixed divider) reads 15.5 V; the first two runs predate the fix -->
 
-| v setpoint | Axle speed | Duty before → after (0–1023) | Pitch σ before → after | Change |
+1. **Improvised adapter** — the original state.
+2. **Adapter repaired** — the adapter refitted tighter.
+3. **New gear** — a gear that fits the shaft directly, no adapter at all.
+
+| v setpoint | Axle speed | Duty (0–1023) 1 → 2 → 3 | Pitch σ [°/s] 1 → 2 → 3 | Yaw σ [°/s] 1 → 2 → 3 |
 | ---: | ---: | ---: | ---: | ---: |
-| 0.2 m/s | 13.6 rad/s | 140 → 168 | 3.724 → 0.530 °/s | **−86 %** |
-| 0.4 m/s | 27.0 rad/s | 247 → 279 | 4.384 → 1.186 °/s | −73 % |
-| 0.6 m/s | 40.5 rad/s | 353 → 384 | 5.108 → 1.458 °/s | −71 % |
-| 0.8 m/s | 54.0 rad/s | 460 → 495 | 5.342 → 1.910 °/s | −64 % |
-| 1.0 m/s | 67.6 rad/s | 569 → 601 | 4.648 → 2.369 °/s | −49 % |
-| 1.2 m/s | 81.2 rad/s | 677 → 709 | 4.611 → 3.073 °/s | −33 % |
-| 1.4 m/s | 94.4 rad/s | 783 → 813 | 5.997 → 3.656 °/s | −39 % |
-| 1.6 m/s | 106.8 rad/s | 884 → 917 | 6.230 → 4.785 °/s | −23 % |
+| 0.2 m/s | 13.6 rad/s | 140 → 168 → 143 | 3.72 → 0.53 → 0.37 | 0.105 → 0.108 → 0.038 |
+| 0.4 m/s | 27.0 rad/s | 247 → 279 → 249 | 4.38 → 1.19 → 1.50 | 0.250 → 0.168 → 0.078 |
+| 0.6 m/s | 40.5 rad/s | 353 → 384 → 356 | 5.11 → 1.46 → 2.50 | 0.439 → 0.320 → 0.197 |
+| 0.8 m/s | 54.0 rad/s | 460 → 495 → 460 | 5.34 → 1.91 → 1.37 | 0.390 → 0.359 → 0.097 |
+| 1.0 m/s | 67.6 rad/s | 569 → 601 → 562 | 4.65 → 2.37 → 1.65 | 0.373 → 0.382 → 0.124 |
+| 1.2 m/s | 81.2 rad/s | 677 → 709 → 670 | 4.61 → 3.07 → 2.30 | 0.346 → 0.420 → 0.163 |
+| 1.4 m/s | 94.4 rad/s | 783 → 813 → 770 | 6.00 → 3.66 → 3.03 | 0.389 → 0.457 → 0.307 |
+| 1.6 m/s | 106.8 rad/s | 884 → 917 → 870 | 6.23 → 4.79 → 3.90 | 0.530 → 0.560 → 0.429 |
 
-Data: bags `PWM_vorher` and `PWM_nachher`, per step in [`data/mp3_before_after.csv`](../data/mp3_before_after.csv).
+Data: bags `PWM_vorher`, `PWM_nachher`, `PWM_neuesZahnrad` and
+`PWM_neuesZahnrad_ohneRaeder`, reduced per step by
+[`sweep_noise.py`](../analysis/sweep_noise.py) into
+[`data/mp3_before_after.csv`](../data/mp3_before_after.csv).
 
+**Step 1 → 2: the repair removed the knocking.** Pitch noise fell by 23 % to 86 %.
 In the coasting phases, 0.6–1.6 s after the drive is cut while the train is still
-turning, the reduction is **77 % to 91 %** across every step. Both runs share an
+turning, the reduction is 77 % to 91 % across every step. Both runs share an
 at-rest noise floor of 0.084 °/s, which is what establishes that the measurement
 conditions were identical.
 
@@ -993,19 +1002,32 @@ imbalance grows with rotational speed; a loose, knocking fit does not. The
 measurement therefore pointed at play in the mounting rather than at a balancing
 problem, which is exactly what the adapter turned out to be.
 
-**The repair cost friction.** For the same speed the controller now commands 4 % to
+**The repair cost friction.** For the same speed the controller commanded 4 % to
 20 % more duty, with the largest penalty at low speed — the signature of increased
-static friction from the tighter fit. Accepting that was a deliberate trade, and
-the power budget in [Power budget](#power-budget) is what justifies it: the motor
-accounts for 3 W of 19 W, so 10 % more duty costs under 2 % of total system power
-and is invisible in runtime.
+static friction from the tighter fit. The power budget in
+[Power budget](#power-budget) made that acceptable as an interim state: the motor
+accounts for 3 W of 19 W, so 10 % more duty costs under 2 % of total system power.
 
-**Third iteration, pending:** a gear that fits the shaft without any adapter is
-being fitted. The testable prediction is that duty returns to the pre-repair level
-while the pitch noise stays at the post-repair level — which would confirm that the
-friction came from the adapter and not from the gear mesh. <!-- TODO measure: third sweep, same procedure -->
+**Step 2 → 3: the prediction held.** Before the new gear was fitted we wrote down
+what it should show: if the friction came from the adapter and not from the gear
+mesh, duty must return to the level of step 1 while the noise stays low. It did.
+Duty is within −1.7 % to +2.1 % of the improvised adapter at every step, and the
+friction penalty of step 2 is gone. Above 0.8 m/s pitch noise is another 17 % to
+31 % lower than with the repaired adapter. Most important for the vehicle, the
+yaw noise — the only gyro axis the EKF uses — fell by 23 % to 73 % and stays at or
+below 0.2 °/s up to 1.2 m/s.
 
-![Pitch noise and commanded duty before and after the gear repair, identical sweep.](../figures/gear_repair.svg)
+**One new feature: a peak at 0.4–0.6 m/s.** With the new gear, pitch noise rises to
+2.5 °/s at 40 rad/s and falls again above it — a resonance, not a defect that grows
+with speed. To find its source the sweep was repeated with the tyres taken off.
+The peak disappears (0.57 and 0.89 °/s at 0.4 and 0.6 m/s), while from 54 to 94 rad/s
+the curves with and without tyres agree within 10 %. The low-speed peak
+therefore comes from the wheels, and the noise that remains at high speed from
+the motor and gearbox. Without tyres the roll noise also falls by 53 % to 92 %
+and duty by a further 3 % to 14 %. The wheels are the next place to look; for the
+heading they are already uncritical, since yaw stays at or below 0.2 °/s there.
+
+![Gyro noise and commanded duty over the three drive-gear mountings, identical sweep. The dotted line repeats the sweep with the new gear and the tyres removed.](../figures/gear_repair.svg)
 
 ## Calibration
 
@@ -1093,7 +1115,7 @@ turns.
 | Weak LiDAR returns on the black walls | Gaps in the wall scan | RPLIDAR S3 chosen for 15 m range at 10 % reflectivity | Small residual problem |
 | Sunlight on the camera | Green pillars read as black | Fixed bright exposure, pinned white balance, white-point correction | Residual in direct sunlight |
 | Inrush at power-on | Rail collapse, connector arcing | eFuse dV/dT (C19 = 180 pF) | Implemented |
-| Drivetrain run-out | Vibration into the IMU, mechanical wear | Gear mounting repaired; measured, see [Iteration](#iteration-locating-and-removing-the-vibration-source) | Pitch noise down 23–86 %, third iteration pending |
+| Drivetrain run-out | Vibration into the IMU, mechanical wear | Adapter replaced by a directly fitting gear; measured, see [Iteration](#iteration-locating-and-removing-the-vibration-source) | Yaw noise ≤ 0.2 °/s up to 1.2 m/s, friction back to the original level; wheel resonance at 0.4–0.6 m/s remains |
 
 Recorded field failures: none electrical. One ESP32 was destroyed during
 bench testing by an incorrect connection. No brownouts and no Jetson resets have
