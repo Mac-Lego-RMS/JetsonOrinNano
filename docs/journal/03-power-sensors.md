@@ -57,6 +57,8 @@ The board carries four jobs:
 
 ### Energy source
 
+<!-- TODO reconcile: the discharge curve reaches the 3.8 V/cell warning after 10 min; was ≈22 min observed while the divider read 18 % high (warning effectively at 3.21 V/cell)? -->
+
 | | Race pack | Endurance pack |
 | --- | --- | --- |
 | Type | Ovonic 4S LiPo | Ovonic 4S LiPo |
@@ -78,8 +80,30 @@ The 60 C rating is not required by the average current — it is required so tha
 the pack voltage does not sag during motor acceleration, which would otherwise
 propagate into the 5 V rail and into the low-voltage warning.
 
-<!-- TODO figure: discharge curves of both packs, recorded with
-ros2 bag record /esp_serial_bridge/battery over a full session per pack. -->
+#### Discharge curve
+
+With the battery monitoring repaired (see below), the race pack was recorded from
+full charge with the vehicle standing and the motor off.
+
+![Pack voltage of the race pack over time, against the low-voltage warning.](../figures/discharge.svg)
+
+Data: bag `Entladung_450` via [`battery_curve.py`](../analysis/battery_curve.py)
+into [`data/discharge.csv`](../data/discharge.csv). The vehicle lost power before
+the recording was stopped, so the bag was recovered with `sqlite3 .recover`; the
+readings at the very start and end show 17.4 V, more than a 4S pack can deliver,
+because a second source was plugged into the other input, and are dropped.
+
+| Time | Pack voltage | Per cell |
+| ---: | ---: | ---: |
+| start | 16.53 V | 4.13 V |
+| 3 min, one round | 16.0 V | 4.00 V |
+| 10.0 min | 15.2 V | 3.80 V — **warning** |
+| 14.5 min, end of recording | 14.90 V | 3.72 V |
+
+A round takes 3 minutes and leaves the pack at 4.0 V per cell, far above the
+warning, which arrives only after 10 minutes. A freshly charged race pack
+therefore covers a round with a large reserve. <!-- TODO confirm: was the whole stack running (≈1.1 A)? why was the recording ended at 14.9 V? -->
+<!-- TODO: endurance pack (Entladung_1150) into the same figure -->
 
 #### Battery monitoring
 
