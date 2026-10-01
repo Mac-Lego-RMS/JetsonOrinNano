@@ -8,11 +8,14 @@ computes the mean axle speed, the mean commanded duty and the standard
 deviation of the gyroscope on each axis.
 
 Several recordings of the same sweep are compared step by step and written
-as one table, one column group per recording:
+as one table, one column group per recording. Duty alone is only comparable
+at the same supply voltage; with --supply the table also gets the mean motor
+voltage, duty / 1023 x supply, which is what the speed actually depends on:
 
     python docs/analysis/sweep_noise.py \\
         adapter=PWM_vorher repaired=PWM_nachher \\
-        newgear=PWM_neuesZahnrad newgear_notyres=PWM_neuesZahnrad_ohneRaeder \\
+        newgear=PWM_neuesZahnrad newgear_nowheels=PWM_neuesZahnrad_ohneRaeder \\
+        --supply adapter=14.8 repaired=14.8 newgear=15.5 newgear_nowheels=15.5 \\
         --out docs/data/mp3_before_after.csv
 
 Each path is a bag directory or a single .db3 file. Only sqlite3 and the
@@ -145,21 +148,28 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('runs', nargs='+', metavar='label=bag')
+    ap.add_argument('--supply', nargs='*', default=[], metavar='label=volts',
+                    help='bench supply voltage per run, adds motor_v_<label> columns')
     ap.add_argument('--out', required=True)
     a = ap.parse_args(argv)
     runs = [r.split('=', 1) for r in a.runs]
+    supply = {k: float(v) for k, v in (s.split('=', 1) for s in a.supply)}
     res = {label: analyse(path) for label, path in runs}
     first = res[runs[0][0]]
     setpoints = sorted(set.intersection(*(set(r) for r in res.values())))
     head = ['v_cmd_mps', 'axle_rad_s']
     for key in ('duty', 'pitch_sd', 'roll_sd', 'yaw_sd'):
         head += [f'{key}_{label}' + ('' if key == 'duty' else '_dps') for label, _ in runs]
+        if key == 'duty':
+            head += [f'motor_v_{label}' for label, _ in runs if label in supply]
     with open(a.out, 'w', newline='') as fh:
         w = csv.writer(fh)
         w.writerow(head)
         for v in setpoints:
             row = [v, round(first[v]['axle'], 1)]
             row += [round(res[l][v]['duty']) for l, _ in runs]
+            row += [round(res[l][v]['duty'] / 1023 * supply[l], 3) for l, _ in runs
+                    if l in supply]
             for ax in ('pitch', 'roll', 'yaw'):
                 row += [round(res[l][v][ax], 3) for l, _ in runs]
             w.writerow(row)

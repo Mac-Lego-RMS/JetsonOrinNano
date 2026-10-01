@@ -10,8 +10,8 @@ and writes four figures:
   imu_noise        gyroscope noise per axis over drive-axle speed, and the
                    driven/coasting comparison that separates vibration from
                    electrical interference (MP3)
-  gear_repair      pitch and yaw noise and duty over the three drive-gear
-                   mountings, and with the tyres removed
+  gear_repair      pitch and yaw noise and motor voltage over the three
+                   drive-gear mountings, and with the wheels removed
 
     python docs/analysis/plot_power_sensors.py
 """
@@ -153,7 +153,7 @@ def gear_repair(out_dir):
     runs = (('adapter', 'improvised adapter', style.CAT[1], 'o', '-'),
             ('repaired', 'adapter repaired', style.CAT[3], 'D', '-'),
             ('newgear', 'new gear, no adapter', style.CAT[0], 's', '-'),
-            ('newgear_notyres', 'new gear, tyres off', style.CAT[0], '', ':'))
+            ('newgear_nowheels', 'new gear, wheels off', style.CAT[0], '', ':'))
     fig, axes = style.figure(1, 3, width=7.0, height=3.0)
     for ax, key, unit, title in (
             (axes[0], 'pitch_sd_{}_dps', 'pitch noise σ [°/s]', 'Pitch: vibration'),
@@ -165,14 +165,14 @@ def gear_repair(out_dir):
         ax.set_ylim(bottom=0)
         ax.set_ylabel(unit)
         ax.set_title(title)
-    ref = np.array([float(r['duty_adapter']) for r in rows])
+    ref = np.array([float(r['motor_v_adapter']) for r in rows])
     for run, lbl, col, mk, ls in runs:
-        duty = np.array([float(r[f'duty_{run}']) for r in rows])
-        axes[2].plot(v, (duty / ref - 1) * 100, ls + mk, color=col, lw=style.LINE_W,
+        volt = np.array([float(r[f'motor_v_{run}']) for r in rows])
+        axes[2].plot(v, (volt / ref - 1) * 100, ls + mk, color=col, lw=style.LINE_W,
                      ms=style.MARKER_S - 2, mec=style.SURFACE, mew=0.8, label=lbl)
-    axes[2].set_ylim(-15, 25)
-    axes[2].set_ylabel('duty vs. improvised adapter [%]')
-    axes[2].set_title('Duty: friction')
+    axes[2].set_ylim(-10, 25)
+    axes[2].set_ylabel('change against improvised adapter [%]')
+    axes[2].set_title('Motor voltage: friction')
     for ax in axes:
         ax.set_xlabel('axle speed [rad/s]')
     axes[2].legend(loc='upper right', fontsize=6.5, handlelength=2.2, borderaxespad=0.3)
