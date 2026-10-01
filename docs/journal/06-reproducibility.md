@@ -14,7 +14,7 @@ for criterion 5:
 | --- | --- | --- |
 | Fully reproducible | [Building and flashing](#building-and-flashing) | environment recipe, device rules, calibration files, firmware; the three upstream packages pinned or included with their changes |
 | Clear project structure | [Repository structure](#repository-structure) | the WRO folder layout; one folder per component |
-| CAD, code and wiring included | [Repository structure](#repository-structure) | PCB in KiCad with BOM, chassis CAD, all code; wiring in [chapter 3](03-power-sensors.md) |
+| CAD, code and wiring included | [Repository structure](#repository-structure) | PCB in KiCad with BOM, chassis CAD, all code; wiring in [chapter 2](03-power-sensors.md) |
 | Documented testing workflow | [Testing workflow](#testing-workflow) | unit tests without hardware, reproducible bench sweeps, every field run recorded and evaluated, CI |
 | Meaningful commits, versioning | [Versions](#versions) | more than 300 commits since November 2025; tagged releases with notes |
 
@@ -125,11 +125,11 @@ API, then list it here. -->
 **On the bench.** Measurements are repeatable by construction: the speed sweep
 `ros2 run esp_bridge pwm_sweep` drives identical steps before and after a change,
 and hand measurements go to [`docs/data/manual/`](../data/manual) — see
-[chapter 3](03-power-sensors.md).
+[chapter 2](03-power-sensors.md).
 
 **On the field.** Every run is recorded as a rosbag. The scripts in
 [`docs/analysis/`](../analysis) turn the bags into metrics and figures; the
-results over all recorded runs are in [chapter 4](04-software.md).
+results over all recorded runs are in [chapter 3](04-software.md).
 
 On every push to `main`, GitHub Actions checks the README length and
 untranslated text and builds this journal as a PDF.

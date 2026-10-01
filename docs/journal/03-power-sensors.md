@@ -401,7 +401,7 @@ built-in current sense output, which removes the need for a separate shunt and
 amplifier on a board with no spare area.
 
 Motor specifications (type, rated voltage, gear ratio, stall current) are
-documented in [chapter 2](02-mobility.md).
+documented in [chapter 1](02-mobility.md).
 
 #### Drive current characterisation
 
@@ -710,7 +710,7 @@ actuation.** No sensor used for perception is routed through the microcontroller
 imprecise and awkward to use: the LiDAR already measures every direction at once.
 The orange and blue lines on the floor are not used either. The LiDAR, in
 combination with the EKF, localises the vehicle in the field
-([chapter 4](04-software.md)), so a line sensor would add a second source for
+([chapter 3](04-software.md)), so a line sensor would add a second source for
 information the vehicle already has.
 
 ### LiDAR: selection
@@ -823,7 +823,7 @@ anyway, so practically every LiDAR point can be given a colour.
 
 **Why this camera.** The comparison against the previous 120° camera — which
 seats of the next straight are visible before a corner — is in
-[chapter 4](04-software.md). A CSI camera with this field of view exists only for
+[chapter 3](04-software.md). A CSI camera with this field of view exists only for
 the Raspberry Pi, which made USB the only option.
 
 **Why no neural network.** The first vehicle detected pillars with a YOLO model:
@@ -845,12 +845,12 @@ weak spot for the same reason.
 **Why the BNO055.** It fuses gyroscope, accelerometer and magnetometer on the
 chip and delivers a bias-compensated yaw rate. A cheaper IMU used before drifted
 too much. The EKF uses only the yaw rate at 100 Hz, scaled by a factor from a
-calibration over five full turns ([chapter 4](04-software.md)).
+calibration over five full turns ([chapter 3](04-software.md)).
 
 **Measured drift.** Standing still for 141 s, the integrated yaw rate ran to
 −4.6°, i.e. **−1.95° per minute**, or about 6° over a three-minute round. That is
 small, but not zero, and it is why the heading is corrected continuously from the
-LiDAR ([chapter 4](04-software.md)).
+LiDAR ([chapter 3](04-software.md)).
 
 **Position.** On the rear axle. It is the one place not covered by the Jetson and
 the farthest from the rest of the electronics. For the EKF the position costs
@@ -1073,7 +1073,7 @@ Exposure, gain and white balance are measured on the field mat — see
 ### Steering and gyro
 
 Both are calibrated on the vehicle and described with the software that uses
-them in [chapter 4](04-software.md): the steering characteristic is measured per
+them in [chapter 3](04-software.md): the steering characteristic is measured per
 speed (0.35, 0.50 and 0.75 m/s), and the gyro scale factor comes from five full
 turns.
 

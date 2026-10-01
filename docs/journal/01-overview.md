@@ -52,7 +52,9 @@ from? -->
 
 ## Team
 
-Team MäcLEGO, Rabanus-Maurus-Schule Fulda.
+Team MäcLEGO started at the Rabanus-Maurus-Schule in Fulda. In the meantime all
+three of us are at university: Jannik studies robotics, Clemens digital
+engineering in mechanical engineering and Finn mathematics.
 
 ![Team MäcLEGO.](../../t-photos/team_photo.jpeg){width=60%}
 

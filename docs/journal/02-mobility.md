@@ -6,8 +6,8 @@ Owner: Clemens. Rubric criterion 1.
 6 points: torque and speed reasoning; trade-offs; why components were chosen;
 tests or iterations that changed the design and improved performance.
 Status 01.10.: Clemens' draft (Hardware.zip, commit de8f8ce) integrated, language
-and format aligned with the other chapters, cross-checked against chapters 3
-and 4. Driven steering angles replaced by the measured steering calibration.
+and format aligned with the other chapters, cross-checked against chapters 2
+and 3. Driven steering angles replaced by the measured steering calibration.
 CHECK before submission: every value marked ‡ is still a placeholder from the
 test plan (docs/data/manual/mobility_measurements.xlsx). Replace it with a
 measured value or delete it - placeholders must not be submitted as data.
@@ -18,7 +18,7 @@ final with a screw-jointed monocoque, an Ackermann steering linkage and a rigid
 rear axle. Three limitations of the old platform triggered the redesign: steering
 play, parallel steering without Ackermann geometry, and a vehicle size set by the
 standard Jetson developer kit. Moving to the compact Seeed A603 carrier board and
-an SMD-assembled main PCB ([chapter 3](03-power-sensors.md#pcb-implementation))
+an SMD-assembled main PCB ([chapter 2](03-power-sensors.md#pcb-implementation))
 freed the space that made a consistent mechanical redesign possible. The key
 figures are compared with the national-final robot in
 [the overview](01-overview.md#the-vehicle-at-a-glance).
@@ -30,7 +30,7 @@ about 120 design cycles for the entire previous robot.
 > Values marked ‡ come from the mechanical test plan and are still being
 > measured; the state of every test is listed under
 > [Validation status](#validation-status). Unmarked values are CAD data, data
-> sheets or measurements documented in chapters 3 and 4.
+> sheets or measurements documented in chapters 2 and 3.
 
 ## Chassis
 
@@ -163,7 +163,7 @@ gears, which skipped. Both were replaced by steel axles and brass bevel gears.
 
 The trade-off is the same as at the national final: LiDAR field of view against
 compact electronics, but its weighting changed. The camera now gives every LiDAR
-point a colour ([chapter 4](04-software.md#colour)), so it has to sit as close as
+point a colour ([chapter 3](04-software.md#colour)), so it has to sit as close as
 possible to the LiDAR scan plane. The national-final robot tapered the front to
 the width of the servo driver; since the servo, motor and LiDAR drivers moved onto
 the main PCB, that constraint is gone.
@@ -180,7 +180,7 @@ $z$ up.
 
 The LiDAR sits lower than before, which keeps the offset to the camera small. The
 price is the field of view: the main PCB at scan height blocks the rear, so the
-software uses 240° ([chapter 4](04-software.md#colour)), about 10° less than the
+software uses 240° ([chapter 3](04-software.md#colour)), about 10° less than the
 national-final robot. A full 360° view would need a lower Jetson and therefore a
 custom cooler; a higher LiDAR would increase the camera offset again. The current
 position is a deliberate compromise: what the robot needs is the view ahead and
@@ -190,7 +190,7 @@ The IMU sits above the rear-axle centre, the reference point of the kinematic
 bicycle model, where the lateral velocity is zero as long as the tyres do not
 slip. Its yaw rate needs no lever-arm correction. Neither the IMU nor the LiDAR is
 isolated:
-[chapter 3](03-power-sensors.md#interference-measured-and-it-is-mechanical) shows
+[chapter 2](03-power-sensors.md#interference-measured-and-it-is-mechanical) shows
 that the drivetrain vibration stays out of the yaw axis.
 
 ### Body: VW T1
@@ -231,7 +231,7 @@ time.
 A dedicated stand lifts the wheels off the ground. Drivetrain and steering can be
 analysed on it, and the software can "drive" without the robot moving; the
 vibration sweeps in
-[chapter 3](03-power-sensors.md#interference-measured-and-it-is-mechanical) were
+[chapter 2](03-power-sensors.md#interference-measured-and-it-is-mechanical) were
 recorded on it.
 
 ## Steering
@@ -268,7 +268,7 @@ allowed 44°. To keep the joints inside their range at full lock, the servo was
 rotated by 12°. As a result its travel is asymmetric: from the centre at 15.69° it
 turns 67.9° to the right stop (83.62°) and 97.9° to the left stop (−82.16°). This
 is one reason why the steering table
-([chapter 4](04-software.md#lane-following)) is measured separately for each
+([chapter 3](04-software.md#lane-following)) is measured separately for each
 side.
 
 Camber, caster and toe are 0° by design. With cast tyres, 0° camber gives the
@@ -358,7 +358,7 @@ and a stiffer gearbox (Feetech STS3032, 12 bit, 4.5 kg·cm stall torque).
 The mechanics reach 58° at the inner wheel, a bicycle-equivalent angle of 45°
 (CAD, from the formula above). While driving, the robot reaches only about half
 of that. The steering calibration
-([chapter 4](04-software.md#lane-following)) derives the effective angle from the
+([chapter 3](04-software.md#lane-following)) derives the effective angle from the
 measured yaw rate and speed:
 
 | Full lock | Static (CAD) | Driven, 0.35 m/s | Driven, 0.50 m/s | Driven, 0.75 m/s |
@@ -403,9 +403,9 @@ encoder, the yaw rate from the IMU.
 - The steering turned about twice as far as commanded, more so at higher speed.
   These two runs still used the steering table of the previous vehicle. With
   the table measured again on Napoleon
-  ([chapter 4](04-software.md#lane-following)), the ratio of measured to
+  ([chapter 3](04-software.md#lane-following)), the ratio of measured to
   commanded yaw rate over all test runs from 26 September is 1.13 in the median
-  (0.9–1.5, [chapter 4](04-software.md#lane-following)).
+  (0.9–1.5, [chapter 3](04-software.md#lane-following)).
 - The robot came back to within a few millimetres of its start point after each
   lap. The error was systematic, so a calibration could remove it.
 - A superimposed oscillation scaled exactly with speed, once per wheel
@@ -416,10 +416,10 @@ encoder, the yaw rate from the IMU.
 
 Napoleon uses a 25GA370 gear motor (1000 rpm at 12 V, sold as "BORDSTRACT"), with
 an integrated Hall encoder that gives 408 counts per wheel revolution
-([chapter 3](03-power-sensors.md#wheel-encoder)). It drives the rear axle 1:1.
+([chapter 2](03-power-sensors.md#wheel-encoder)). It drives the rear axle 1:1.
 The encoder closes the speed loop, which the national-final robot did not have,
 and it allowed the 12 V motor rail to be removed from the PCB
-([chapter 3](03-power-sensors.md#the-12-v-rail-was-removed--and-software-is-why)).
+([chapter 2](03-power-sensors.md#the-12-v-rail-was-removed--and-software-is-why)).
 
 ![Drivetrain. Motor with bevel gear, second bevel gear on the D-shaft, rear wheels with cast silicone tyres.](../figures/mobility_powertrain.png){width=90%}
 
@@ -456,7 +456,7 @@ weighs 190 g, about twice the 25GA370, and its 37 mm diameter would have needed 
 deeper recess or a higher Jetson level. More torque also buys nothing on this
 robot: driving into a wall at full duty, the tyres lose grip at a winding current
 of about 0.53 A, far below stall
-([chapter 3](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)).
+([chapter 2](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)).
 The drivetrain is limited by traction, not by the motor.
 
 The 25GA370 leaves enough headroom for faster speed profiles: at 100 % PWM on 4S
@@ -487,9 +487,9 @@ $$a_\text{traction} = \frac{\mu \cdot g \cdot l_f / L}{1 - \mu \cdot h / L}$$
 | Time constant $\tau$ (63.2 %) | step response (T07) | 0.34 s ‡ |
 | Max. measured acceleration | step response (T07) | 4.6 m/s² ‡ |
 | Traction limit, rear-wheel drive | formula above, $\mu = 0.88$ ‡ | 4.9 m/s² ‡ |
-| Deceleration after a halt command | fitted to the stopping distances of runs 38–42 ([chapter 4](04-software.md#obstacle-strategy)) | 0.57 m/s² |
+| Deceleration after a halt command | fitted to the stopping distances of runs 38–42 ([chapter 3](04-software.md#obstacle-strategy)) | 0.57 m/s² |
 | Rolling resistance incl. drivetrain drag | $c_r = a/g$ | ≤ 0.058 (upper bound, it also contains the drag of gearbox and motor) |
-| Limiting factor at launch | wall test ([chapter 3](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)) | traction |
+| Limiting factor at launch | wall test ([chapter 2](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)) | traction |
 
 <!-- TODO (Clemens): the step-response figure of the draft shows placeholder data.
 Add it back (docs/figures/mobility_step_response.png) once test T07 is
@@ -499,7 +499,7 @@ The measured acceleration stays just below the traction limit ‡, and the wall 
 shows the tyres slipping long before the motor stalls. Stall torque and stall
 current were therefore not measured: they are never reached. The vehicle has no
 active brake; it coasts, and the controller triggers every halt early by the
-coasting distance ([chapter 4](04-software.md#obstacle-strategy)).
+coasting distance ([chapter 3](04-software.md#obstacle-strategy)).
 
 ### Power transmission
 
@@ -512,7 +512,7 @@ secured with retaining rings.
 
 **Fault found by measurement.** The rear bevel gear first sat on the shaft
 through an improvised adapter and ran out of true. The IMU vibration sweep in
-[chapter 3](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)
+[chapter 2](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)
 found it before the part was inspected: after the repair the pitch noise dropped
 by 23–86 %, at the cost of 4–20 % more duty from the tighter fit. A gear that fits
 the shaft without any adapter is the third iteration.
@@ -539,7 +539,7 @@ This is the central trade-off of the drivetrain: a shorter, simpler vehicle
 against tyre scrub and understeer in tight corners
 ([Mechanical lock vs driven lock](#mechanical-lock-vs-driven-lock)). Above
 500 mm the slip is below 10 %, and the planner keeps every arc at
-$R \geq 0.30$ m ([chapter 4](04-software.md#lane-following)), so the effect was
+$R \geq 0.30$ m ([chapter 3](04-software.md#lane-following)), so the effect was
 accepted and is handled by the measured steering table.
 
 ### Tyres: cast silicone
@@ -586,7 +586,7 @@ gone.
 | Measured diameter, 4 tyres, 3 positions each | 31.98–32.06 mm ‡ | test T12 |
 | Runout (max − min per tyre) | ≤ 0.08 mm ‡ | test T12 |
 | Mass per wheel (rim + tyre) | 9.2–9.7 g ‡ | test T17 |
-| Effective rolling radius under load | 15.0 mm | encoder model of the EKF ([chapter 4](04-software.md#localisation)) |
+| Effective rolling radius under load | 15.0 mm | encoder model of the EKF ([chapter 3](04-software.md#localisation)) |
 | Effective diameter from 10 × 2.00 m | 30.03 mm ‡ | test T04 |
 | Lateral deviation after 3 m straight, steering at 0 | 21 mm ‡ | test T12 |
 
@@ -624,7 +624,7 @@ properly laid mat.
 The software describes the vehicle with a kinematic bicycle model
 \[[9](99-references.md#ref-9)\] around the rear-axle centre. The CAD wheelbase is
 $L = 102$ mm; the software rounds it to 0.10 m. The real steering angle comes from
-the measured table ([chapter 4](04-software.md#lane-following)), which already
+the measured table ([chapter 3](04-software.md#lane-following)), which already
 contains the scrub of the rigid axle.
 
 ## Iterations
@@ -674,7 +674,7 @@ The mechanical design took about seven months from a first component layout to
 - **Aligned seam in the tyre mould:** once-per-revolution bump; mould reprinted
   with a random seam.
 - **Gear adapter on the drive shaft:** ran out of true; found by the IMU sweep
-  ([chapter 3](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)).
+  ([chapter 2](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)).
 
 ### Lessons learned
 
@@ -713,4 +713,4 @@ The mechanical design took about seven months from a first component layout to
 | T16 FEA C-profile old vs. v54 | – | [Materials and manufacturing](#materials-and-manufacturing) |
 
 The driven steering angles (formerly tests T06/T09) come from the measured
-steering calibration ([chapter 4](04-software.md#lane-following)).
+steering calibration ([chapter 3](04-software.md#lane-following)).

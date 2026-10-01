@@ -111,6 +111,11 @@ def join_chapters(mmdc):
             return '![](%s){width=%d%%}\n' % (rel, diagram_width(img))
 
         text = MERMAID_BLOCK.sub(replace, text)
+        if path.name.startswith('01-'):
+            # The overview is chapter 0, so that chapters 1-5 carry the
+            # numbers of the five rubric criteria. An unnumbered heading does
+            # not step the heading counter; its sections become 0.1, 0.2, ...
+            text = re.sub(r'^# (.+)$', r'# 0 \1 {-}', text, count=1, flags=re.M)
         # Links between chapter files only make sense on GitHub.
         text = CHAPTER_LINK.sub(r'\1', text)
         parts.append(text)
