@@ -727,7 +727,7 @@ Three candidates were compared:
 | Angular resolution | ≈0.7° at 10 Hz (5 000 / 10 per turn) | 0.2° at 10 Hz | 0.1125° |
 | Interface | UART | Ethernet (UDP), 12 V supply | UART up to 1 Mbaud |
 | Price | 79 € | 309 € | 650 € |
-| Outcome | used first; too slow, unreliable on the black walls | rejected: too large and too tall, rear blind zone | chosen |
+| Outcome | used first; too slow, unreliable on the black walls | rejected: too large and too tall, Ethernet and 12 V supply | chosen |
 
 Sources: manufacturer data
 ([STL-19P](https://www.amazon.de/dp/B09VKZ9YNT),
@@ -742,13 +742,17 @@ walls. Today the EKF runs at 100 Hz on gyro and encoder and no longer waits for
 scans, but a higher scan rate still means fresher and denser position fixes.
 
 **The LakiBeam 1S would have been capable**, but it is too large and too tall
-for the chassis, and its 90° blind zone to the rear made us unsure for a
-vehicle that has to leave a parking bay backwards and localise on walls in every
-direction.
+for the chassis. It also talks over Ethernet and needs a 12 V supply: the main
+PCB has no 12 V rail any more (see [Regulation](#regulation)),
+and the data would have had to go through the Jetson's only Ethernet port
+instead of the LiDAR bridge on the main PCB. Its specified range on dark
+surfaces is also lower (≥ 10 m against 15 m at 10 % reflectivity).
 
-**The RPLIDAR S3** covers all 360°, keeps 15 m of range on 10 % reflectivity —
-the black walls — and at 15 Hz runs in its DenseBoost mode, which is the
-setting with the best accuracy; on our vehicle it delivers ≈2 520 valid points
+**The RPLIDAR S3** scans the full 360° and keeps 15 m of range on 10 %
+reflectivity — the black walls. On the vehicle the main PCB blocks the rear, so
+the software uses the front 240° (see
+[Sensor mounting](02-mobility.md#sensor-mounting)). At 15 Hz the S3 runs in its
+DenseBoost mode, which is the setting with the best accuracy; on our vehicle it delivers ≈2 520 valid points
 per turn. At 650 € it is the most expensive part of the vehicle, which is the
 reason the 5 V rail it hangs on is protected by the eFuse (see
 [Protection](#protection)). The black walls remain a small residual problem.
@@ -866,11 +870,13 @@ with the encoder and the LiDAR.
 
 A Hall encoder on the drive motor (BORDSTRACT 12 V, 1 000 rpm gear motor). It was
 already fitted, and Hall sensing is the most reliable option. Counting both edges
-of both channels gives 408 counts per wheel revolution; with the 32 mm wheel
-that is
+of both channels gives 408 counts per wheel revolution. The silicone tyre is
+compressed under the weight of the car, so the effective rolling diameter is
+30.0 mm instead of the nominal 32 mm (see [Tyres](02-mobility.md#tyres-cast-silicone)),
+and one count is
 
 $$
-\frac{\pi \cdot 32\,\mathrm{mm}}{408} \approx 0.25\,\mathrm{mm}\ \text{per count}.
+\frac{\pi \cdot 30.0\,\mathrm{mm}}{408} \approx 0.231\,\mathrm{mm}\ \text{per count}.
 $$
 
 The electrical interface and its filter are described under

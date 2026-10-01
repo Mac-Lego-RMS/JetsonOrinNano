@@ -748,8 +748,7 @@ Almost all of these runs were driven with a cruise speed of 0.35 m/s; the
 faster speed profile (0.75 m/s on straights) was only set afterwards (commit
 3f3a22d).
 
-<!-- CHECK (team): which speed and lap times did you drive after 28.09.? The
-27 s (open) and 80 s (obstacle) in this chapter need a source. Were the
+<!-- CHECK (team): which speed did you drive after 28.09.? Were the
 position-move timeouts fixed (minduty raised)? The logs of "log ends while
 driving" cannot tell a manual stop from a hanging robot; check run_outcomes.csv
 against your notes. -->

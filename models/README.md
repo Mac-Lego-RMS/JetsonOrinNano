@@ -3,19 +3,18 @@
 Files for 3D printers, laser cutters and CNC machines used to build the
 vehicle.
 
-The chassis CAD currently lives in [`../src/Hardware/`](../src/Hardware):
+| File | What it is |
+|---|---|
+| [`Napoleon v36.step`](Napoleon%20v36.step) | full assembly "Napoleon" (chassis, steering, drive train, body), neutral exchange format |
+| [`Chassis Vertikal.step`](Chassis%20Vertikal.step) | chassis "Chassis Vertikal", neutral exchange format |
+
+The Fusion 360 source and the STL mesh of the chassis are in
+[`../src/Hardware/`](../src/Hardware):
 
 | File | What it is |
 |---|---|
 | `Chassis Vertikal.f3d` | Fusion 360 source (tracked via Git LFS) |
-| `Chassis Vertikal.step` | neutral exchange format |
 | `Chassis Vertikal.stl` | mesh for printing |
 
-- [ ] move or copy the printable parts here, so the models sit where the
-      judges look for them
-- [ ] add one file per printed part instead of a single assembly, if the
-      parts are printed separately
-
-> Note: `src/` is checked out on the robot itself. Large CAD files placed
-> there are pulled onto the Jetson on every clone even though it never
-> needs them — this folder is the better home for them.
+The design of every part is described in the
+[mobility chapter of the journal](../docs/journal/02-mobility.md).

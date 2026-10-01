@@ -98,8 +98,8 @@ The details are in [chapter 4](docs/journal/04-software.md).
 |---|---|
 | [`src/`](src) | all code: ROS 2 packages, ESP32 firmware, start script |
 | [`schemes/`](schemes) | main PCB: KiCad project, schematic PDF, BOM and placement files |
-| [`models/`](models) | files for 3D printing |
-| [`src/Hardware/`](src/Hardware) | chassis CAD: Fusion 360, STEP, STL |
+| [`models/`](models) | CAD as STEP: full assembly and chassis |
+| [`src/Hardware/`](src/Hardware) | chassis CAD: Fusion 360 source and STL |
 | [`config/`](config) | calibration files the nodes load at run time |
 | [`setup/`](setup) | what the Jetson needs beyond this repository: environment, device rules, autostart |
 | [`docs/`](docs) | engineering journal, analysis scripts, measurement data, figures |

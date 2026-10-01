@@ -25,7 +25,8 @@ for criterion 5:
 | [`src/`](../../src) | all code: the ROS 2 packages, the ESP32 firmware, the start script |
 | [`src/esp_firmware/`](../../src/esp_firmware) | firmware of the ESP32-S3 on the main board (PlatformIO) |
 | [`schemes/`](../../schemes) | main PCB: KiCad project, schematic PDF, BOM and placement files |
-| [`src/Hardware/`](../../src/Hardware) | chassis CAD: Fusion 360 source, STEP, STL |
+| [`models/`](../../models) | CAD as STEP: full assembly and chassis |
+| [`src/Hardware/`](../../src/Hardware) | chassis CAD: Fusion 360 source and STL |
 | [`config/`](../../config) | calibration files the nodes load at run time |
 | [`setup/`](../../setup) | everything the Jetson needs beyond the repository |
 | [`docs/`](..) | this journal, the analysis scripts, the measurement data behind every figure |
@@ -79,7 +80,8 @@ The serial protocol between the Jetson and the ESP32 is specified in
 **Hardware.** The main PCB is a KiCad project in
 [`schemes/MainPCB`](../../schemes/MainPCB); BOM and placement files for
 assembly are in its `production/` folder, the Gerber files are generated from the
-board when ordering. The chassis is in [`src/Hardware`](../../src/Hardware).
+board when ordering. The CAD is in [`models`](../../models) (STEP) and
+[`src/Hardware`](../../src/Hardware) (Fusion 360 source, STL).
 
 ## Running the vehicle
 
