@@ -115,7 +115,7 @@ running vehicle. In short:
 ```bash
 # Git LFS first: src/ contains CAD files stored with LFS
 sudo apt install git-lfs && git lfs install
-git clone --recurse-submodules https://github.com/Mac-Lego-RMS/JetsonOrinNano ~/ros2_ws
+git clone --recurse-submodules https://github.com/Mac-Lego-RMS/MaecLEGO-WRO-FE-2026 ~/ros2_ws
 cd ~/ros2_ws
 
 sudo cp setup/udev/*.rules /etc/udev/rules.d/ && sudo udevadm trigger
@@ -164,7 +164,7 @@ speed sweep `ros2 run esp_bridge pwm_sweep`. The workflow is described in
 
 | Version | State |
 |---|---|
-| [v1.0](https://github.com/Mac-Lego-RMS/JetsonOrinNano/releases/tag/v1.0) | German national final, June 2026 |
+| [v1.0](https://github.com/Mac-Lego-RMS/MaecLEGO-WRO-FE-2026/releases/tag/v1.0) | German national final, June 2026 |
 | v2.0 | international final — the current `main` |
 
 ## On the Jetson

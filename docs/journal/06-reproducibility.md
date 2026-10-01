@@ -138,7 +138,7 @@ untranslated text and builds this journal as a PDF.
 
 | Version | Commit | State |
 | --- | --- | --- |
-| [`v1.0`](https://github.com/Mac-Lego-RMS/JetsonOrinNano/releases/tag/v1.0) | `40f0dad` | national final, June 2026 |
+| [`v1.0`](https://github.com/Mac-Lego-RMS/MaecLEGO-WRO-FE-2026/releases/tag/v1.0) | `40f0dad` | national final, June 2026 |
 | `v2.0` | — | international final; tagged with the submission |
 
 Each version is a tagged release with notes on GitHub. For every tag starting
