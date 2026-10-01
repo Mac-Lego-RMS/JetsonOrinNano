@@ -1045,6 +1045,29 @@ remaining friction; for the heading they are already uncritical.
 
 ![Gyro noise and motor voltage over the three drive-gear mountings, identical sweep. The dotted line repeats the sweep with the new gear and the wheels removed.](../figures/gear_repair.svg)
 
+**The spectrum confirms each diagnosis independently.** The IMU samples at
+100 Hz, so vibration up to 50 Hz is visible — at 0.6 m/s that is up to seven times
+the wheel rotation frequency. Plotting frequency as a multiple of the wheel
+rotation (the *order*) separates the possible sources: a part that is unbalanced
+or runs out of true shakes once per revolution (order 1); a loose part that knocks
+shakes several times per revolution (higher orders).
+
+- **Improvised adapter:** the largest peaks sit at orders 4 and 7, up to 3 °/s —
+  repeated impacts every revolution, the loose fit.
+- **Adapter repaired:** one single line at order 1, 1.1 °/s at 0.6 m/s and 2.0 °/s
+  at 1.0 m/s — run-out, once per revolution, which is why this noise grew with speed.
+- **New gear:** at 1.0 m/s the order-1 line has dropped to 0.5 °/s. At 0.6 m/s
+  order 1 and its multiples rise again, to 1.6 °/s: the resonance.
+- **Wheels off:** no line at any order, only a broad floor below 0.5 °/s.
+
+The noise level and the spectrum are two independent readings of the same
+recordings, and they point at the same causes.
+
+![Pitch-rate spectrum at 0.6 and 1.0 m/s, frequency as a multiple of the wheel rotation. Peaks at whole orders are tied to the rotating drivetrain.](../figures/vibration_orders.svg)
+
+Data: [`data/mp3_order_spectrum.csv`](../data/mp3_order_spectrum.csv), written by
+[`sweep_noise.py`](../analysis/sweep_noise.py) `--orders`.
+
 ## Calibration
 
 No sensor on this vehicle is trusted on its data sheet or schematic alone. The

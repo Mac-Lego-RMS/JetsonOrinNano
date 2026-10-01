@@ -16,7 +16,12 @@ voltage, duty / 1023 x supply, which is what the speed actually depends on:
         adapter=PWM_vorher repaired=PWM_nachher \\
         newgear=PWM_neuesZahnrad newgear_nowheels=PWM_neuesZahnrad_ohneRaeder \\
         --supply adapter=14.8 repaired=14.8 newgear=15.5 newgear_nowheels=15.5 \\
-        --out docs/data/mp3_before_after.csv
+        --out docs/data/mp3_before_after.csv --orders docs/data/mp3_order_spectrum.csv
+
+With --orders the pitch-rate spectrum of every step is written as well, with
+frequency expressed as a multiple ("order") of the axle's rotation frequency.
+A component at order 1 repeats once per wheel revolution (imbalance, run-out);
+orders 2, 3, 4 ... are what impacts from a loose fit produce.
 
 Each path is a bag directory or a single .db3 file. Only sqlite3 and the
 standard library are needed: the few message types used are decoded here.
@@ -31,7 +36,11 @@ import struct
 import sys
 from pathlib import Path
 
+import numpy as np
+
 SETTLE_S = 1.5
+ORDER_STEP = 0.1
+ORDER_MAX = 10.0
 
 
 class Cdr:
@@ -109,9 +118,28 @@ def read_topic(db, topic, decode):
     return [(ts / 1e9, decode(bytes(d))) for ts, d in rows]
 
 
-def window(series, t0, t1):
+def window_tv(series, t0, t1):
     ts = [t for t, _ in series]
-    return [v for _, v in series[bisect.bisect_left(ts, t0):bisect.bisect_left(ts, t1)]]
+    return series[bisect.bisect_left(ts, t0):bisect.bisect_left(ts, t1)]
+
+
+def window(series, t0, t1):
+    return [v for _, v in window_tv(series, t0, t1)]
+
+
+def order_spectrum(t, x, axle_rad_s):
+    """Amplitude spectrum of x [°/s] on a grid of orders of the axle rotation."""
+    t, x = np.asarray(t), np.degrees(np.asarray(x))
+    fs = 1.0 / np.median(np.diff(t))
+    w = np.hanning(len(x))
+    amp = np.abs(np.fft.rfft((x - x.mean()) * w)) * 2 / w.sum()
+    order = np.fft.rfftfreq(len(x), 1 / fs) / (axle_rad_s / (2 * math.pi))
+    grid = np.arange(ORDER_STEP, ORDER_MAX + 1e-9, ORDER_STEP)
+    out = []
+    for g in grid:
+        sel = amp[(order >= g - ORDER_STEP / 2) & (order < g + ORDER_STEP / 2)]
+        out.append((round(g, 2), float(sel.max()) if len(sel) else float('nan')))
+    return out
 
 
 def db3_of(path):
@@ -135,9 +163,11 @@ def analyse(path):
         if v <= 0:
             continue
         a, b = t + SETTLE_S, t_next
-        g = window(gyro, a, b)
+        tg, g = zip(*window_tv(gyro, a, b))
+        axle = st.mean(window(speed, a, b))
         steps[round(v, 2)] = dict(
-            axle=st.mean(window(speed, a, b)),
+            axle=axle,
+            orders=order_spectrum(tg, [x[1] for x in g], axle),
             duty=st.mean(abs(d[0]) for d in window(duty, a, b)),
             **{ax: math.degrees(st.pstdev(x[k] for x in g))
                for k, ax in enumerate(('roll', 'pitch', 'yaw'))})
@@ -151,6 +181,7 @@ def main(argv=None):
     ap.add_argument('--supply', nargs='*', default=[], metavar='label=volts',
                     help='bench supply voltage per run, adds motor_v_<label> columns')
     ap.add_argument('--out', required=True)
+    ap.add_argument('--orders', help='also write the pitch order spectra to this CSV')
     a = ap.parse_args(argv)
     runs = [r.split('=', 1) for r in a.runs]
     supply = {k: float(v) for k, v in (s.split('=', 1) for s in a.supply)}
@@ -174,6 +205,17 @@ def main(argv=None):
                 row += [round(res[l][v][ax], 3) for l, _ in runs]
             w.writerow(row)
     print(f'{len(setpoints)} steps, {len(runs)} runs -> {a.out}')
+    if a.orders:
+        with open(a.orders, 'w', newline='') as fh:
+            w = csv.writer(fh)
+            w.writerow(['run', 'v_cmd_mps', 'axle_rad_s', 'order', 'pitch_amp_dps'])
+            for label, _ in runs:
+                for v in setpoints:
+                    st_ = res[label][v]
+                    for o, amp in st_['orders']:
+                        w.writerow([label, v, round(st_['axle'], 1), o,
+                                    '' if math.isnan(amp) else round(amp, 4)])
+        print(f'order spectra -> {a.orders}')
     return 0
 
 
