@@ -782,7 +782,10 @@ vehicle centre.
 sectors are fixed to the vehicle — they appear at the same angles in independent
 recordings — at −38° to −17° and +47° to +59°. They are the cables to the PCB
 and the camera holder. The scan processor rotates the scan into the vehicle
-frame. The previous chassis left about 250°.
+frame. The previous chassis left about 250°. The software deliberately uses less
+than the sensor sees: it discards ±60° around the rear, which contains both blind
+sectors with margin, and works with the front 240° (see
+[Sensor mounting](02-mobility.md#sensor-mounting)).
 
 **Noise.** A few millimetres, independent of drive speed and motor operation —
 see [Interference](#interference-measured-and-it-is-mechanical).
