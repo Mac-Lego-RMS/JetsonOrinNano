@@ -76,22 +76,31 @@ the motor and the drive axle.
 
 ![Top view. Motor (left) next to the Jetson stack, bevel gears at the rear axle, LiDAR in front.](../figures/mobility_top_view.png){width=50%}
 
-**Centre of gravity.** Materials are assigned to every part in Fusion 360, so the
-CAD model gives a centre of gravity (CoG). It lies slightly off the centre line,
-because the Jetson, one of the heaviest components, does not sit on it. The real
-robot is checked with two scales and a tilt test (test T02):
+**Centre of gravity.** The centre of gravity (CoG) was measured on the robot
+ready to drive, with the race battery and the camera on its holder, without the
+body (tests T01/T02). Two kitchen scales of equal height give the axle loads
+$m_f$, $m_r$ and the side loads; with the rear axle raised by $\Delta h = 40$ mm
+the car tilts by $\theta = \arcsin(\Delta h / L) = 23.1°$, and the front-axle
+load rises to $m_f'$. With the effective wheel radius $r = 15$ mm:
 
-| Quantity | CAD, sum of weighed parts ‡ | Scales and tilt test ‡ |
-|---|---|---|
-| Mass with body | 573 g | 575 g |
-| CoG ahead of the rear axle | 60.9 mm | 59.5 mm |
-| Front-axle load | 60 % | 58 % |
-| CoG off the centre line | 3.3 mm | 2.7 mm |
-| CoG above ground | 30.2 mm | 31.3 mm |
+$$x = L\,\frac{m_f}{m_f + m_r}, \qquad z = r + \frac{L\,(m_f' - m_f)}{(m_f + m_r)\tan\theta}$$
 
+| Quantity | Measured |
+|---|---|
+| Mass, weighed as a whole | 586 g |
+| Front / rear axle load | 322 g / 257 g (sum 579 g) |
+| Left / right side load | 284 g / 295 g |
+| Front-axle load with the rear raised by 40 mm | 377 g |
+| CoG ahead of the rear axle, $x$ | 56.7 mm (55.6 % front-axle load) |
+| CoG off the centre line | 0.9 mm to the right |
+| CoG above ground, $z$ | 38 mm (22.7 mm above the axle) |
+
+The CoG is computed from the sum of the axle loads, so that all values come from
+the same pair of scales; weighed as a whole on another scale the robot showed
+7 g more. One gram on the scale moves $z$ by about 0.4 mm. The robot is almost
+exactly centred sideways.
 Data: [`mobility_measurements.xlsx`](../data/manual/mobility_measurements.xlsx),
-sheet `Mass_CoG`. The body and the camera add 68 g ‡; without them the CoG drops
-by 3.7 mm ‡.
+sheet `Mass_CoG`.
 
 **Why the motor lies lengthways.** A transverse motor directly on the rear axle
 was the obvious alternative and was designed first (V1 base plate, June). It was
@@ -198,16 +207,19 @@ that the drivetrain vibration stays out of the yaw axis.
 
 Napoleon carries a detachable body shaped like a VW T1 bus (v4). It has no
 structural function but holds the fisheye camera and the LED lighting. With the
-body the vehicle measures 182 × 111 × 84 mm.
+body the vehicle measures 182 × 111 × 84 mm (CAD). The body is designed and is
+being finished for the European Open; all measurements in this chapter were
+taken without it.
 
 The body sits on pogo pins, which locate it and power the LEDs, so no cable has
 to be plugged when it is mounted. When fitted, it replaces the separate camera
-holder. Aerodynamics play no role at our speeds.
+holder (7.35 g); the camera itself weighs 23.05 g with its USB cable.
+Aerodynamics play no role at our speeds.
 
 The shape was first modelled in Fusion 360 Alias. The final version is based on
 a public model, scaled and cut to the wheelbase, the track and the Jetson level.
 Free space around the LiDAR scan plane was a fixed boundary condition (to be
-verified with and without the body in test T14). Body and camera weigh 68 g ‡.
+verified with and without the body in test T14).
 
 ### Digital twin and CAD workflow
 
@@ -487,7 +499,7 @@ $$a_\text{traction} = \frac{\mu \cdot g \cdot l_f / L}{1 - \mu \cdot h / L}$$
 | Measured top speed, 100 % PWM, 15.9 V | encoder log, full-throttle step (T07) | 1.72 m/s ‡ |
 | Time constant $\tau$ (63.2 %) | step response (T07) | 0.34 s ‡ |
 | Max. measured acceleration | step response (T07) | 4.6 m/s² ‡ |
-| Traction limit, rear-wheel drive | formula above, $\mu = 0.88$ ‡ | 4.9 m/s² ‡ |
+| Traction limit, rear-wheel drive | formula above with the measured CoG, $\mu = 0.88$ ‡ | 5.7 m/s² ‡ |
 | Deceleration after a halt command | fitted to the stopping distances of runs 38–42 ([chapter 3](04-software.md#obstacle-strategy)) | 0.57 m/s² |
 | Rolling resistance incl. drivetrain drag | $c_r = a/g$ | ≤ 0.058 (upper bound, it also contains the drag of gearbox and motor) |
 | Limiting factor at launch | wall test ([chapter 2](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)) | traction |
@@ -496,7 +508,7 @@ $$a_\text{traction} = \frac{\mu \cdot g \cdot l_f / L}{1 - \mu \cdot h / L}$$
 Add it back (docs/figures/mobility_step_response.png) once test T07 is
 measured. -->
 
-The measured acceleration stays just below the traction limit ‡, and the wall test
+The measured acceleration stays below the traction limit ‡, and the wall test
 shows the tyres slipping long before the motor stalls. Stall torque and stall
 current were therefore not measured: they are never reached. The vehicle has no
 active brake; it coasts, and the controller triggers every halt early by the
@@ -584,9 +596,9 @@ gone.
 | Quantity | Value | Source |
 |---|---|---|
 | Nominal diameter | 32.0 mm | mould |
-| Measured diameter, 4 tyres, 3 positions each | 31.98–32.06 mm ‡ | test T12 |
-| Runout (max − min per tyre) | ≤ 0.08 mm ‡ | test T12 |
-| Mass per wheel (rim + tyre) | 9.2–9.7 g ‡ | test T17 |
+| Measured diameter, 4 tyres, 3 positions each | 31.8–32.1 mm (mean per tyre), single readings 31.6–32.1 mm | calipers, test T12 |
+| Runout (max − min per tyre) | ≤ 0.4 mm | calipers, test T12 |
+| Mass per wheel (rim + tyre) | 9 g, all four (scale resolution 1 g) | test T17 |
 | Effective rolling radius under load | 15.0 mm | encoder model of the EKF ([chapter 3](04-software.md#localisation)) |
 | Effective diameter from 10 × 2.00 m | 30.03 mm ‡ | test T04 |
 | Lateral deviation after 3 m straight, steering at 0 | 21 mm ‡ | test T12 |
@@ -609,9 +621,10 @@ The silicone grips about 70 % better than the old LEGO tyre ‡, but dust from t
 mat costs about a quarter of it ‡. The tyres are therefore cleaned before every
 calibration and every run.
 
-With $\mu = 0.99$ ‡ the robot slides sideways at 9.7 m/s² ‡, while it would only
-tip at $g \cdot (T/2)/h = 15.1$ m/s² ‡. It always slides before it tips, with a
-margin of 1.56 ‡.
+With the measured CoG height $h = 38$ mm and the track $T = 96.2$ mm the robot
+would only tip at a lateral acceleration of $g \cdot (T/2)/h = 12.5$ m/s². With
+$\mu = 0.99$ ‡ it slides sideways at 9.7 m/s² ‡, so it always slides before it
+tips, with a margin of 1.29 ‡.
 
 ### Ground clearance and suspension
 
@@ -703,12 +716,12 @@ The mechanical design took about seven months from a first component layout to
 
 | Test | Replaces | Section |
 |---|---|---|
-| T01/T02 masses, axle loads, CoG | mass and CoG values ‡ | [Packaging](#packaging-in-four-levels) |
+| T01/T02 masses, axle loads, CoG | done without the body (01.10.); the masses of the single parts were not weighed | [Packaging](#packaging-in-four-levels) |
 | T04 encoder distance calibration | effective diameter ‡ | [Tyres](#tyres-cast-silicone) |
 | T05 static wheel angles and play | static lock, play ‡ | [Static wheel angles and play](#static-wheel-angles-and-play) |
 | T07 full-throttle step | top speed, $\tau$, acceleration ‡ | [Speed and acceleration](#speed-and-acceleration) |
 | T08 inclined board | $\mu$, sliding and tipping limits ‡ | [Tyres](#tyres-cast-silicone) |
-| T12/T17 tyre geometry and mass | diameters, runout, straight-line deviation ‡ | [Tyres](#tyres-cast-silicone) |
+| T12/T17 tyre geometry and mass | done (01.10.): diameters, runout, 9 g per wheel; straight-line deviation ‡ | [Tyres](#tyres-cast-silicone) |
 | T13 servo step | steering step time ‡ | [Steering speed](#steering-speed) |
 | T14 LiDAR field of view with and without body | – (240° from the software cut, see [Sensor mounting](#sensor-mounting)) | [Body](#body-vw-t1) |
 | T16 FEA C-profile old vs. v54 | – | [Materials and manufacturing](#materials-and-manufacturing) |

@@ -41,11 +41,10 @@ compares it with the LEGO hybrid that we drove at the national final.
 | Final drive | printed gear on a LEGO differential | brass bevel gears 1:1, rigid axle | [Drive train](02-mobility.md#drive-train-torque-and-speed) |
 | Theoretical top speed | 1.31 m/s | 1.68 m/s (12 V, no load) | [Speed and acceleration](02-mobility.md#speed-and-acceleration) |
 | LEGO content | 50 % | 0 % | – |
-| Total mass (with body) | 803 g | 575 g ‡ | test T01 |
-| Centre of gravity | not measured | 31 mm above ground ‡ | test T02 |
+| Total mass | 803 g | 586 g (without body) | [weighed](02-mobility.md#packaging-in-four-levels) |
+| Centre of gravity | not measured | 38 mm above ground, 56.7 mm ahead of the rear axle | [scales and tilt test](02-mobility.md#packaging-in-four-levels) |
 | Run time open / obstacle challenge | ≈30 s / ≈80 s | ≈27 s / ≈80 s incl. parking, varying from run to run | [open](04-software.md#open-challenge), [obstacle](04-software.md#obstacle-challenge) challenge |
 
-‡ still being measured, see [Validation status](02-mobility.md#validation-status).
 
 <!-- CHECK (team): where do the national-final run times (≈30 s / ≈80 s) come
 from? -->
