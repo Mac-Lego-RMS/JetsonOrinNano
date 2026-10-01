@@ -6,7 +6,7 @@ commands over UART; the ESP closes the loops that need hard timing.
 
 - **Drive:** VNH5019 motor driver with a quadrature encoder, open-loop duty
   or a PID position controller, current sensing, 5 s watchdog
-- **Steering:** Feetech SC09 servo on a half-duplex bus, calibration of
+- **Steering:** Waveshare SC09 servo on a half-duplex bus, calibration of
   center and end stops stored in flash
 - **Battery:** 4S pack voltage with an undervoltage warning to the Jetson
 - **Start button** and status LED

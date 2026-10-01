@@ -32,8 +32,6 @@ for criterion 5:
 | [`docs/`](..) | this journal, the analysis scripts, the measurement data behind every figure |
 | `v-photos/`, `t-photos/`, `video/` | vehicle photos, team photos, driving videos |
 
-<!-- TODO (Clemens): the CAD moves to models/; then update this row, the Hardware paragraph below and the README. -->
-
 The ROS 2 packages in `src/`:
 
 | Package | Role |

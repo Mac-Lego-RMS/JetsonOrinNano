@@ -262,8 +262,8 @@ LEGO H-profiles.
 |---|---|---|---|---|
 | Transmission chain | horn → axle → gear → rack | horn → tie rod | horn → tie-rod end → tie rod → steering arm → knuckle | correct angle at each wheel |
 | Ackermann share | 0 % | 0 % | ≈100 % by the design rule ([Ackermann geometry](#ackermann-geometry)) | less tyre scrub in tight corners |
-| Mechanical steering lock | not documented | ±35° | 58° inner / 36.5° outer | tighter turning circle |
-| Reversal play | ≈2–4° | < 0.5° (measured, max. 0.5°) | 0.7° max., ±0.35° ‡ (with paper inserts) | see [Static wheel angles and play](#static-wheel-angles-and-play) |
+| Mechanical steering lock | not documented | ±35° | 58° inner / 36.5° outer (CAD); the servo drives 41–47° / 30–33.5° (measured) | tighter turning circle |
+| Reversal play | ≈2–4° | < 0.5° (measured, max. 0.5°) | 0.8° expected (servo gearbox, with paper inserts); measurement open ‡ | see [Static wheel angles and play](#static-wheel-angles-and-play) |
 | Joints | LEGO | printed / LEGO | SLA horn, steel tie-rod ends, rivet kingpins, wheel axles in ball bearings | no wear since the switch to steel |
 | Servo | Waveshare SC09 | Waveshare SC09 | Waveshare SC09, rotated by 12° | the servo gearbox is now the largest source of play |
 
@@ -327,17 +327,51 @@ driven is the topic of [Mechanical lock vs driven lock](#mechanical-lock-vs-driv
 
 ### Static wheel angles and play
 
-On the stand, both wheel angles are photographed from above for nine servo
-commands, once approached from the left and once from the right (test T05). The
-bicycle-equivalent angle $\delta$ follows from
-$\cot\delta = (\cot\delta_L + \cot\delta_R)/2$.
+On the stand, with the front wheels free, the servo is commanded to four
+positions in the software unit (−1 … +1, positive = left):
 
-| Result | Value |
-|---|---|
-| Full lock left, inner / outer | 55.0° / 35.9° ‡ (CAD: 58° / 36.5°) |
-| Full lock right, inner / outer | 57.3° / 36.4° ‡ |
-| Reversal play, max. | 0.7° ‡ (±0.35°) |
-| Deviation from a linear servo-to-angle map | mean 1.9°, max. 3.9° ‡ |
+```bash
+ros2 topic pub --once /esp_serial_bridge/steer std_msgs/msg/Float32 "{data: 0.3}"
+```
+
+The line of each front wheel is traced on paper and measured with a set square
+against the line of the rear axle (test T05, reading resolution ≈0.5°). The
+bicycle-equivalent angle $\delta$ follows from
+$\cot\delta = (\cot\delta_L + \cot\delta_R)/2$, the ideal outer angle from the
+measured inner angle with the Ackermann relation above.
+
+| Command | Left wheel | Right wheel | Bicycle $\delta$ | Ideal outer | Outer turns too far (+) / too little (−) |
+|---|---|---|---|---|---|
+| +1.0 (full lock left) | 41.0° (inner) | 33.5° (outer) | 36.9° | 30.0° | +3.5° |
+| +0.3 | 13.5° | 13.5° | 13.5° | 11.9° | +1.6° |
+| −0.3 | −12.5° | −12.5° | −12.5° | −11.1° | +1.4° |
+| −1.0 (full lock right) | −30.0° (outer) | −47.0° (inner) | −36.9° | −33.4° | −3.4° |
+
+- **Full lock.** The servo does not drive the linkage to its mechanical stop: the
+  inner wheel reaches 41° (left) and 47° (right) instead of 58° (CAD), the
+  bicycle-equivalent angle is 36.9° on both sides instead of 45°. The smallest
+  static radius at the rear-axle centre is $L/\tan\delta = 136$ mm (CAD: 101 mm
+  by the same formula).
+- **Symmetry.** Although the inner angles differ by 6°, the bicycle-equivalent
+  angles agree to 0.1°. For the vehicle as a whole the steering is symmetric.
+- **Ackermann share.** At full lock left the outer wheel turns 3.5° too far
+  (local share 62 %), at full lock right 3.4° too little (138 %). The CAD
+  linkage predicts 87 % and 97 % at these inner angles, so the mean of both sides
+  (100 %) matches the design, but the split between the sides does not. One
+  degree at the outer wheel moves the share by about 10 %, so the difference is
+  larger than the reading error. The cause is not yet identified; candidates are
+  a tie rod that is slightly too long or too short and the different steering-arm
+  angles of the CAD (15.3° left, 16.0° right). At ±0.3 both wheels read the
+  same; the expected difference of 1.5° is close to the reading resolution.
+- **Linearity.** At ±0.3 the wheels turn 43° per unit of command, between 0.3
+  and 1.0 only 33° per unit: the curve flattens towards the lock. A linear map
+  through the CAD lock (0.45° per percent) is right at ±0.3 within 1° but 8° too
+  high at full lock. The 1° difference between +0.3 and −0.3 is the straight-ahead
+  trim: straight ahead is at −0.02, so +0.3 is 0.32 and −0.3 is 0.28 away from it,
+  which gives 42° and 45° per unit.
+- **Reversal play.** Each position was approached from one side only. The
+  reversal play (same command, approached from the left and from the right) is
+  still to be measured ‡.
 
 Data: sheet `Steering_Target_Actual`, which also holds the series of the LEGO
 rack and the direct link for comparison.
@@ -356,7 +390,7 @@ $\Delta\delta = \arctan(s/r)$. The clearances below are design estimates:
 | Statistical (root sum square) | – | – | 1.72° (±0.86°) | 0.80° (±0.40°) |
 
 A paper insert of 0.08–0.10 mm fills the hole clearances of G1–G3. What remains is
-the servo gearbox, and the measured 0.7° ‡ matches that. Without closed-loop
+the servo gearbox, about 0.8° at the wheel. Without closed-loop
 correction, play causes a curvature error $\kappa = \Delta\delta/L$; after 0.5 m
 that is 1.8 cm of lateral offset without inserts and 0.9 cm with them, which the
 controller has to correct continuously.
@@ -369,24 +403,41 @@ and a stiffer gearbox (Feetech STS3032, 12 bit, 4.5 kg·cm stall torque).
 ### Mechanical lock vs driven lock
 
 The mechanics reach 58° at the inner wheel, a bicycle-equivalent angle of 45°
-(CAD, from the formula above). While driving, the robot reaches only about half
-of that. The steering calibration
+(CAD, from the formula above). The servo drives the linkage to 36.9° on both
+sides (measured, [Static wheel angles and play](#static-wheel-angles-and-play)).
+While driving, the robot reaches only about two thirds of that. The steering calibration
 ([chapter 3](04-software.md#lane-following)) derives the effective angle from the
 measured yaw rate and speed:
 
-| Full lock | Static (CAD) | Driven, 0.35 m/s | Driven, 0.50 m/s | Driven, 0.75 m/s |
+| Full lock | Static, measured (CAD) | Driven, 0.35 m/s | Driven, 0.50 m/s | Driven, 0.75 m/s |
 |---|---|---|---|---|
-| Left | 45° | 21.9° | 22.1° | 19.4° |
-| Right | 45° | 24.7° | 23.8° | 23.4° |
-| Smallest radius at the rear-axle centre | 93 mm | 217–248 mm | 227–246 mm | 231–284 mm |
+| Left | 36.9° (45°) | 21.9° | 22.1° | 19.4° |
+| Right | 36.9° (45°) | 24.7° | 23.8° | 23.4° |
+| Smallest radius at the rear-axle centre | 136 mm (101 mm) | 217–248 mm | 227–246 mm | 231–284 mm |
 
 The difference is too large for steering play. The cause is the rigid rear axle
 ([Rigid axle](#rigid-axle-instead-of-a-differential)). At a radius of 0.1 m the
 inner and outer rear wheel would need speeds that differ by a factor of three, but
 the axle forces them to turn equally, so both scrub. The scrub creates a yaw
 moment against the turn, and the robot follows a wider circle than the front
-wheels point to. The loss grows as the radius shrinks, which is why it is largest
-at full lock and small near straight ahead. Speed adds a smaller share on top:
+wheels point to.
+
+The loss is not simply proportional to the angle. Comparing the static
+measurement with the driven table at 0.35 m/s (static value at ±0.35 linearly
+interpolated between the measured points):
+
+| Command | Static | Driven, 0.35 m/s | Loss |
+|---|---|---|---|
+| +1.0 | 36.9° | 21.9° | 15.0° |
+| +0.35 | 15.2° | 3.8° | 11.4° |
+| −0.35 | −14.2° | −8.8° | 5.4° |
+| −1.0 | −36.9° | −24.7° | 12.2° |
+
+On the right the loss grows with the angle, as scrub predicts. On the left the
+driven angle stays close to zero up to a command of about 0.2 and then rises
+parallel to the static curve, like an offset. Scrub alone does not explain this;
+open candidates are the straight-ahead trim of the calibration, the slip angle
+of the front tyres and play under load. Speed adds a smaller share on top:
 between 0.35 and 0.75 m/s the effective full lock drops by 1.3° (right) to 2.5°
 (left), i.e. 0.7–1.7° per m/s² of lateral acceleration.
 
@@ -718,7 +769,7 @@ The mechanical design took about seven months from a first component layout to
 |---|---|---|
 | T01/T02 masses, axle loads, CoG | done without the body (01.10.); the masses of the single parts were not weighed | [Packaging](#packaging-in-four-levels) |
 | T04 encoder distance calibration | effective diameter ‡ | [Tyres](#tyres-cast-silicone) |
-| T05 static wheel angles and play | static lock, play ‡ | [Static wheel angles and play](#static-wheel-angles-and-play) |
+| T05 static wheel angles and play | done (01.10.): lock, Ackermann share, linearity; reversal play ‡ | [Static wheel angles and play](#static-wheel-angles-and-play) |
 | T07 full-throttle step | top speed, $\tau$, acceleration ‡ | [Speed and acceleration](#speed-and-acceleration) |
 | T08 inclined board | $\mu$, sliding and tipping limits ‡ | [Tyres](#tyres-cast-silicone) |
 | T12/T17 tyre geometry and mass | done (01.10.): diameters, runout, 9 g per wheel; straight-line deviation ‡ | [Tyres](#tyres-cast-silicone) |
