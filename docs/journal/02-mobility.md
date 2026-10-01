@@ -54,7 +54,8 @@ connected mechanically and electrically through pogo pins
 
 ### Packaging in four levels
 
-The vehicle is stacked in four levels, which gave the chassis its name.
+The components are stacked vertically in four levels instead of being spread
+out flat; this is where the chassis got its name, "Chassis Vertikal".
 
 1. **Base plate.** Carries the drive motor, recessed into the plate, and the IMU
    directly above the rear axle.
