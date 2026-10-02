@@ -40,7 +40,7 @@ All six sides are in [`v-photos/`](v-photos).
 
 | Team MäcLEGO | |
 |---|---|
-| ![Team MäcLEGO, official photo](t-photos/team_photo.jpeg) | ![Team MäcLEGO, funny photo](t-photos/team_funny.jpg) |
+| ![Official team photo](t-photos/team_photo.jpeg) | ![Funny team photo](t-photos/team_funny.jpg) |
 
 Clemens (mechanical design), Jannik (electronics and main PCB) and Finn
 (software). More in [`t-photos/`](t-photos).
