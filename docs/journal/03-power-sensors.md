@@ -919,7 +919,7 @@ A Hall encoder on the drive motor (BORDSTRACT 12 V, 1 000 rpm gear motor). It wa
 already fitted, and Hall sensing is the most reliable option. Counting both edges
 of both channels gives 408 counts per wheel revolution. The silicone tyre is
 compressed under the weight of the car, so the effective rolling diameter is
-30.0 mm instead of the nominal 32 mm (see [Tyres](02-mobility.md#tires-cast-silicone)),
+30.0 mm instead of the nominal 32 mm (see [Tyres](02-mobility.md#tires)),
 and one count is
 
 $$

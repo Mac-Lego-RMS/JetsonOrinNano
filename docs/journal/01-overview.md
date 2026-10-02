@@ -29,11 +29,11 @@ compares it with the LEGO hybrid that we drove at the national final.
 | Steering | direct link, parallel (0 % Ackermann) | Ackermann linkage, steel tie rod | [Steering](02-mobility.md#steering) |
 | Mechanical steering lock inner / outer | ±35° | 58° / 36.5° | CAD linkage analysis |
 | Drive motor | Pololu 20D 31:1, 450 rpm, no encoder | 25GA370, 1000 rpm at 12 V, Hall encoder | data sheets |
-| Final drive | printed gear on a LEGO differential | brass bevel gears 1:1, rigid axle | [Drive train](02-mobility.md#drive-train-torque-and-speed) |
+| Final drive | printed gear on a LEGO differential | brass bevel gears 1:1, rigid axle | [Drive train](02-mobility.md#drivetrain) |
 | Theoretical top speed | 1.31 m/s | 1.68 m/s (12 V, no load) | [Speed and acceleration](02-mobility.md#speed-and-acceleration) |
 | LEGO content | 50 % | 0 % | – |
-| Total mass | 803 g | 586 g (without body) | [weighed](02-mobility.md#packaging-in-four-levels) |
-| Centre of gravity | not measured | 38 mm above ground, 56.7 mm ahead of the rear axle | [scales and tilt test](02-mobility.md#packaging-in-four-levels) |
+| Total mass | 803 g | 586 g (without body) | [weighed](02-mobility.md#layout-in-four-levels) |
+| Centre of gravity | not measured | 38 mm above ground, 56.7 mm ahead of the rear axle | [scales and tilt test](02-mobility.md#layout-in-four-levels) |
 | Run time open / obstacle challenge | ≈30 s / ≈80 s | ≈27 s / ≈80 s incl. parking, varying from run to run | [open](04-software.md#open-challenge), [obstacle](04-software.md#obstacle-challenge) challenge |
 
 

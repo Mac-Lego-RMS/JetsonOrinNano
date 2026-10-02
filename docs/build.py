@@ -143,6 +143,7 @@ def build_pdf():
         extra_args=['--standalone',
                     '--metadata-file=%s' % (JOURNAL / 'metadata.yaml'),
                     '--resource-path=%s' % JOURNAL,
+                    '--lua-filter=%s' % (DOCS / 'compare_columns.lua'),
                     # otherwise pandoc gives every column of a wide table
                     # the same width
                     '--columns=10000'])
