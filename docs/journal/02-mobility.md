@@ -690,15 +690,31 @@ The mechanical design took about seven months from a first component layout to
 
 ### Future work
 
-- A custom aluminium cooler for the Jetson, which would allow a lower Jetson and a
-  full 360° LiDAR view.
-- A new body that doubles as the heat exchanger of that cooler.
-- A steering servo with a magnetic encoder (Feetech STS3032) to reduce the play
-  further.
-- An adapter-free drive gear on the D-shaft (third iteration, see
-  [Power transmission](#power-transmission)).
-- A custom differential that fits the robot without increasing its size.
+Each item below answers a limitation that is measured or described earlier in
+this chapter.
 
+- **Custom aluminium cooler for the Jetson** The LiDAR scan plane runs at the
+  height of the main PCB, so the robot loses 120° of view at the rear
+  ([Sensor mounting](#sensor-mounting)). A flatter cooler would allow a lower
+  Jetson and with it a free 360° scan, without raising the LiDAR and increasing
+  the camera offset again.
+- **Body as heat exchanger** The body already covers the whole robot. Using it
+  as the heat-exchanging surface of that cooler adds cooling area without adding
+  height or a separate part.
+- **Steering servo with a magnetic encoder (e.g. Feetech STS3032)** With the
+  paper inserts, the SC09 gearbox is the largest remaining source of steering
+  play (≈0.8°, [Static wheel angles and play](#static-wheel-angles-and-play)).
+  A stiffer gearbox and 12-bit position feedback would reduce it further.
+- **Adapter-free drive gear on the D-shaft** The repaired gear mount cut the
+  pitch noise by 23–86 % but costs 4–20 % more duty
+  ([Power transmission](#power-transmission)). A gear that sits on the shaft
+  without any adapter should keep the low noise and bring the duty back to its
+  old level; the next sweep will show whether it does.
+- **Custom differential** The rigid axle is the reason why the robot drives only
+  about half of its mechanical steering lock
+  ([Mechanical lock vs driven lock](#mechanical-lock-vs-driven-lock)).
+  Purchased and ball differentials were too large, so it has to be designed to
+  fit the existing package without making the robot longer or wider.
 ## Validation status
 
 | Test | Status | Section |
