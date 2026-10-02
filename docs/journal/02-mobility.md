@@ -15,11 +15,9 @@ about 120 design cycles for the entire previous robot.
 
 Tables that compare Napoleon with an earlier
 vehicle always list the earlier vehicle first and Napoleon last; in the PDF the
-earlier vehicles are shaded grey and Napoleon blue. Values marked ‡ are measured
-values that may still change slightly before the European Open in Zagreb; a ‡
-next to a table heading marks the whole table. The state of every test is listed
-under [Validation status](#validation-status). Unmarked values are CAD data, data
-sheets or measurements documented in chapters 2 and 3.
+earlier vehicles are shaded grey and Napoleon blue. The state of every test is
+listed under [Validation status](#validation-status). Values without a test are
+CAD data, data sheets or measurements documented in chapters 2 and 3.
 
 ## Chassis
 
@@ -357,7 +355,7 @@ is 0.28 away from it, which gives 42° and 45° per unit.
 
 Each position was approached from one side only, so the reversal play (same
 command, approached from the left and from the right) is still to be
-measured ‡.
+measured.
 
 Data: sheet `Steering_Target_Actual`, which also holds the series of the LEGO
 rack and the direct link for comparison.
@@ -603,7 +601,7 @@ A tire is cast in five steps:
 The casting mould went through one important iteration. The once-per-revolution
 oscillation of the test drives ([Circular test drives](#circular-test-drives), 3.18 Hz at 0.30 m/s against a wheel frequency of 2.98 Hz) pointed at the wheels. The moulds had been printed with an aligned seam: every layer started at the same angle, which left a small ridge across the mould wall and therefore a bump on every tire at the same position. The mould was reprinted with a random seam, and the centring of the rim was improved. With the new tires the oscillation was gone.
 
-The finished tires were measured as follows ‡:
+The finished tires were measured as follows:
 
 | Quantity | Value | Source |
 |---|---|---|
@@ -756,12 +754,12 @@ this chapter.
 | Test | Status | Section |
 |---|---|---|
 | T01/T02 masses, axle loads, CoG | done without the body (01.10.); single masses only for the wheels, the camera and its holder | [Layout](#layout-in-four-levels) |
-| T04 encoder distance calibration | effective diameter ‡ | [Tires](#tires) |
-| T05 static wheel angles and play | done (01.10.): lock, Ackermann share, linearity; reversal play ‡ | [Static wheel angles and play](#static-wheel-angles-and-play) |
-| T07 full-throttle step | top speed, $\tau$, acceleration ‡ | [Speed and acceleration](#speed-and-acceleration) |
+| T04 encoder distance calibration | done: effective diameter 30.03 mm from 10 × 2.00 m | [Tires](#tires) |
+| T05 static wheel angles and play | done (01.10.): lock, Ackermann share, linearity; reversal play not measured | [Static wheel angles and play](#static-wheel-angles-and-play) |
+| T07 full-throttle step | top speed, $\tau$, acceleration | [Speed and acceleration](#speed-and-acceleration) |
 | T08 inclined board | done (02.10.): $\mu$ lateral and longitudinal, clean and after 3 runs, sliding and tipping limits; LEGO comparison not measured | [Tires](#tires) |
-| T12/T17 tire geometry and mass | done (01.10.): diameters, runout, 9 g per wheel; straight-line deviation ‡ | [Tires](#tires) |
-| T13 servo step | steering step time ‡ | [Steering speed](#steering-speed) |
+| T12/T17 tire geometry and mass | done (01.10.): diameters, runout, 9 g per wheel; straight-line deviation | [Tires](#tires) |
+| T13 servo step | steering step time | [Steering speed](#steering-speed) |
 | T14 LiDAR field of view with and without body | – (240° from the software cut, see [Sensor mounting](#sensor-mounting)) | [Body](#body) |
 | T16 FEA C-Profile old vs. v54 | – | [Materials and manufacturing](#materials-and-manufacturing) |
 

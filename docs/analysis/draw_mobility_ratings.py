@@ -33,7 +33,7 @@ STEERING = {
     'highlight': 2,
     'rows': [
         ('Reversal play', [('2–4°', '--'), ('< 0.5° (measured)', '++'),
-                           ('≈ 0.8° expected ‡', '+')]),
+                           ('≈ 0.8° expected', '+')]),
         ('Ackermann share', [('0 %', '--'), ('0 %', '--'), ('≈ 100 %', '++')]),
         ('Mechanical lock', [('not documented', None), ('± 35°', 'o'),
                              ('58° inner / 36.5° outer', '++')]),

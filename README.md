@@ -28,9 +28,9 @@ plugs directly onto the Jetson.
 
 ## Vehicle, team and videos
 
-<!-- PLACEHOLDER: the images appear once v-photos/front.jpg, v-photos/left.jpg
-and t-photos/team_funny.jpg exist; the video links are filled in video/video.md
-and here. Remove this comment afterwards. -->
+<!-- PLACEHOLDER: the images appear once v-photos/front.jpg and
+v-photos/left.jpg exist; the video links are filled in video/video.md and here.
+Remove this comment afterwards. -->
 
 | Front | Left |
 |---|---|
@@ -38,9 +38,7 @@ and here. Remove this comment afterwards. -->
 
 All six sides are in [`v-photos/`](v-photos).
 
-| Team MäcLEGO | |
-|---|---|
-| ![Official team photo](t-photos/team_photo.jpeg) | ![Funny team photo](t-photos/team_funny.jpg) |
+![Official team photo](t-photos/team_photo.jpeg)
 
 Clemens (mechanical design), Jannik (electronics and main PCB) and Finn
 (software). More in [`t-photos/`](t-photos).
