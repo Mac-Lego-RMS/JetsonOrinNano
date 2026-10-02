@@ -132,7 +132,7 @@ against recorded bags first. -->
 | Motor lengthways beside the Jetson | transverse motor on the rear axle (V1 base plate) | does not fit between the rear wheels (76 mm against 70 mm motor + ≈10 mm gear stage) and would not make the robot shorter | adds neither length nor width ([chapter 1](02-mobility.md#packaging-in-four-levels)) |
 | 25GA370 with Hall encoder | Pololu 25D 4.4:1 and 9.7:1, Pololu 37D 10:1 | encoder for the speed loop; low mass and height; the 25D 9.7:1 encoder does not work with the 3.3 V logic of the ESP32-S3 | wall test: the tyres slip at ≈0.53 A winding current, far below stall, so more torque would buy nothing |
 | Ackermann linkage with steel tie-rod ends | direct printed link (national final), LEGO rack (regional final) | correct angle at each wheel, larger lock, no wear | lock 58° / 36.5° instead of ±35°; printed joints were worn after a few days |
-| Cast silicone tyres, 32 mm | LEGO Spike tyres (67 mm), purchased tyres | grip, lower vehicle, room for the steering lock | lateral $\mu$ 0.99 instead of 0.59 ‡ |
+| Cast silicone tyres, 32 mm | LEGO Spike tyres (67 mm), purchased tyres | grip, lower vehicle, room for the steering lock | lateral $\mu$ = 0.98 on the competition mat (T08) |
 | Jetson Orin Nano + ROS 2 | Raspberry Pi 4 with plain Python classes (last season) | compute for fusion; ROS 2 as industry standard; bags for offline testing | – |
 
 ## Iterations
@@ -247,7 +247,7 @@ Only one run was recorded after the change; the temperature stayed uncritical
 | Wall contact | robot pushes against the wall | LiDAR < 4 cm in front | stop, back up and re-plan; at most two manoeuvres per corner, then emergency stop |
 | Front wheel slides off its axle | wheel lost, run over | – | retaining ring; no such failure since it was added |
 | C-profile knuckle cracks | steering fails | visual check before a run | wall around the holes thickened (v54); static FEA planned (test T16) |
-| Dust on the tyres | grip drops by about a quarter ‡ | – | tyres cleaned before every calibration and every run |
+| Dust on the tyres | no measurable grip loss after 3 runs without cleaning (T08) | – | tyres washed with water before every calibration as a precaution |
 | Steering play (servo gearbox) | ≈0.9 cm lateral offset after 0.5 m without correction | – | paper inserts fill the hole clearances; closed-loop lane control; next step a servo with magnetic encoder |
 | Uneven or badly laid mat | 2 mm ground clearance: the tie-rod ends touch | – | none on the vehicle; the rules require a flat mat |
 

@@ -542,7 +542,7 @@ $$a_\text{traction} = \frac{\mu \cdot g \cdot l_f / L}{1 - \mu \cdot h / L}$$
 | Measured top speed, 100 % PWM, 15.9 V | encoder log, full-throttle step (T07) | 1.72 m/s ‡ |
 | Time constant $\tau$ (63.2 %) | step response (T07) | 0.34 s ‡ |
 | Max. measured acceleration | step response (T07) | 4.6 m/s² ‡ |
-| Traction limit, rear-wheel drive | formula above with the measured CoG, $\mu = 0.88$ ‡ | 5.7 m/s² ‡ |
+| Traction limit, rear-wheel drive | formula above with the measured CoG and $\mu_\text{long} = 1.18$ (T08, [Grip](#tires-cast-silicone)) | ≈ 9 m/s² (6.7 m/s² with the lateral $\mu = 0.98$ as a lower bound) |
 | Deceleration after a halt command | fitted to the stopping distances of runs 38–42 ([chapter 3](04-software.md#obstacle-strategy)) | 0.57 m/s² |
 | Rolling resistance incl. drivetrain drag | $c_r = a/g$ | ≤ 0.058 (upper bound, it also contains the drag of gearbox and motor) |
 | Limiting factor at launch | wall test ([chapter 2](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)) | traction |
@@ -644,24 +644,44 @@ The once-per-revolution oscillation of test drives ([circular test drives](#circ
 The effective radius is 6 % smaller than the nominal one: the Shore A 35 silicone
 is compressed under the robot's weight. This is why the encoder needs to be calibrated on the driven distance and not on the mould diameter.
 
-**Grip** The friction coefficient $\mu = \tan\alpha$ is measured on an inclined
-board covered with competition mat, where $\alpha$ is the angle at which the robot
-starts to slide (5 runs each, test T08)‡:
+**Grip** The friction coefficient is measured on an inclined board covered with
+competition mat (test T08, 02.10., 3 runs each). $\alpha$ is the angle, read to
+1° from a phone inclinometer, at which the robot starts to slide. "Clean" means
+the tires were washed with water; "after 3 runs" means three runs on the mat
+afterwards without cleaning.
 
-| Direction | Clean | After 3 runs, not cleaned |
-|---|---|---|
-| Longitudinal (wheels blocked) | $\mu$ = 0.88 | $\mu$ = 0.69 |
-| Lateral | $\mu$ = 0.99 | $\mu$ = 0.73 |
-| Lateral, LEGO Spike tire (comparison) | $\mu$ = 0.59 | – |
+- **Lateral:** the robot stands across the slope with the steering held at 0. No
+  wheel can roll sideways, so $\mu = \tan\alpha$.
+- **Longitudinal:** the front wheels cannot be blocked. The robot therefore stands
+  front downhill with only the rear wheels blocked. Only the rear axle holds it,
+  and the slope shifts load from it to the front axle. The balance of forces with
+  $l_f = L - x = 45.3$ mm and $h = 38$ mm gives
 
-The silicone grips about 70 % better than the old LEGO tire ‡, but dust from the
-mat costs about a quarter of it ‡. The tires are therefore cleaned before every
-calibration and every few runs.
+$$\mu_\text{long} = \frac{L \tan\alpha}{l_f - h \tan\alpha}$$
+
+| Direction | $\alpha$ clean | $\mu$ clean | $\alpha$ after 3 runs | $\mu$ after 3 runs |
+|---|---|---|---|---|
+| Lateral | 44.3° (43–45°) | 0.98 | 44.3° (43–47°) | 0.98 |
+| Longitudinal (front downhill, rear wheels blocked) | 20.0° (19–21°) | 1.18 | 21.3° (21–22°) | 1.30 |
+
+The lateral value is direct: one degree changes it by about 0.035. The
+longitudinal value is much less certain, because the denominator shrinks as
+$\alpha$ grows. One degree changes it by about 0.09 (1.09–1.27 over the three
+clean runs), and an error in $h$ adds to that. Within this accuracy the silicone
+grips about equally in both directions, $\mu \approx 1$. Facing uphill, the
+same test would be less sensitive and would give the traction limit directly
+as $g \tan\alpha$.
+
+Three runs without cleaning changed neither direction by more than the reading
+resolution, so on this mat dust costs no measurable grip. Washing the tires
+before every calibration is kept as a precaution. The test does not show that it
+is needed.
 
 With the measured CoG height $h = 38$ mm and the track $T = 96.2$ mm the robot
 would only tip at a lateral acceleration of $g \cdot (T/2)/h = 12.5$ m/s². With
-$\mu = 0.99$ ‡ it slides sideways at 9.7 m/s² ‡, so it always slides before it
-tips, with a margin of 1.29 ‡.
+$\mu = 0.98$ it slides sideways at 9.6 m/s², so it always slides before it tips,
+with a margin of 1.30. Even the highest single reading (47°, $\mu = 1.07$) leaves
+a margin of 1.19.
 
 ### Ground clearance and suspension
 
@@ -771,11 +791,11 @@ this chapter.
 
 | Test | Status | Section |
 |---|---|---|
-| T01/T02 masses, axle loads, CoG | done without the body (01.10.); the masses of the single parts were also weighed | [Packaging](#packaging-in-four-levels) |
+| T01/T02 masses, axle loads, CoG | done without the body (01.10.); single masses only for the wheels, the camera and its holder | [Packaging](#packaging-in-four-levels) |
 | T04 encoder distance calibration | effective diameter ‡ | [tires](#tires-cast-silicone) |
 | T05 static wheel angles and play | done (01.10.): lock, Ackermann share, linearity; reversal play ‡ | [Static wheel angles and play](#static-wheel-angles-and-play) |
 | T07 full-throttle step | top speed, $\tau$, acceleration ‡ | [Speed and acceleration](#speed-and-acceleration) |
-| T08 inclined board | $\mu$, sliding and tipping limits ‡ | [tires](#tires-cast-silicone) |
+| T08 inclined board | done (02.10.): $\mu$ lateral and longitudinal, clean and after 3 runs, sliding and tipping limits; LEGO comparison not measured | [tires](#tires-cast-silicone) |
 | T12/T17 tire geometry and mass | done (01.10.): diameters, runout, 9 g per wheel; straight-line deviation ‡ | [tires](#tires-cast-silicone) |
 | T13 servo step | steering step time ‡ | [Steering speed](#steering-speed) |
 | T14 LiDAR field of view with and without body | – (240° from the software cut, see [Sensor mounting](#sensor-mounting)) | [Body](#body-vw-t1) |
