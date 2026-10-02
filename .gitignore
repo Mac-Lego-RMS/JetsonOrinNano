@@ -1,9 +1,13 @@
-# ROS 2 Build-Artefakte — gehoeren nie ins Repo
-/build/
-/install/
-/log/
+# ROS 2 build artefacts never belong in the repo (also in subfolders)
+build/
+install/
+log/
 
-# Messdaten / Logs aus Testfahrten
+# Python
+__pycache__/
+*.pyc
+
+# Logs from test runs
 *.log
 
 .DS_Store
@@ -11,3 +15,10 @@
 # Generated documentation build
 docs/build/
 docs/node_modules/
+
+# Local backup copies of source files
+*.bak
+*.prezone
+*.vor_*
+*_backup
+*.2026????_*

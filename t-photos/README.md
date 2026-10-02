@@ -1,8 +1,16 @@
 # Team photos
 
-Photos of the team, as required by the WRO Future Engineers rules.
+Team MäcLEGO: Clemens, Jannik and Finn.
 
-- [x] one **official** photo with all team members: [`team_photo.jpeg`](team_photo.jpeg)
-- [ ] one **funny** photo with all team members
+<!-- PLACEHOLDER: drop the funny photo into this folder as team_funny.jpg,
+then remove this comment. -->
 
-Both photos must show every member of the team.
+| Official photo | Funny photo |
+|---|---|
+| ![Team MäcLEGO, official photo](team_photo.jpeg) | ![Team MäcLEGO, funny photo](team_funny.jpg) |
+
+| Member | Responsibility |
+|---|---|
+| Clemens | mechanical design: chassis, steering, drive train, tyres, body |
+| Jannik | electronics and main PCB, parts of the software |
+| Finn | software: estimation, perception, planning and control |

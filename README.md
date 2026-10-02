@@ -26,6 +26,30 @@ plugs directly onto the Jetson.
 | Localisation | EKF on gyro, encoder and walls matched to the field map |
 | Obstacles | colour per LiDAR point, pillars voted onto the 24 seats of the field |
 
+## Vehicle, team and videos
+
+<!-- PLACEHOLDER: the images appear once v-photos/front.jpg, v-photos/left.jpg
+and t-photos/team_funny.jpg exist; the video links are filled in video/video.md
+and here. Remove this comment afterwards. -->
+
+| Front | Left |
+|---|---|
+| ![Vehicle from the front](v-photos/front.jpg) | ![Vehicle from the left](v-photos/left.jpg) |
+
+All six sides are in [`v-photos/`](v-photos).
+
+| Team MäcLEGO | |
+|---|---|
+| ![Team MäcLEGO, official photo](t-photos/team_photo.jpeg) | ![Team MäcLEGO, funny photo](t-photos/team_funny.jpg) |
+
+Clemens (mechanical design), Jannik (electronics and main PCB) and Finn
+(software). More in [`t-photos/`](t-photos).
+
+| Driving video | |
+|---|---|
+| Open challenge | [LINK_FOLLOWS](LINK_FOLLOWS) |
+| Obstacle challenge | [LINK_FOLLOWS](LINK_FOLLOWS) |
+
 ## Engineering journal
 
 The journal is written in Markdown in [`docs/journal/`](docs/journal) — one
