@@ -51,7 +51,7 @@ connected mechanically and electrically through pogo pins
 ### Packaging in four levels
 
 The components are stacked vertically in four levels instead of being spread
-out flat. This compact build is also where the robot got its name, "Napoleon".
+out flat.
 
 1. **Base plate** Carries the drive motor, recessed into the plate, and the IMU
    directly above the rear axle.
@@ -231,12 +231,12 @@ The project is split into the following top-level designs and organisational fol
 
 | Category / Scope | Component / Folder | Link |
 |---|---|---|
-| **Top-level designs** | Chassis | [Fusion 360 View](https://a360.co/3U2vnis) |
+| **Top-level designs** | Chassis | [Fusion 360 View](https://a360.co/46wfcwD) |
 | | Steering | [Fusion 360 View](https://a360.co/4j0TWGF) |
 | | C-Profile | [Fusion 360 View](https://a360.co/4hYC528) |
 | | Tires | [Fusion 360 View](https://a360.co/4ynFopl) |
 | | Robot stand | [Fusion 360 View](https://a360.co/4xTdXmt) |
-| | Full assembly ("Napoleon") | [Fusion 360 View](https://a360.co/46wfcwD) |
+| | Full assembly ("Napoleon") | [Fusion 360 View](https://a360.co/3U2vnis) |
 | **Folders** | Bodywork | – |
 | | Purchased parts (incl. electronics subfolder) | – |
 | | Obsolete versions | – |
@@ -277,7 +277,7 @@ LEGO H-profiles. The new Ackermann linkage removes these weaknesses: it has a mu
 
 ### Kinematic chain
 
-The SC09 drives an SLA servo horn. A steel tie-rod end connects the horn to one of the C-Profiles and to the tie rod, which links both steering arms. Each steering arm is part of a C-Profile knuckle that pivots on a steel rivet as its kingpin. The wheel axle runs in a press-fit ball bearing in the knuckle and is held axially by a retaining ring (DIN 471).
+The SC09 drives an SLA servo horn. A steel tie-rod end connects the horn to one of the C-Profiles and to the tie rod, which links both steering arms. Each steering arm is part of a C-Profile knuckle that pivots on a steel rivet as its kingpin. The wheel axle runs in a press-fit ball bearing in the knuckle and is held axially by a retaining ring.
 Before the ring was added, the front wheels slid out of their bearings; this was
 the only mechanical failure in test runs since the switch to the monocoque.
 
@@ -332,11 +332,7 @@ driven is the topic of [Mechanical lock vs driven lock](#mechanical-lock-vs-driv
 ### Static wheel angles and play
 
 On the stand, with the front wheels free, the servo is commanded to four
-positions in the software unit (−1 … +1, positive = left):
-
-```bash
-ros2 topic pub --once /esp_serial_bridge/steer std_msgs/msg/Float32 "{data: 0.3}"
-```
+positions in the software unit (−1 … +1, positive = left).
 
 The line of each front wheel is traced on paper and measured with a set square
 against the line of the rear axle (test T05, reading resolution ≈0.5°). The
@@ -452,7 +448,7 @@ steering table per speed already contains the scrub.
 
 According to the data sheet the SC09 needs 0.1 s per 60° without load, so its
 165.8° of travel take 0.28 s. On the stand, a step from the centre to the left
-stop (97.9°) took 0.35 s ‡, including 50 ms ‡ until the horn started to move. At
+stop (97.9°) took 0.35 s, including 50 ms until the horn started to move. At
 0.5 m/s the robot travels about 20 cm during a full lock-to-lock change, which
 limits the speed in S-curves between pillar rows.
 
@@ -519,7 +515,7 @@ It has the most torque and the finest encoder, but it weighs 190 g, about twice 
 The drivetrain is limited by traction, not by the motor.  
 
 The 25GA370 leaves enough headroom for faster speed profiles: at 100 % PWM on 4S
-it reaches 1.72 m/s ‡, more than twice the 0.75 m/s currently used on straights.
+it reaches 1.72 m/s, more than twice the 0.75 m/s currently used on straights.
 
 ### Speed and acceleration
 
@@ -539,9 +535,9 @@ $$a_\text{traction} = \frac{\mu \cdot g \cdot l_f / L}{1 - \mu \cdot h / L}$$
 |---|---|---|
 | Theoretical top speed, 12 V | calculation | 1.68 m/s |
 | Theoretical top speed, 14.8 V, 100 % PWM | calculation | 2.07 m/s |
-| Measured top speed, 100 % PWM, 15.9 V | encoder log, full-throttle step (T07) | 1.72 m/s ‡ |
-| Time constant $\tau$ (63.2 %) | step response (T07) | 0.34 s ‡ |
-| Max. measured acceleration | step response (T07) | 4.6 m/s² ‡ |
+| Measured top speed, 100 % PWM, 15.9 V | encoder log, full-throttle step (T07) | 1.72 m/s |
+| Time constant $\tau$ (63.2 %) | step response (T07) | 0.34 s |
+| Max. measured acceleration | step response (T07) | 4.6 m/s² |
 | Traction limit, rear-wheel drive | formula above with the measured CoG and $\mu_\text{long} = 1.18$ (T08, [Grip](#tires-cast-silicone)) | ≈ 9 m/s² (6.7 m/s² with the lateral $\mu = 0.98$ as a lower bound) |
 | Deceleration after a halt command | fitted to the stopping distances of runs 38–42 ([chapter 3](04-software.md#obstacle-strategy)) | 0.57 m/s² |
 | Rolling resistance incl. drivetrain drag | $c_r = a/g$ | ≤ 0.058 (upper bound, it also contains the drag of gearbox and motor) |
