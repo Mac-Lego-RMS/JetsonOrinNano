@@ -1,14 +1,5 @@
 # Overview
 
-<!--
-Owner: all. One page. Judges spend 15–20 minutes on the whole documentation,
-so this page has to tell them where everything is.
-- the vehicle in one paragraph (what makes it different)
-- key numbers table: mass, footprint, top speed used, sensors, compute, battery
-- photo of the vehicle + team photo (link v-photos/, t-photos/)
-- video links for both challenges (video/video.md)
-- map of this journal: which chapter answers which rubric criterion
--->
 
 | Rubric criterion | Chapter |
 |---|---|
@@ -25,12 +16,12 @@ monocoque. A Jetson Orin Nano runs perception, estimation and planning; an
 ESP32-S3 on our own main PCB drives the motor and the steering servo. The table
 compares it with the LEGO hybrid that we drove at the national final.
 
-![Napoleon without its body on the competition mat.](../figures/mobility_napoleon.jpg){width=55%}
+![Napoleon without its body on the competition mat.](../figures/mobility_napoleon.jpg)
 
 | Parameter | National final (LEGO hybrid) | Napoleon | Source |
 |---|---|---|---|
-| L × W × H without body | 170 × 140 × 170 mm | 160 × 111 × 61 mm | Fusion 360 |
-| L × W × H with VW T1 body | – | 182 × 111 × 84 mm | STEP export |
+| L × W × H without body | 170 × 140 × 170 mm | 160 × 111 × 61 mm | CAD |
+| L × W × H with VW T1 body | – | 182 × 111 × 84 mm | CAD |
 | Wheelbase | 83 mm | 102 mm | CAD, kingpin axis to rear axle |
 | Track width front / rear | 105 mm | 97 / 96 mm | CAD, wheel centres |
 | Ground clearance | 8 mm | 2.0 mm (tie-rod ends) | CAD |
@@ -46,8 +37,6 @@ compares it with the LEGO hybrid that we drove at the national final.
 | Run time open / obstacle challenge | ≈30 s / ≈80 s | ≈27 s / ≈80 s incl. parking, varying from run to run | [open](04-software.md#open-challenge), [obstacle](04-software.md#obstacle-challenge) challenge |
 
 
-<!-- CHECK (team): where do the national-final run times (≈30 s / ≈80 s) come
-from? -->
 
 ## Team
 
@@ -55,7 +44,7 @@ Team MäcLEGO started at the Rabanus-Maurus-Schule in Fulda. In the meantime all
 three of us are at university: Jannik studies robotics, Clemens digital
 engineering in mechanical engineering and Finn mathematics.
 
-![Team MäcLEGO.](../../t-photos/team_photo.jpeg){width=60%}
+![Team MäcLEGO.](../../t-photos/team_photo.jpeg)
 
 | Member | Responsibility |
 |---|---|
