@@ -1,12 +1,10 @@
-# Due to copyright our videos got taken down by youtube one hour before the deadline
-If this Repo was freezed before 02.10.2026 19:00 the Videos can be found at our channel https://youtube.com/@maeclego_rms?si=F1y3NJvECdtc3-nR
-
+# Videos
 <!-- PLACEHOLDER: replace each LINK_FOLLOWS with the public YouTube link
 (reachable without a login), then remove this comment. -->
 
 | Challenge | Video |
 |---|---|
-| Open challenge | [LINK_FOLLOWS](LINK_FOLLOWS) |
+| Open challenge | [YT](https://www.youtube.com/watch?v=jaS3UchjqFY) |
 | Obstacle challengeg | [YT](https://youtu.be/_BfbdYi7HgU) |
 
 The vehicle drives both challenges fully autonomously; how it does that is
