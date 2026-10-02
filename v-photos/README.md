@@ -1,6 +1,7 @@
 # Vehicle photos
 
-The vehicle from all six sides, as it competes: body on, race battery in.
+The vehicle from all six sides with the race battery in, shown without the body
+so that every component is visible.
 
 | Front | Back |
 |---|---|
