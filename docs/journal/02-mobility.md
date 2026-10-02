@@ -15,13 +15,9 @@ order: earlier vehicle first, Napoleon last; shaded by docs/compare_columns.lua)
 
 The 2026 vehicle, **Napoleon**, replaces the LEGO-Technic hybrid of the national
 final with a screw-jointed monocoque, an Ackermann steering linkage and a rigid
-rear axle. Three limitations of the old platform triggered the redesign:
-
-1. **Steering play.**
-2. **Parallel steering** without Ackermann geometry.
-3. **Vehicle size**, set by the standard Jetson developer kit.
-
-Moving to the compact Seeed A603 carrier board and an SMD-assembled main PCB
+rear axle. Three limitations of the old platform triggered the redesign: play in
+the steering, parallel steering without Ackermann geometry, and a vehicle size
+that was set by the standard Jetson developer kit. Moving to the compact Seeed A603 carrier board and an SMD-assembled main PCB
 ([chapter 2](03-power-sensors.md#pcb-implementation)) freed the space that made
 a complete mechanical redesign possible. The key figures of both vehicles are
 compared in [the overview](01-overview.md#the-vehicle-at-a-glance).
@@ -30,7 +26,7 @@ Since the national final the main assemblies went through about 205 CAD versions
 (chassis v96, steering v40, C-Profile knuckle v54, tires v11, body v4), against
 about 120 design cycles for the entire previous robot.
 
-**How to read this chapter.** Tables that compare Napoleon with an earlier
+Tables that compare Napoleon with an earlier
 vehicle always list the earlier vehicle first and Napoleon last; in the PDF the
 earlier vehicles are shaded grey and Napoleon blue. Values marked ‡ are measured
 values that may still change slightly before the European Open in Zagreb; a ‡
@@ -48,13 +44,11 @@ interface was a fit with clearance and therefore one more link in the tolerance
 chain, so LEGO was removed completely. The detachable body carries no load
 ([Body](#body)).
 
-**Joints.** SLA parts get modelled threads. FDM parts get plain holes sized with
+The parts are joined in three ways. SLA parts get modelled threads. FDM parts get plain holes sized with
 the screw tolerance, in which the screw cuts its own thread. Nuts are used only
 in the steering linkage, as jam nuts, where the joints must stay free to rotate.
 The ball bearings are pressed into the front knuckles (the C-Profiles) with a
-vice and into the rear by hand.
-
-**Tolerances.** All fits are global user parameters in Fusion 360 and are
+vice and into the rear by hand. All fits are global user parameters in Fusion 360 and are
 referenced by every part. Changing one value updates every fit in the robot. This
 replaces the single LEGO scaling parameter of the previous design.
 
@@ -74,14 +68,14 @@ The table compares both chassis aspect by aspect:
 The components are stacked vertically in four levels instead of being spread
 out flat:
 
-1. **Base plate.** Carries the drive motor, recessed into the plate, and the IMU
+1. Base plate: carries the drive motor, recessed into the plate, and the IMU
    directly above the rear axle.
-2. **Steering level.** Sits directly on the base plate and holds the steering
+2. Steering level: sits directly on the base plate and holds the steering
    servo and the linkage. Its cut-outs follow the parts of the levels above and
    below.
-3. **Jetson level.** The Jetson Orin Nano module on the A603 carrier, with the
+3. Jetson level: the Jetson Orin Nano module on the A603 carrier, with the
    fan blowing downwards through the open base plate.
-4. **Top level.** Main PCB, camera holder and all connectors.
+4. Top level: main PCB, camera holder and all connectors.
 
 The RPLIDAR S3 sits in the front section on its own mount at the height of the
 Jetson level. Its scan plane at 55 mm runs at the height of the main PCB, which
@@ -95,23 +89,21 @@ motor and the drive axle.
 <img src="../figures/mobility_top_view.png" width="50%" />
 *Top view. Motor (left) next to the Jetson stack, bevel gears at the rear axle, LiDAR in front.*
 
-**Motor orientation.** The motor lies lengthways beside the Jetson module. A
-transverse motor directly on the rear axle was the obvious alternative and was
-designed first (V1 base plate, June, https://a360.co/4yrcmVN). It was rejected
-for three reasons, all of them set by the Jetson stack:
+The drive motor lies lengthways beside the Jetson module. A transverse motor
+directly on the rear axle was the obvious alternative and was designed first
+(V1 base plate, June, https://a360.co/4yrcmVN), but the Jetson stack ruled it
+out. A transverse motor does not fit between the rear wheels: their inner faces
+are 76 mm apart, the motor alone is 70 mm long, and the bevel or spur stage on
+the axle needs another ≈10 mm, so the track and the width of the robot would
+have had to grow. It would not have made the robot shorter either. The Jetson
+module ends 3.4 mm in front of the rear axle, so a transverse motor would sit on
+or behind the axle and add up to 25 mm of overhang, or push the Jetson forward
+and lengthen the wheelbase.
 
-- **It does not fit between the rear wheels.** The inner faces of the rear tires
-  are 76 mm apart. The motor alone is 70 mm long, and the bevel or spur stage on
-  the axle needs another ≈10 mm. The track would have had to grow, making the
-  robot wider.
-- **It does not make the robot shorter.** The Jetson module ends 3.4 mm in front
-  of the rear axle. A transverse motor cannot move forward under the Jetson, so
-  it would sit on or behind the axle and add up to 25 mm of overhang, or push the
-  Jetson forward and lengthen the wheelbase.
-- **The lengthways position uses space that already exists.** The motor lies
-  beside the Jetson module, in a strip that is exactly as long as the module
-  (70 mm against 69.6 mm) and that the carrier board overhangs anyway. The
-  battery sits above it. The motor therefore adds neither length nor width.
+Lying lengthways, the motor uses space that exists anyway: a strip beside the
+Jetson module that is exactly as long as the module (70 mm against 69.6 mm) and
+that the carrier board overhangs. The battery sits above it, so the motor adds
+neither length nor width.
 
 This was only possible after the differential was removed
 ([Rigid rear axle](#rigid-rear-axle)). The result is a vehicle about 20 mm
@@ -166,15 +158,15 @@ process can be chosen per part:
 
 PA6-CF is hygroscopic and is dried in an AMS dryer before printing.
 
-**SLA for the steering parts.** The first steering ball joints were printed in
-FDM. After a few days of testing they showed measurable wear and therefore play.
+The steering parts moved to SLA because of wear. The first steering ball joints
+were printed in FDM. After a few days of testing they showed measurable wear and therefore play.
 At the same time the linkage parts became smaller with every iteration, until
 their features were below what the FDM printers could reproduce reliably. A resin
 printer was bought for this reason. Later the tie rod and the ball joints were
 replaced by purchased steel tie-rod ends, because the SLA tie rod bent over time.
 
-**Cracked C-Profile knuckles.** In one iteration the mounting holes of the
-C-Profile knuckles sat too close to the outer wall and the parts cracked. The
+The C-Profile knuckles failed once by design: in one iteration their mounting
+holes sat too close to the outer wall and the parts cracked. The
 wall around the holes was thickened in the following versions (v44). A static
 FEA of the failed and the current version is planned (test T16).
 
@@ -271,14 +263,12 @@ and its gears skipped under load, which could have ended runs. The direct printe
 (0 % Ackermann), limited to ±35°, and occasionally broke or came loose at the
 LEGO H-profiles. The new Ackermann linkage removes these weaknesses: it has a much larger steering lock, it is more compact, and, because of its custom fit, the part that holds the servo also positions the LiDAR.
 
-| Feature | Regional final (LEGO rack) | National final (direct link) | Napoleon (Ackermann linkage) | Effect |
-|---|---|---|---|---|
-| Transmission chain | horn → axle → gear → rack | horn → tie rod | horn → tie-rod end → tie rod → steering arm → knuckle | correct angle at each wheel |
-| Ackermann share | 0 % | 0 % | ≈100 % by the design rule ([Ackermann geometry](#ackermann-geometry)) | less tire scrub in tight corners |
-| Mechanical steering lock | not documented | ±35° | 58° inner / 36.5° outer (CAD); the servo drives 41–47° / 30–33.5° (measured) | tighter turning circle |
-| Reversal play | ≈2–4° | < 0.5° (measured, max. 0.5°) | 0.8° expected (servo gearbox, with paper inserts); measurement open ‡ | see [Static wheel angles and play](#static-wheel-angles-and-play) |
-| Joints | LEGO | printed / LEGO | SLA horn, steel tie-rod ends, rivet kingpins, wheel axles in ball bearings | no wear since the switch to steel |
-| Servo | Waveshare SC09 | Waveshare SC09 | Waveshare SC09, rotated by 12° | the servo gearbox is now the largest source of play |
+![The three steering generations compared. Each cell gives the value; the colour and the symbol grade it from −− to ++.](../figures/steering_generations.svg)
+
+All three generations use the same Waveshare SC09 servo. In the linkage it is
+rotated by 12° to keep the tie-rod ends inside their articulation range
+([Kinematic chain](#kinematic-chain)), and with paper inserts filling the joint clearances
+its gearbox is now the largest remaining source of play.
 
 ### Kinematic chain
 
@@ -352,31 +342,35 @@ measured inner angle with the Ackermann relation above.
 | −0.3 | −12.5° | −12.5° | −12.5° | −11.1° | +1.4° |
 | −1.0 (full lock right) | −30.0° (outer) | −47.0° (inner) | −36.9° | −33.4° | −3.4° |
 
-- **Full lock.** The servo does not drive the linkage to its mechanical stop: the
-  inner wheel reaches 41° (left) and 47° (right) instead of 58° (CAD), the
-  bicycle-equivalent angle is 36.9° on both sides instead of 45°. The smallest
-  static radius at the rear-axle centre is $L/\tan\delta = 136$ mm (CAD: 101 mm
-  by the same formula).
-- **Symmetry.** Although the inner angles differ by 6°, the bicycle-equivalent
-  angles agree to 0.1°. For the vehicle as a whole the steering is symmetric.
-- **Ackermann share.** At full lock left the outer wheel turns 3.5° too far
-  (local share 62 %), at full lock right 3.4° too little (138 %). The CAD
-  linkage predicts 87 % and 97 % at these inner angles, so the mean of both sides
-  (100 %) matches the design, but the split between the sides does not. One
-  degree at the outer wheel moves the share by about 10 %, so the difference is
-  larger than the reading error. The cause is not yet identified; candidates are
-  a tie rod that is slightly too long or too short and the different steering-arm
-  angles of the CAD (15.3° left, 16.0° right). At ±0.3 both wheels read the
-  same; the expected difference of 1.5° is close to the reading resolution.
-- **Linearity.** At ±0.3 the wheels turn 43° per unit of command, between 0.3
-  and 1.0 only 33° per unit: the curve flattens towards the lock. A linear map
-  through the CAD lock (0.45° per percent) is right at ±0.3 within 1° but 8° too
-  high at full lock. The 1° difference between +0.3 and −0.3 is the straight-ahead
-  trim: straight ahead is at −0.02, so +0.3 is 0.32 and −0.3 is 0.28 away from it,
-  which gives 42° and 45° per unit.
-- **Reversal play.** Each position was approached from one side only. The
-  reversal play (same command, approached from the left and from the right) is
-  still to be measured ‡.
+The servo does not drive the linkage to its mechanical stop. The inner wheel
+reaches 41° (left) and 47° (right) instead of 58° (CAD), and the
+bicycle-equivalent angle is 36.9° on both sides instead of 45°. The smallest
+static radius at the rear-axle centre is therefore $L/\tan\delta = 136$ mm
+(CAD: 101 mm by the same formula). Although the inner angles differ by 6°, the
+bicycle-equivalent angles agree to 0.1°, so for the vehicle as a whole the
+steering is symmetric.
+
+The Ackermann share matches the design only on average. At full lock left the
+outer wheel turns 3.5° too far (local share 62 %), at full lock right 3.4° too
+little (138 %). The CAD linkage predicts 87 % and 97 % at these inner angles, so
+the mean of both sides (100 %) matches, but the split between the sides does
+not. One degree at the outer wheel moves the share by about 10 %, so the
+difference is larger than the reading error. The cause is not yet identified;
+candidates are a tie rod that is slightly too long or too short and the
+different steering-arm angles of the CAD (15.3° left, 16.0° right). At ±0.3 both
+wheels read the same; the expected difference of 1.5° is close to the reading
+resolution.
+
+The steering is not linear in the command. At ±0.3 the wheels turn 43° per unit
+of command, between 0.3 and 1.0 only 33° per unit: the curve flattens towards
+the lock. A linear map through the CAD lock (0.45° per percent) is right at ±0.3
+within 1° but 8° too high at full lock. The 1° difference between +0.3 and −0.3
+is the straight-ahead trim: straight ahead is at −0.02, so +0.3 is 0.32 and −0.3
+is 0.28 away from it, which gives 42° and 45° per unit.
+
+Each position was approached from one side only, so the reversal play (same
+command, approached from the left and from the right) is still to be
+measured ‡.
 
 Data: sheet `Steering_Target_Actual`, which also holds the series of the LEGO
 rack and the direct link for comparison.
@@ -500,21 +494,14 @@ it would have made the robot too long. Napoleon decouples the two: the motor lie
 lengthways beside the Jetson module, off-centre and recessed into the base plate
 ([Layout](#layout-in-four-levels)).
 
-| Motor | No-load speed at 12 V | Stall torque | $v_0$ at Ø 32 mm, 1:1 | Encoder counts per wheel revolution | Size | Mass |
-|---|---|---|---|---|---|---|
-| Pololu 20D 31:1 (national final) \[[5](99-references.md#ref-5)\] | 450 rpm | 2.4 kg·cm | 1.31 m/s (Ø 67 mm, via differential) | none | Ø 20 × 43 mm | 43 g |
-| **25GA370, 1000 rpm (chosen)** | 1000 rpm | not specified | 1.68 m/s | 408 | Ø 24.4 × 70 mm | 94 g |
-| Pololu 25D 4.4:1 HP with encoder (#4841) \[[6](99-references.md#ref-6)\] | 2200 rpm | 1.7 kg·cm | 3.69 m/s | 211 | Ø 25 × 63 mm | 95 g |
-| Pololu 25D 9.7:1 HP with encoder (#4842) \[[6](99-references.md#ref-6)\] | 1000 rpm | 3.9 kg·cm | 1.68 m/s | 465 | Ø 25 × 63 mm | 95 g |
-| Pololu 37D 10:1 with encoder (#4758) \[[7](99-references.md#ref-7)\] | 1000 rpm | 4.9 kg·cm | 1.68 m/s | 640 | Ø 37 × 65 mm | 190 g |
+![Drive motor candidates. Values from the data sheets \[[5](99-references.md#ref-5)–[7](99-references.md#ref-7)\]; the colour and the symbol grade each value from −− to ++ for this robot.](../figures/motor_selection.svg)
 
-**Why not the 25D 4.4:1.** It is geared for 3.7 m/s and has the lowest stall torque of all candidates. At our driving speeds of 0.35–0.75 m/s it would run at 10–20 % of its speed range. Between the regional and the national final the robot drove with the faster Pololu 25:1 for several iterations, before the 20D 31:1 replaced it. That motor had already shown that a small torque reserve at low duty makes the launch non-linear. Its encoder also gives only half the resolution.
+The 25D 4.4:1 is geared for 3.7 m/s and has the lowest stall torque of all candidates. At our driving speeds of 0.35–0.75 m/s it would run at 10–20 % of its speed range. Between the regional and the national final the robot drove with the faster Pololu 25:1 for several iterations, before the 20D 31:1 replaced it. That motor had already shown that a small torque reserve at low duty makes the launch non-linear. Its encoder also gives only half the resolution.
 
-**Why not the 25D 9.7:1.** Speed and torque are in the same class as the 25GA370. It was rejected because its encoder does not work with the 3.3 V logic level of the ESP32-S3. Adapting it would have meant a new PCB revision with two to three weeks of lead time, for a more expensive motor, although the 25GA370 is fully sufficient.
+The 25D 9.7:1 is in the same class as the 25GA370 in speed and torque. It was rejected because its encoder does not work with the 3.3 V logic level of the ESP32-S3. Adapting it would have meant a new PCB revision with two to three weeks of lead time, for a more expensive motor, although the 25GA370 is fully sufficient.
 
-**Why not the 37D 10:1.** It has the most torque and the finest encoder, but it weighs 190 g, about twice the 25GA370, and its 37 mm diameter would have needed a deeper recess or a higher Jetson level. More torque also buys nothing on this robot: driving into a wall at full duty, the tires lose grip at a winding current of about 0.53 A, far below stall ([chapter 2](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)).
-  
-The drivetrain is limited by traction, not by the motor.  
+The 37D 10:1 has the most torque and the finest encoder, but it weighs 190 g, about twice the 25GA370, and its 37 mm diameter would have needed a deeper recess or a higher Jetson level. More torque also buys nothing on this robot: driving into a wall at full duty, the tires lose grip at a winding current of about 0.53 A, far below stall ([chapter 2](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)).
+The drivetrain is limited by traction, not by the motor.
 
 The 25GA370 leaves enough headroom for faster speed profiles: at 100 % PWM on 4S
 it reaches 1.72 m/s, more than twice the 0.75 m/s currently used on straights.
@@ -568,7 +555,7 @@ The national-final robot used LEGO ABS axles, which bent under load, and LEGO
 gears, which skipped and could fall out. Both were replaced by steel axles and
 brass bevel gears.
 
-**Gear mounting.** The rear bevel gear first sat on the shaft through an
+The rear bevel gear first sat on the shaft through an
 improvised adapter and ran out of true. The IMU vibration sweep in
 [chapter 2](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)
 found it before the part was inspected. Repairing the adapter cut the pitch noise
@@ -610,7 +597,7 @@ The LEGO Spike tires were replaced by self-cast silicone tires on PA6-CF rims,
 needed, and a smaller wheel lowers the whole vehicle and leaves more room for the
 steering lock inside the knuckles.
 
-**Material.** The tires are cast from TFC Troll Factory BL200
+The tires are cast from TFC Troll Factory BL200
 \[[8](99-references.md#ref-8)\], a two-component moulding silicone mixed 1:1,
 medium-hard at Shore A 35 and translucent. The hardness is a compromise: softer
 silicone would grip more but compress further under load and change the rolling
@@ -621,7 +608,7 @@ The rim is deliberately stiff (flexural modulus 8.6 GPa
 \[[3](99-references.md#ref-3)\]), so all compliance sits in the tire and the
 rolling radius depends only on the silicone.
 
-**Casting process.**
+A tire is cast in five steps:
 
 1. Print the rim (PA6-CF) and the casting mould.
 2. Treat the mould with release agent.
@@ -630,10 +617,10 @@ rolling radius depends only on the silicone.
    the tread surface stays free of a sprue.
 5. Remove the funnel and let the tire cure for about 45 minutes.
 
-**Seam in the casting mould.**  
-The once-per-revolution oscillation of test drives ([Circular test drives](#circular-test-drives), 3.18 Hz at 0.30 m/s against a wheel frequency of 2.98 Hz) pointed at the wheels. The moulds had been printed with an aligned seam: every layer started at the same angle, which left a small ridge across the mould wall and therefore a bump on every tire at the same position. The mould was reprinted with a random seam, and the centring of the rim was improved. With the new tires the oscillation was gone.
+The casting mould went through one important iteration. The once-per-revolution
+oscillation of the test drives ([Circular test drives](#circular-test-drives), 3.18 Hz at 0.30 m/s against a wheel frequency of 2.98 Hz) pointed at the wheels. The moulds had been printed with an aligned seam: every layer started at the same angle, which left a small ridge across the mould wall and therefore a bump on every tire at the same position. The mould was reprinted with a random seam, and the centring of the rim was improved. With the new tires the oscillation was gone.
 
-**Measured tire data ‡.**
+The finished tires were measured as follows ‡:
 
 | Quantity | Value | Source |
 |---|---|---|
@@ -648,18 +635,18 @@ The once-per-revolution oscillation of test drives ([Circular test drives](#circ
 The effective radius is 6 % smaller than the nominal one: the Shore A 35 silicone
 is compressed under the robot's weight. This is why the encoder needs to be calibrated on the driven distance and not on the mould diameter.
 
-**Grip.** The friction coefficient is measured on an inclined board covered with
+The grip of the tires, the friction coefficient $\mu$, is measured on an inclined board covered with
 competition mat (test T08, 02.10., 3 runs each). $\alpha$ is the angle, read to
 1° from a phone inclinometer, at which the robot starts to slide. "Clean" means
 the tires were washed with water; "after 3 runs" means three runs on the mat
 afterwards without cleaning.
 
-- **Lateral:** the robot stands across the slope with the steering held at 0. No
-  wheel can roll sideways, so $\mu = \tan\alpha$.
-- **Longitudinal:** the front wheels cannot be blocked. The robot therefore stands
-  front downhill with only the rear wheels blocked. Only the rear axle holds it,
-  and the slope shifts load from it to the front axle. The balance of forces with
-  $l_f = L - x = 45.3$ mm and $h = 38$ mm gives
+For the lateral value the robot stands across the slope with the steering held
+at 0. No wheel can roll sideways, so $\mu = \tan\alpha$. The longitudinal value
+is harder to get, because the front wheels cannot be blocked. The robot
+therefore stands front downhill with only the rear wheels blocked. Only the rear
+axle holds it, and the slope shifts load from it to the front axle. The balance
+of forces with $l_f = L - x = 45.3$ mm and $h = 38$ mm gives
 
 $$\mu_\text{long} = \frac{L \tan\alpha}{l_f - h \tan\alpha}$$
 
@@ -723,32 +710,24 @@ The mechanical design took about seven months from a first component layout to
 
 ### Mechanical trade-offs
 
-| Decision | Gained | Given up |
-|---|---|---|
-| Compact steering linkage | short front, Ackermann geometry | slightly less lock than a larger linkage would allow |
-| Small steering parts in SLA | precision, wear resistance | a second printer and process |
-| Rigid axle instead of a differential | lengthways motor, shorter chassis | tire scrub, driven lock only ≈22–25° |
-| Low LiDAR position | small camera–LiDAR offset | 120° of view lost at the rear (240° used, national final: ≈250°) |
-| Purchased steel tie-rod ends | no wear, reproducible geometry | 20° articulation limit, servo rotated by 12° |
-| Cast silicone tires, 32 mm | grip, low vehicle | casting effort, regular cleaning |
-| 25GA370 instead of a larger motor | mass, height, no PCB change | – (traction-limited anyway) |
+![Mechanical trade-offs: what each decision gained and what it gave up.](../figures/mobility_tradeoffs.svg)
 
 ### Rejected iterations
 
-- **Transverse motor on the rear axle:** did not fit between the rear wheels and
+- Transverse motor on the rear axle: did not fit between the rear wheels and
   made the robot wider without making it shorter
   ([Layout](#layout-in-four-levels)).
-- **Ball differential:** designed in-house, too large for the space.
-- **Printed ball joints (FDM):** worn after a few days; replaced by SLA, then by
+- Ball differential: designed in-house, too large for the space.
+- Printed ball joints (FDM): worn after a few days; replaced by SLA, then by
   steel tie-rod ends.
-- **Seven steering versions on an unrealistic digital twin:** the CAD kinematics
+- Seven steering versions on an unrealistic digital twin: the CAD kinematics
   did not match the real linkage; since then every change is checked on the
   separate test rig.
-- **Thin C-Profile knuckles:** cracked at holes too close to the outer wall; wall
+- Thin C-Profile knuckles: cracked at holes too close to the outer wall; wall
   thickened.
-- **Aligned seam in the tire mould:** once-per-revolution bump; mould reprinted
+- Aligned seam in the tire mould: once-per-revolution bump; mould reprinted
   with a random seam.
-- **Gear adapter on the drive shaft:** ran out of true; found by the IMU sweep
+- Gear adapter on the drive shaft: ran out of true; found by the IMU sweep
   ([chapter 2](03-power-sensors.md#iteration-locating-and-removing-the-vibration-source)).
 
 ### Lessons learned
@@ -768,23 +747,23 @@ The mechanical design took about seven months from a first component layout to
 Each item below answers a limitation that is measured or described earlier in
 this chapter.
 
-- **Custom aluminium cooler for the Jetson.** The LiDAR scan plane runs at the
+- Custom aluminium cooler for the Jetson: The LiDAR scan plane runs at the
   height of the main PCB, so the robot loses 120° of view at the rear
   ([Sensor mounting](#sensor-mounting)). A flatter cooler would allow a lower
   Jetson and with it a free 360° scan, without raising the LiDAR and increasing
   the camera offset again.
-- **Body as heat exchanger.** The body already covers the whole robot. Using it
+- Body as heat exchanger: The body already covers the whole robot. Using it
   as the heat-exchanging surface of that cooler adds cooling area without adding
   height or a separate part.
-- **Steering servo with a magnetic encoder (e.g. Feetech STS3032).** With the
+- Steering servo with a magnetic encoder (e.g. Feetech STS3032): With the
   paper inserts, the SC09 gearbox is the largest remaining source of steering
   play (≈0.8°, [Static wheel angles and play](#static-wheel-angles-and-play)).
   A stiffer gearbox and 12-bit position feedback would reduce it further.
-- **Balanced wheels.** With the adapter-free drive gear, the remaining vibration
+- Balanced wheels: With the adapter-free drive gear, the remaining vibration
   is a resonance at 0.4–0.6 m/s that disappears when the wheels are taken off
   ([Power transmission](#power-transmission)). Balancing the rims and tires, or
   checking their runout on the stand, is the next step.
-- **Custom differential.** The rigid axle is the reason why the robot drives only
+- Custom differential: The rigid axle is the reason why the robot drives only
   about half of its mechanical steering lock
   ([Steering angle while driving](#steering-angle-while-driving)).
   Purchased and ball differentials were too large, so it has to be designed to
