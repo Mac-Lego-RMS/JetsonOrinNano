@@ -7,7 +7,7 @@ If this Repo was freezed before 02.10.2026 19:00 the Videos can be found at our 
 | Challenge | Video |
 |---|---|
 | Open challenge | [LINK_FOLLOWS](LINK_FOLLOWS) |
-| Obstacle challenge, including unparking and parallel parking | [LINK_FOLLOWS](LINK_FOLLOWS) |
+| Obstacle challengeg | [YT](https://youtu.be/_BfbdYi7HgU) |
 
 The vehicle drives both challenges fully autonomously; how it does that is
 described in the [software chapter of the journal](../docs/journal/04-software.md).
