@@ -532,10 +532,6 @@ $$a_\text{traction} = \frac{\mu \cdot g \cdot l_f / L}{1 - \mu \cdot h / L}$$
 | Rolling resistance incl. drivetrain drag | $c_r = a/g$ | ≤ 0.058 (upper bound, it also contains the drag of gearbox and motor) |
 | Limiting factor at launch | wall test ([chapter 2](03-power-sensors.md#the-operating-envelope-is-bounded-by-traction-not-by-stall)) | traction |
 
-<!-- TODO (Clemens): the step-response figure of the draft shows placeholder data.
-Add it back (docs/figures/mobility_step_response.png) once test T07 is
-measured. -->
-
 The measured acceleration stays below the traction limit, and the wall test
 shows the tires slipping long before the motor stalls. Stall torque and stall
 current were therefore not measured: they are never reached. The vehicle has no
@@ -706,7 +702,6 @@ The mechanical design took about seven months from a first component layout to
 | 14 August | screws modelled, wheels adapted, materials assigned in the digital twin |
 | 8 September | steel tie rod purchased, servo rotated by 12°; reliable test runs close to competition-level from here on |
 | 24 September | chassis named "Napoleon" |
-
 
 ### Mechanical trade-offs
 

@@ -11,12 +11,6 @@ Sources in the repo: schemes/ (MainPCB, schematic PDF), src/start_robot.sh
 (camera exposure / white balance rationale), src/camera_lidar_fusion/README.md.
 -->
 
-<!--
-Draft status: electrical values are measured (MP1-MP3b) or derived from
-schemes/MainPCB and component datasheets. Open items are marked TODO in
-comments throughout this chapter.
--->
-
 **Evidence at a glance.** Where this chapter answers each point of the
 rubric for criterion 2:
 
@@ -1198,7 +1192,6 @@ Both are calibrated on the vehicle and described with the software that uses
 them in [chapter 3](04-software.md): the steering characteristic is measured per
 speed (0.35, 0.50 and 0.75 m/s), and the gyro scale factor comes from five full
 turns.
-
 
 ## Failure points and mitigation
 

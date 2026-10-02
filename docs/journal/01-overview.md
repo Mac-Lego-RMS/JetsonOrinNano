@@ -1,6 +1,5 @@
 # Overview
 
-
 | Rubric criterion | Chapter |
 |---|---|
 | 1 Mobility & mechanical design | [Mobility and mechanical design](02-mobility.md) |
@@ -35,8 +34,6 @@ compares it with the LEGO hybrid that we drove at the national final.
 | Total mass | 803 g | 586 g (without body) | [weighed](02-mobility.md#layout-in-four-levels) |
 | Centre of gravity | not measured | 38 mm above ground, 56.7 mm ahead of the rear axle | [scales and tilt test](02-mobility.md#layout-in-four-levels) |
 | Run time open / obstacle challenge | ≈30 s / ≈80 s | ≈27 s / ≈80 s incl. parking, varying from run to run | [open](04-software.md#open-challenge), [obstacle](04-software.md#obstacle-challenge) challenge |
-
-
 
 ## Team
 

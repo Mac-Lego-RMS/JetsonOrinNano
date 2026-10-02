@@ -10,7 +10,6 @@ Status 30.09.: every number below was checked against the code on main
 (ceebae5), including the review feedback from the two build chats. Metrics
 and figures come from the evaluation of all 71 bags (11.-29.09., repo e740c8a)
 with docs/analysis.
-Comments starting with CHECK need an answer from the team.
 -->
 
 ## Architecture overview
@@ -26,10 +25,6 @@ offset and drift, ESP reboots are detected), so that encoder samples from the
 ESP and IMU/LiDAR samples on the Jetson share one time base. Over all
 recorded runs the one-way latency from the ESP to the Jetson was 1.6 ms
 (median of the run medians, p95 8.2 ms) and the round trip 0.66 ms.
-
-<!-- CHECK (Jannik): in 10 runs the estimated clock drift is above 30 ppm (up to
-±150 ppm), which is implausible for a crystal and points to jumps in the offset
-estimator (clocksync_<bag> plots on the Jetson). -->
 
 The split follows one rule: everything that needs the map or the camera runs on
 the Jetson, everything that must react within milliseconds to the motor runs on
@@ -153,13 +148,6 @@ stateDiagram-v2
   state "parking, see below" as PARKING
 ```
 
-<!-- CHECK before the deadline: the start order shown here (button first,
-nothing measured before it) is the team's reading of rules 9.11/9.14 and is
-being implemented by Jannik. On main (ceebae5) the code still does
-[*] -> WAIT_INPUTS -> WAIT_BUTTON, require_button defaults to False and the
-bay/start detection in scan_processor runs from node start. Update this
-diagram if the final code differs. -->
-
 ```mermaid
 stateDiagram-v2
   [*] --> PARK_DRIVE: sides clear, no halt
@@ -173,9 +161,6 @@ stateDiagram-v2
   state "UNPARK_DRIVE (mode approach)" as APPROACH
   state "UNPARK_DRIVE (mode in): park sequence" as PARK_IN
 ```
-
-<!-- CHECK (team): the rationale column below is drafted from the code comments.
-Please confirm or correct it in your own words. -->
 
 | State | What it does | Why it is a separate state |
 |---|---|---|
@@ -285,8 +270,6 @@ see [Edge cases](#edge-cases)).
 
 ![Localisation state and wall matching quality per run.](../figures/localization_across_runs.png)
 
-<!-- TODO figure: EKF vs. folding-rule measurement (M1, plot_manual.py) -->
-
 ## Perception: start, direction, pillars and colour
 
 ### Start section
@@ -376,10 +359,6 @@ reliable figure is the wrong-colour rate.
 
 ![Colour classification against range, pooled over all bags.](../figures/colour_distance_pooled.png)
 
-<!-- CHECK (team): the pooled data shows green read as red at 1.2-1.7 m, i.e.
-inside the 1.60 m colour limit. Keep the limit (votes handle it) or lower it to
-~1.2 m? -->
-
 ## Lane following
 
 **Straights** are followed with the **Stanley** law on a reference line (lane
@@ -424,10 +403,6 @@ Two additions came from test runs:
   once.
 
 ![Delay from the command to the gyro reaction per run, from all bags (median 167 ms). The 260 ms of the controller also cover the delays of the EKF and the control loop.](../figures/dead_time_across_runs.png)
-
-<!-- CHECK (team): the four-run measurement (190 ms) and the bag evaluation
-(167 ms) differ by ~25 ms for the same stage. Which method / time stamps did
-the four runs use? And: steer_gain_pred 0.84 vs. measured 1.13, re-tune? -->
 
 **Corners** are tangential circular arcs between the entry and exit lane lines
 and are driven in the state `TURN` with their own law: the feed-forward
@@ -502,9 +477,6 @@ was switched off.
 
 ![Lateral error in the corners and heading error on the straights per run.](../figures/tracking_across_runs.png)
 
-<!-- TODO (Jannik): re-enable the e_ct publish in _stanley_steer so the next runs
-record the lateral error on the straights. -->
-
 ## Obstacle strategy
 
 **Side rule.** Red pillars are passed on the right, green pillars on the left.
@@ -544,10 +516,6 @@ drives past it and backs up. For the same reason the last corner ignores pillars
 behind the switching point, otherwise a pillar at the end of the start straight
 pulled the arc onto the inner line.
 
-<!-- CHECK (team): "the three laps end when the rear has passed the pillar row
-at the start of the start straight" is our reading of the rules. Has it been
-confirmed by the judges / Q&A? If not, say so here. -->
-
 **Speed.** The speed profile `fast` sets 0.35 m/s on the start
 straight, 0.75 m/s on straights without pillars, 0.55 m/s in corners and on
 straights with pillars, 0.35 m/s on steep lane changes and 0.30 m/s on the last
@@ -567,15 +535,6 @@ start straight (see [Direction](#direction)). While driving the robot measures t
 every straight (sum of both side distances) and, as soon as all four are known,
 reconstructs the inner walls from the median widths and adds them to the map.
 About 27 s for three laps.
-
-<!-- CHECK (team): how is the open challenge started on the robot?
-start_robot.sh hard-codes RACE_MODE=obstacle and UNPARK=true; the controller has
-no race-mode switch, so the lap-1 halts (scan_pause) would also fire in the open
-challenge unless they are switched off. estimation_restart waits for
-/corner_geometry, which in open mode only arrives with the direction latch.
-Which parameters do you use for the open runs? Note: the back-up manoeuvre needs
-the move publishers, which only exist with unpark:=true; without it every
-manoeuvre case ends in DONE. -->
 
 ## Obstacle challenge
 
@@ -597,10 +556,6 @@ lap 2 the map is frozen and the robot drives the planned path without halts.
 After three laps it parks without stopping first: the time runs until the robot
 stands in the bay, and the rules do not ask for a pause. About 80 s for the
 whole run.
-
-<!-- CHECK (team): the handover says lap 1 at 0.55 m/s. The code (pace fast,
-pace_lap1 same in start_robot.sh) drives free straights in lap 1 at 0.75 m/s
-and brakes into the halts. Which one is right? -->
 
 ## Parking and unparking
 
@@ -654,13 +609,6 @@ robot's own estimate (EKF), not measured with a ruler.
 
 ![Final pose after parking and axle difference per run.](../figures/parking_final_pose.png)
 
-<!-- CHECK (team): the build chat reports a run after an unpark VARIANT that
-ended with 16.6° and 3.0 cm axle difference (rule broken), because there was
-no heading reference. Since commit 3f3a22d (28.09.) the target headings come
-from the drive model also after a variant. Was that run before or after it?
-If after: add it to the table and to the known limitations. -->
-<!-- TODO: add ruler measurements from the next runs; figure plot_parking.py -->
-
 ## Edge cases
 
 | Case | Handling |
@@ -681,13 +629,6 @@ If after: add it to the table and to the known limitations. -->
 | Touching a wall or pillar | 3 LiDAR points within 4 cm in front of the nose: stop, back up 8–40 cm while steering towards the direction of the straight, re-plan and drive on. At most two such manoeuvres per corner (the counter is shared with the missed turn-in and reset after every corner); a third one ends the run with an emergency stop instead of pushing against the wall |
 | Robot moved before the start, map of the previous run | before every run the controller restarts ekf_node and scan_processor and waits up to 40 s for gyro, map and localisation `ok` |
 | Duplicate nodes | ekf_node and the controller check at start whether their output topic is already served |
-
-<!-- CHECK (Jannik): gyro_ok is only used by the pre-start check
-(estimation_restart.py); neither scan_processor nor the controller subscribe,
-so a gyro failure during the run does not stop the robot (ekf_node.py:99 says
-otherwise). The single-instance check exists only in ekf_node and the
-controller, not in scan_processor. Either wire it up or keep the table as it
-is now. -->
 
 ## Testing and tuning
 
@@ -748,8 +689,3 @@ Almost all of these runs were driven with a cruise speed of 0.35 m/s; the
 faster speed profile (0.75 m/s on straights) was only set afterwards (commit
 3f3a22d).
 
-<!-- CHECK (team): which speed did you drive after 28.09.? Were the
-position-move timeouts fixed (minduty raised)? The logs of "log ends while
-driving" cannot tell a manual stop from a hanging robot; check run_outcomes.csv
-against your notes. -->
-<!-- TODO: A/B test of the scan halt. -->

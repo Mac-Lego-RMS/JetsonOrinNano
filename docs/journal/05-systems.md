@@ -9,7 +9,6 @@ modes with mitigation; "we chose X instead of Y because ..." based on data.
 Status 01.10.: software rows checked against the code on main; power and
 sensor rows from chapter 2, mechanics rows from chapter 1. Values marked ‡ are
 still being measured (see chapter 1, Validation status).
-Comments starting with CHECK need an answer from the team.
 -->
 
 ## Subsystems and how they interact
@@ -93,10 +92,6 @@ Most of the software described in chapter 3 is a reaction to one of these rows.
 | Steering: 0.10 m wheelbase, 19–25° full lock, ~250 ms dead time | smallest drivable radius ~0.22 m; arcs ≥ 0.30 m; dead-time prediction |
 | LiDAR blind below 0.15 m | encoder moves in the bay |
 | Start procedure (rules 9.10–9.14): one switch, one start button, nothing measured before it | container and controller start from the autostart (boot 85–90 s) and wait for the button; direction, position and bay are detected after it |
-
-<!-- CHECK (team): add your time constraint (test days / runs available after
-the national final) as a row; it explains why every change is replayed
-against recorded bags first. -->
 
 ## Decisions and trade-offs
 
@@ -254,10 +249,6 @@ Only one run was recorded after the change; the temperature stayed uncritical
 The electrical failure points (reverse polarity, overvoltage, brown-out, lost
 connections) and their mitigation are in
 [chapter 2](03-power-sensors.md#failure-points-and-mitigation).
-
-<!-- CHECK (team): the build chat reports a last-move timeout of 4 s against the
-wall and a first unpark move that drove ~5 cm backwards because the ESP kept
-its old target. Neither is in the code comments; confirm or delete the row. -->
 
 ## Known limitations
 

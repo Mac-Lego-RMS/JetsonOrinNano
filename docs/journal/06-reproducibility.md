@@ -115,11 +115,6 @@ pip install -r docs/analysis/requirements.txt
 cd docs/analysis && python3 -m pytest -q tests            # 14 tests: analysis toolkit on synthetic bags
 ```
 
-<!-- TODO: src/esp_bridge/test/test_esp_protocol.py imports EspProtocol,
-PacketParser and decode_* from esp_serial_bridge, which no longer exist after the
-bridge was restructured (now FrameParser, parse_*). Rewrite it against the current
-API, then list it here. -->
-
 **On the bench.** Measurements are repeatable by construction: the speed sweep
 `ros2 run esp_bridge pwm_sweep` drives identical steps before and after a change,
 and hand measurements go to [`docs/data/manual/`](../data/manual) — see
