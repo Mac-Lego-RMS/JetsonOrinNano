@@ -9,6 +9,7 @@ Status 01.10.: Clemens' draft (Hardware.zip, commit de8f8ce) integrated, languag
 and format aligned with the other chapters, cross-checked against chapters 2
 and 3. Driven steering angles replaced by the measured steering calibration.
 -->
+
 The 2026 vehicle, **Napoleon**, replaces the LEGO-Technic hybrid of the national
 final with a screw-jointed monocoque, an Ackermann steering linkage and a rigid
 rear axle. Three main limitations of the old platform triggered the redesign: steering
@@ -326,7 +327,7 @@ Up to about 49° the outer wheel turns slightly too far (local share below 100 %
 near full lock too little. Below 30°, where the robot drives almost all the time,
 the deviation stays under 1.7°. Geometrically the smallest radius at the
 rear-axle centre is $R = L/\tan\delta_i + k/2 = 93$ mm; how much of it can be
-driven is the topic of [Mechanical lock vs. driven lock](#mechanical-lock-vs-driven-lock).
+driven is the topic of [Mechanical lock vs driven lock](#mechanical-lock-vs-driven-lock).
 
 ### Static wheel angles and play
 
@@ -369,7 +370,7 @@ exchange for correct Ackermann angles and a much larger lock. Against the LEGO
 rack the play is clearly lower. The next step is a servo with a magnetic encoder
 and a stiffer gearbox (e.g. Feetech STS3032, 12-bit, 4.5 kg·cm stall torque).
 
-### Mechanical lock vs. driven lock
+### Mechanical lock vs driven lock
 
 The mechanics reach 58° at the inner wheel, a bicycle-equivalent angle of 45°
 (CAD, from the formula above). While driving, the robot reaches only about half
@@ -541,7 +542,7 @@ $$s \approx \pm \frac{T}{2R}$$
 
 This is the central trade-off of the drivetrain: a shorter, simpler vehicle
 against tire scrub and understeer in tight corners
-([Mechanical lock vs. driven lock](#mechanical-lock-vs-driven-lock)). Above
+([Mechanical lock vs driven lock](#mechanical-lock-vs-driven-lock)). Above
 500 mm the slip is below 10 %, and the planner keeps every arc at
 $R \geq 0.30$ m ([chapter 3](04-software.md#lane-following)), so the effect was
 accepted and is handled by the measured steering table. Tighter turns are possible at reduced speed. A custom differential for next season is in development.
