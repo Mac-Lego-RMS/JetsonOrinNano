@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'esp_serial_bridge = esp_bridge.esp_serial_bridge:main',
             'pwm_sweep = esp_bridge.pwm_sweep:main',
+            'step_test = esp_bridge.step_test:main',
         ],
     },
 )
