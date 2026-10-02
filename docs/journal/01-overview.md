@@ -16,7 +16,7 @@ monocoque. A Jetson Orin Nano runs perception, estimation and planning; an
 ESP32-S3 on our own main PCB drives the motor and the steering servo. The table
 compares it with the LEGO hybrid that we drove at the national final.
 
-![Napoleon without its body on the competition mat.](../figures/mobility_napoleon.jpg)
+![Napoleon without its body, rendered from the CAD model.](../figures/mobility_napoleon.png)
 
 | Parameter | National final (LEGO hybrid) | Napoleon | Source |
 |---|---|---|---|
