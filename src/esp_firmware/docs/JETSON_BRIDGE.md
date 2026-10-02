@@ -1,214 +1,214 @@
-# ESP32-S3 Controller — Protokoll-Spezifikation für die Jetson-Bridge
+# ESP32-S3 Controller — Protocol Specification for the Jetson Bridge
 
-Referenz für die Gegenstelle auf dem Jetson. Quelle der Wahrheit ist
-`src/main.cpp` auf dem ESP.
+Reference for the counterpart on the Jetson. The source of truth is
+`src/main.cpp` on the ESP.
 
 ---
 
-## 1. Physikalische Verbindung
+## 1. Physical connection
 
 | | |
 |---|---|
-| Schnittstelle | UART, `Serial1` auf dem ESP |
-| Baudrate | **115200**, 8N1 |
+| Interface | UART, `Serial1` on the ESP |
+| Baud rate | **115200**, 8N1 |
 | ESP RX | GPIO 10 (→ Jetson TX) |
 | ESP TX | GPIO 11 (→ Jetson RX) |
-| Flusskontrolle | keine |
+| Flow control | none |
 
 ---
 
-## 2. Rahmenformat
+## 2. Frame format
 
 ```
-+------------+---------+----------------------+
-| 0xA5       | CMD     | PAYLOAD (0..17 Byte) |
-| Start-Byte | 1 Byte  | Länge ergibt sich    |
-|            |         | aus CMD              |
-+------------+---------+----------------------+
++------------+---------+-----------------------+
+| 0xA5       | CMD     | PAYLOAD (0..17 bytes) |
+| start byte | 1 byte  | length is implied     |
+|            |         | by CMD                |
++------------+---------+-----------------------+
 ```
 
-**Es gibt kein Längenfeld und keine Prüfsumme.** Beide Seiten müssen die
-Nutzlastlänge je Befehl fest kodiert haben (Tabellen unten).
+**There is no length field and no checksum.** Both sides must have the
+payload length per command hard-coded (tables below).
 
-### Zweite Rahmenform: mit Sendezeitstempel
+### Second frame form: with send timestamp
 
 ```
-+------------+---------+--------------------+----------------------+
-| 0xA6       | CMD     | uint32 t_tx_us     | PAYLOAD (0..12 Byte) |
-| Start-Byte | 1 Byte  | Sendezeitpunkt     | wie bei 0xA5         |
-+------------+---------+--------------------+----------------------+
++------------+---------+--------------------+-----------------------+
+| 0xA6       | CMD     | uint32 t_tx_us     | PAYLOAD (0..12 bytes) |
+| start byte | 1 byte  | send time          | as for 0xA5           |
++------------+---------+--------------------+-----------------------+
 ```
 
-Ein `0xA6`-Rahmen ist ein `0xA5`-Rahmen mit vier zusätzlichen Byte zwischen
-`CMD` und Nutzlast: den unteren 32 Bit der ESP-Uhr in Mikrosekunden. Nutzlast
-und deren Länge sind unverändert — der Parser braucht nur einen Zweig mehr.
+A `0xA6` frame is a `0xA5` frame with four extra bytes between `CMD` and the
+payload: the lower 32 bits of the ESP clock in microseconds. The payload and
+its length are unchanged — the parser needs only one more branch.
 
-* **Der ESP versteht `0xA6` im Empfang immer.** Die Bridge darf ihre Befehle
-  jederzeit stempeln, ohne vorher etwas einzuschalten.
-* **Der ESP *sendet* `0xA6` nur, wenn er dazu aufgefordert wurde** — mit
-  `0xB2 STAMP_MODE`. Default ist aus, damit eine Bridge, die `0xA6` nicht kennt,
-  weiterläuft.
-* Ausnahme: `0xB1 TIME_RSP` geht **nie** als `0xA6` raus. Es trägt seine
-  Zeitstempel schon mit voller 64-Bit-Breite in der Nutzlast.
+* **The ESP always understands `0xA6` on receive.** The bridge may stamp its
+  commands at any time, without switching anything on first.
+* **The ESP only *sends* `0xA6` when it has been asked to** — with
+  `0xB2 STAMP_MODE`. The default is off, so that a bridge that does not know
+  `0xA6` keeps working.
+* Exception: `0xB1 TIME_RSP` is **never** sent as `0xA6`. It already carries
+  its timestamps at full 64-bit width in the payload.
 
-Details zur Bedeutung des Stempels und zum Umrechnen in die Jetson-Uhr:
-Abschnitt 5.
+Details on the meaning of the stamp and on converting it to the Jetson clock:
+section 5.
 
-### Regeln, die der Parser einhalten muss
+### Rules the parser must follow
 
-1. **Mehrbyte-Zahlen sind Big-Endian** (MSB zuerst). Gilt für `int16` und `int32`.
-2. **Fließkommazahlen werden als `int32 × 1000` übertragen.** Kp = 4,25 → `4250`.
-   Kein IEEE754 auf der Leitung.
-3. **Ein Paket muss in einem einzigen `write()` rausgehen.** Der ESP setzt seinen
-   Parser zurück, wenn zwischen zwei Bytes eines Pakets mehr als **100 ms**
-   liegen. Byteweises Senden mit Pausen zerlegt das Paket.
-4. **Der RX-Strom vom ESP enthält auch ASCII-Klartext.** Bei `CMD_EMERGENCY` und
-   `CMD_TRIM` schreibt der ESP zusätzlich lesbare Statuszeilen auf dieselbe
-   Leitung. Das ist ungefährlich — ASCII enthält nie `0xA5`, der Sync-Scan
-   überspringt es —, aber die Bridge muss diese Bytes tolerieren statt daran zu
-   scheitern. Sinnvoll: als Log-Zeile ausgeben.
-5. **Unbekannte CMD-Bytes verwirft der ESP** und sucht das nächste `0xA5`. Die
-   Bridge sollte es genauso halten.
+1. **Multi-byte numbers are big-endian** (MSB first). This applies to `int16` and `int32`.
+2. **Floating-point numbers are transmitted as `int32 × 1000`.** Kp = 4.25 → `4250`.
+   No IEEE754 on the wire.
+3. **A packet must go out in a single `write()`.** The ESP resets its parser
+   if more than **100 ms** pass between two bytes of a packet. Sending byte by
+   byte with pauses breaks the packet apart.
+4. **The RX stream from the ESP also contains plain ASCII text.** On
+   `CMD_EMERGENCY` and `CMD_TRIM` the ESP also writes readable status lines on
+   the same line. This is harmless — ASCII never contains `0xA5`, and the sync
+   scan skips it — but the bridge must tolerate these bytes instead of failing
+   on them. Sensible: print them as a log line.
+5. **The ESP discards unknown CMD bytes** and searches for the next `0xA5`. The
+   bridge should do the same.
 
 ---
 
 ## 3. Jetson → ESP
 
-| CMD | Name | Payload | Beschreibung |
+| CMD | Name | Payload | Description |
 |---|---|---|---|
 | `0x10` | MOTOR | 3 B | `dir(1)` + `uint16 speed` |
-| `0x20` | SERVO | 3 B | `id(1)` + `int16 lenkung` |
-| `0x30` | LED | 1 B | `0`=aus, `≠0`=an |
-| `0x40` | CALIBRATE | 0 B | manuelle Kalibrierung starten → Antwort `0x42` |
-| `0x41` | CAL | 2 B | `aktion(1)` + `arg(1)` → Antwort `0x42` |
-| `0x50` | TORQUE | 0 B | Servo-Last auf USB-Konsole ausgeben |
-| `0x60` | TRIM | 1 B | `0`=links, `1`=rechts, `2`=speichern |
-| `0x80` | PID_SET | 5 B | `paramId(1)` + `int32 wert×1000` |
-| `0x81` | PID_GET | 0 B | → Antwort `0x82` |
-| `0x83` | PID_SAVE | 0 B | Parameter ins NVS → Antwort `0x84` |
-| `0x90` | MOVE | 5 B | `moveId(1)` + `int32 weite` in 1/10° (relativ) |
-| `0x91` | MOVE_ABORT | 0 B | laufende Fahrt abbrechen |
-| `0x92` | PROGRESS | 0 B | → Antwort `0x94` |
-| `0xA0` | BATTERY | 0 B | → Antwort `0xA1` |
-| `0xB0` | TIME_SYNC | 1 B | `seq(1)` → Antwort `0xB1` |
-| `0xB2` | STAMP_MODE | 1 B | `0`=aus, `1`=an → Antwort `0xB3` |
-| `0xC0` | TELEM_RATE | 2 B | `uint16` Takt in ms, `0`=aus → Antwort `0xC1` |
-| `0xFF` | EMERGENCY | 0 B | Nothalt, aktive Bremse |
+| `0x20` | SERVO | 3 B | `id(1)` + `int16 steering` |
+| `0x30` | LED | 1 B | `0`=off, `≠0`=on |
+| `0x40` | CALIBRATE | 0 B | start manual calibration → response `0x42` |
+| `0x41` | CAL | 2 B | `action(1)` + `arg(1)` → response `0x42` |
+| `0x50` | TORQUE | 0 B | print servo load on the USB console |
+| `0x60` | TRIM | 1 B | `0`=left, `1`=right, `2`=save |
+| `0x80` | PID_SET | 5 B | `paramId(1)` + `int32 value×1000` |
+| `0x81` | PID_GET | 0 B | → response `0x82` |
+| `0x83` | PID_SAVE | 0 B | parameters to NVS → response `0x84` |
+| `0x90` | MOVE | 5 B | `moveId(1)` + `int32 distance` in 1/10° (relative) |
+| `0x91` | MOVE_ABORT | 0 B | abort the current move |
+| `0x92` | PROGRESS | 0 B | → response `0x94` |
+| `0xA0` | BATTERY | 0 B | → response `0xA1` |
+| `0xB0` | TIME_SYNC | 1 B | `seq(1)` → response `0xB1` |
+| `0xB2` | STAMP_MODE | 1 B | `0`=off, `1`=on → response `0xB3` |
+| `0xC0` | TELEM_RATE | 2 B | `uint16` period in ms, `0`=off → response `0xC1` |
+| `0xFF` | EMERGENCY | 0 B | emergency stop, active brake |
 
-### `0x10` MOTOR — offene Steuerung
+### `0x10` MOTOR — open-loop control
 
 ```
 A5 10 <dir> <speedHi> <speedLo>
 ```
 
-* `dir`: `0` = vorwärts, `1` = rückwärts
-* `speed`: `0..1023` (10-Bit-PWM)
-* **`speed = 0` bedeutet Auslaufen (Coast), nicht Bremsen.** Zum aktiven Bremsen
-  gibt es nur `0xFF`.
-* Bricht eine laufende Positionsfahrt ab → es kommt ein `0x93` mit Status `0x02`.
+* `dir`: `0` = forward, `1` = reverse
+* `speed`: `0..1023` (10-bit PWM)
+* **`speed = 0` means coasting, not braking.** The only way to brake actively
+  is `0xFF`.
+* Aborts a running position move → a `0x93` with status `0x02` follows.
 
-> **Heartbeat-Pflicht:** Kommt 5 Sekunden lang kein Befehl, geht der Motor
-> selbstständig in Coast. Für Dauerfahrt muss die Bridge `0x10` regelmäßig
-> nachschicken (empfohlen: alle 100–500 ms). **Positionsfahrten sind davon
-> ausgenommen** — die dürfen länger als 5 s laufen, ohne dass etwas nachkommt.
+> **Heartbeat required:** If no command arrives for 5 seconds, the motor goes
+> into coast on its own. For continuous driving the bridge must resend `0x10`
+> regularly (recommended: every 100–500 ms). **Position moves are exempt from
+> this** — they may run for longer than 5 s without anything being sent.
 
-### `0x20` SERVO — Lenkung
+### `0x20` SERVO — steering
 
 ```
 A5 20 <id> <pctHi> <pctLo>
 ```
 
-* `id`: Servo-ID auf dem SCS-Bus (normalerweise `1`)
-* `pct`: `int16`, **−100 … +100**. Negativ = rechts, positiv = links, `0` = Mitte.
-* Der ESP mappt das auf die kalibrierten Anschläge und begrenzt intern auf
-  **80 % des mechanischen Hubs**. `±100` ist also bewusst nicht Vollanschlag.
+* `id`: servo ID on the SCS bus (normally `1`)
+* `pct`: `int16`, **−100 … +100**. Negative = right, positive = left, `0` = centre.
+* The ESP maps this onto the calibrated end stops and limits it internally to
+  **80 % of the mechanical travel**. So `±100` is deliberately not full lock.
 
-### `0x40` / `0x41` — manuelle Lenkungs-Kalibrierung
+### `0x40` / `0x41` — manual steering calibration
 
-Der SC09 kann sein Drehmoment **nicht** begrenzen: fährt er von selbst gegen
-einen Anschlag, drückt er mit vollem Moment weiter, bis Anlenkung oder Getriebe
-nachgeben. Das frühere automatische Antasten gibt es deshalb nicht mehr — die
-Anschläge werden von Hand angefahren und einzeln bestätigt.
+The SC09 **cannot** limit its torque: if it drives into an end stop by itself,
+it keeps pushing with full torque until the linkage or the gearbox gives way.
+The earlier automatic probing of the end stops has therefore been removed — the
+end stops are approached by hand and confirmed one by one.
 
 ```
-A5 40                 Kalibriermodus starten (identisch zu 0x41 mit Aktion 0x00)
-A5 41 <aktion> <arg>
+A5 40                 start calibration mode (identical to 0x41 with action 0x00)
+A5 41 <action> <arg>
 ```
 
-| Aktion | Name | `arg` | Wirkung |
+| Action | Name | `arg` | Effect |
 |---|---|---|---|
-| `0x00` | START | – | Modus starten, Antrieb auf Coast, Torque an, aktuelle Stellung halten |
-| `0x01` | MINUS | Ticks (`0` = Schrittweite) | ein Schritt Richtung Position `0` |
-| `0x02` | PLUS | Ticks (`0` = Schrittweite) | ein Schritt Richtung Position `1023` |
-| `0x03` | CENTER | – | aktuelle **Ist**-Stellung als Mitte merken |
-| `0x04` | LEFT | – | aktuelle Ist-Stellung als linken Anschlag merken |
-| `0x05` | RIGHT | – | aktuelle Ist-Stellung als rechten Anschlag merken |
-| `0x06` | SAVE | – | prüfen, ins NVS schreiben, Modus beenden |
-| `0x07` | ABORT | – | abbrechen, gespeicherte Werte bleiben |
-| `0x08` | FREE | – | Torque **aus**: Lenkung von Hand stellen |
-| `0x09` | HOLD | – | Torque an, hält die aktuelle Ist-Stellung |
-| `0x0A` | GOTO_CENTER | – | gemerkte Mitte anfahren |
-| `0x0B` | SET_STEP | Ticks (1…200) | Schrittweite setzen (Default 10 ≈ 2,9°) |
-| `0x0C` | STATUS | – | nur Zustand abfragen, ändert nichts |
+| `0x00` | START | – | start the mode, drive to coast, torque on, hold the current position |
+| `0x01` | MINUS | ticks (`0` = step size) | one step towards position `0` |
+| `0x02` | PLUS | ticks (`0` = step size) | one step towards position `1023` |
+| `0x03` | CENTER | – | store the current **actual** position as centre |
+| `0x04` | LEFT | – | store the current actual position as left end stop |
+| `0x05` | RIGHT | – | store the current actual position as right end stop |
+| `0x06` | SAVE | – | check, write to NVS, end the mode |
+| `0x07` | ABORT | – | abort, stored values are kept |
+| `0x08` | FREE | – | torque **off**: set the steering by hand |
+| `0x09` | HOLD | – | torque on, holds the current actual position |
+| `0x0A` | GOTO_CENTER | – | move to the stored centre |
+| `0x0B` | SET_STEP | ticks (1…200) | set the step size (default 10 ≈ 2.9°) |
+| `0x0C` | STATUS | – | only query the state, changes nothing |
 
-**Jede** dieser Aktionen — auch `0x40` — wird mit `0x42` beantwortet.
+**Every** one of these actions — including `0x40` — is answered with `0x42`.
 
-Ablauf:
+Procedure:
 
-1. `0x40` senden.
-2. Mit `MINUS`/`PLUS` auf Geradeaus stellen → `CENTER`.
-3. Langsam an den linken Anschlag → `LEFT`. **Kurz vor dem harten Anschlag
-   stoppen.** Meldet die Antwort, dass die Ist-Position dem Soll nicht mehr
-   folgt, drückt der Servo bereits gegen die Mechanik.
-4. Zurück und an den rechten Anschlag → `RIGHT`.
+1. Send `0x40`.
+2. Use `MINUS`/`PLUS` to set straight ahead → `CENTER`.
+3. Slowly towards the left end stop → `LEFT`. **Stop just before the hard end
+   stop.** If the response reports that the actual position no longer follows
+   the target, the servo is already pushing against the mechanics.
+4. Back, and towards the right end stop → `RIGHT`.
 5. `SAVE`.
 
-Alternative ohne jede Servokraft: `FREE`, Lenkung von Hand an den Anschlag
-schieben, dort `LEFT`/`RIGHT`, danach `HOLD`.
+Alternative without any servo force: `FREE`, push the steering to the end stop
+by hand, `LEFT`/`RIGHT` there, then `HOLD`.
 
-Der ESP prüft vor dem Speichern, dass alle drei Marken gesetzt sind, dass die
-Anschläge **mindestens 50 Ticks** auseinanderliegen und dass die Mitte
-dazwischen liegt. Sonst kommt `0x42` mit Status `0x02` und **nichts** wird
-geschrieben. Erfolgreiches Speichern setzt den Trim-Offset auf `0` zurück — er
-bezog sich auf die alte Mitte.
+Before saving, the ESP checks that all three marks are set, that the end stops
+are **at least 50 ticks** apart and that the centre lies between them.
+Otherwise `0x42` comes back with status `0x02` and **nothing** is written. A
+successful save resets the trim offset to `0` — it referred to the old centre.
 
-Solange der Modus läuft, **ignoriert der ESP `0x20` SERVO** (mit Log-Zeile auf
-der USB-Konsole) — ein Lenkbefehl würde die von Hand angefahrene Stellung sofort
-verwerfen.
+While the mode is running, **the ESP ignores `0x20` SERVO** (with a log line on
+the USB console) — a steering command would immediately discard the position
+that was set by hand.
 
-> Welcher Anschlag „links" ist, entscheidet allein, welchen der Bediener mit
-> `0x04` bestätigt. Die Zuordnung in `0x20` rechnet symmetrisch, eine gespiegelt
-> montierte Lenkung funktioniert also auch mit vertauschten Rohwerten.
+> Which end stop is "left" is decided solely by which one the operator
+> confirms with `0x04`. The mapping in `0x20` is calculated symmetrically, so a
+> mirror-mounted steering also works with swapped raw values.
 
 ### `0x80` PID_SET
 
 ```
-A5 80 <paramId> <int32 wert×1000>
+A5 80 <paramId> <int32 value×1000>
 ```
 
-| paramId | Parameter | Einheit | Default | Beispiel |
+| paramId | Parameter | Unit | Default | Example |
 |---|---|---|---|---|
-| `0` | Kp | Duty pro Count | 4,0 | Kp=4,5 → `4500` |
-| `1` | Ki | Duty pro (Count·s) | 0,5 | Ki=0,3 → `300` |
-| `2` | Kd | Duty pro (Count/s) | 0,10 | Kd=0,08 → `80` |
-| `3` | I-Limit | Duty (Anti-Windup) | 200 | 250 → `250000` |
+| `0` | Kp | duty per count | 4.0 | Kp=4.5 → `4500` |
+| `1` | Ki | duty per (count·s) | 0.5 | Ki=0.3 → `300` |
+| `2` | Kd | duty per (count/s) | 0.10 | Kd=0.08 → `80` |
+| `3` | I limit | duty (anti-windup) | 200 | 250 → `250000` |
 | `4` | maxDuty | 0..1023 | 700 | 800 → `800000` |
-| `5` | Toleranz | 1/10 Grad | 50 (=5,0°) | 1,5° → `15000` |
-| `6` | Verweilzeit | ms | 200 | 300 ms → `300000` |
+| `5` | Tolerance | 1/10 degree | 50 (=5.0°) | 1.5° → `15000` |
+| `6` | Dwell time | ms | 200 | 300 ms → `300000` |
 | `7` | Timeout | ms | 10000 | 15 s → `15000000` |
-| `8` | Anlauf-Duty | 0..1023 | 0 (aus) | 200 → `200000` |
+| `8` | Breakaway duty | 0..1023 | 0 (off) | 200 → `200000` |
 
-> **Anlauf-Duty (`8`)** überwindet die Haftreibung. Kurz vor dem Ziel wird die
-> Regelabweichung so klein, dass `Kp × Fehler` unter die Losbrechschwelle des
-> Getriebemotors fällt — er bleibt stehen und die Fahrt läuft in den Timeout.
-> Mit diesem Wert wird außerhalb des Zielfensters nie weniger angelegt.
+> **Breakaway duty (`8`)** overcomes static friction. Shortly before the
+> target, the control error becomes so small that `Kp × error` falls below the
+> breakaway threshold of the gear motor — it stops and the move runs into the
+> timeout. With this value, never less than this is applied outside the target
+> window.
 
-> **Achtung, häufige Fehlerquelle:** Die `×1000`-Kodierung gilt für *alle*
-> Parameter, auch die ganzzahligen. `maxDuty = 700` wird als `700000`
-> übertragen, nicht als `700`. Bei `700` käme auf dem ESP `0` an.
+> **Caution, common source of errors:** The `×1000` encoding applies to *all*
+> parameters, including the integer ones. `maxDuty = 700` is transmitted as
+> `700000`, not as `700`. With `700`, the ESP would receive `0`.
 
-`0x80` ändert nur die **laufenden** Werte im RAM. Zum dauerhaften Sichern
-anschließend `0x83` senden.
+`0x80` only changes the **running** values in RAM. To store them permanently,
+send `0x83` afterwards.
 
 ### `0x83` PID_SAVE
 
@@ -216,530 +216,533 @@ anschließend `0x83` senden.
 A5 83
 ```
 
-Schreibt den **kompletten** aktuellen Parametersatz (alle acht Werte aus der
-Tabelle oben) ins NVS und antwortet mit `0x84`. Nach dem nächsten Boot lädt der
-ESP diese Werte automatisch.
+Writes the **complete** current parameter set (all eight values from the table
+above) to NVS and responds with `0x84`. After the next boot the ESP loads these
+values automatically.
 
-Typischer Ablauf: alle nötigen `0x80` senden, dann **einmal** `0x83`. Nicht nach
-jedem einzelnen Parameter speichern.
+Typical procedure: send all the `0x80` that are needed, then `0x83` **once**.
+Do not save after every single parameter.
 
-> NVS verwirft Schreibvorgänge, bei denen sich der Wert nicht geändert hat.
-> Wiederholtes Speichern identischer Werte kostet also keine Flash-Zyklen —
-> zyklisches Speichern im Sekundentakt ist trotzdem eine schlechte Idee.
+> NVS discards writes in which the value has not changed. Repeatedly saving
+> identical values therefore costs no flash cycles — saving cyclically every
+> second is still a bad idea.
 
-### `0x90` MOVE — Positionsfahrt
+### `0x90` MOVE — position move
 
 ```
-A5 90 <moveId> <int32 weite in 1/10 Grad>
+A5 90 <moveId> <int32 distance in 1/10 degree>
 ```
 
-* `moveId`: `1..255`, von der Bridge vergeben. `0` vermeiden (Startwert intern).
-* `weite`: **relativ** zur aktuellen Stellung, in 1/10 Grad der Ausgangswelle,
-  vorzeichenbehaftet. `900` = „drehe 90° weiter", `-450` = „45° zurück".
-* Es gibt **keinen** Nullpunkt und keine Referenzierung — eine Fahrt bezieht sich
-  immer auf das Hier und Jetzt und ist damit reset-fest.
-* Auf jede Fahrt folgt garantiert **genau ein** `0x93` MOVE_DONE mit derselben ID.
+* `moveId`: `1..255`, assigned by the bridge. Avoid `0` (internal start value).
+* `distance`: **relative** to the current position, in 1/10 degree of the
+  output shaft, signed. `900` = "turn 90° further", `-450` = "45° back".
+* There is **no** zero point and no homing — a move always refers to the here
+  and now and is therefore reset-proof.
+* Every move is guaranteed to be followed by **exactly one** `0x93` MOVE_DONE
+  with the same ID.
 
-> **Die ×10 gilt nur auf der Leitung.** Für 90° sendet die Bridge `900`.
+> **The ×10 only applies on the wire.** For 90° the bridge sends `900`.
 
-**Es läuft immer nur eine Fahrt.** Wird `0x90` gesendet, während noch eine aktiv
-ist, wird die alte abgelöst und quittiert das mit `0x93` / Status `0x02`, bevor
-die neue startet. Die Bridge bekommt also für jede ID eine Antwort, egal in
-welcher Reihenfolge sie sendet.
+**Only one move runs at a time.** If `0x90` is sent while another move is
+still active, the old one is replaced and acknowledges this with `0x93` /
+status `0x02` before the new one starts. The bridge therefore gets a response
+for every ID, no matter in which order it sends them.
 
 ---
 
 ## 4. ESP → Jetson
 
-| CMD | Name | Payload | Ausgelöst durch |
+| CMD | Name | Payload | Triggered by |
 |---|---|---|---|
 | `0x42` | CAL_RSP | 11 B | `0x40`, `0x41` |
-| `0x70` | BUTTON | 1 B | Tastendruck (unaufgefordert) |
+| `0x70` | BUTTON | 1 B | button press (unsolicited) |
 | `0x82` | PID_RSP | 12 B | `0x81` |
 | `0x84` | PID_SAVED | 1 B | `0x83` |
-| `0x93` | MOVE_DONE | 6 B | Ende einer Fahrt (unaufgefordert) |
+| `0x93` | MOVE_DONE | 6 B | end of a move (unsolicited) |
 | `0x94` | PROGRESS_RSP | 11 B | `0x92` |
 | `0xA1` | BATTERY_RSP | 6 B | `0xA0` |
-| `0xA2` | BATTERY_WARN | 6 B | Unterspannung (unaufgefordert) |
+| `0xA2` | BATTERY_WARN | 6 B | undervoltage (unsolicited) |
 | `0xB1` | TIME_RSP | 17 B | `0xB0` |
 | `0xB3` | STAMP_RSP | 1 B | `0xB2` |
-| `0xC1` | TELEMETRY | 12 B | Takt aus `0xC0` (unaufgefordert) |
+| `0xC1` | TELEMETRY | 12 B | period from `0xC0` (unsolicited) |
 
 ### `0x70` BUTTON
 ```
 A5 70 01
 ```
-`01` = gedrückt. Entprellt mit 200 ms, es gibt kein Loslass-Event.
+`01` = pressed. Debounced with 200 ms, there is no release event.
 
 ### `0x42` CAL_RSP
 ```
-A5 42 <aktiv> <flags> <status> <int16 pos> <int16 mitte> <int16 links> <int16 rechts>
+A5 42 <active> <flags> <status> <int16 pos> <int16 centre> <int16 left> <int16 right>
 ```
 
-* `aktiv`: `1` = Kalibriermodus läuft, `0` = nicht (mehr)
-* `flags`: Bit 0 = Mitte gesetzt, Bit 1 = Links gesetzt, Bit 2 = Rechts gesetzt,
-  Bit 3 = Torque frei
-* `pos`: zuletzt kommandierte Rohposition `0..1023`
-* `mitte`/`links`/`rechts`: die in diesem Durchgang gesetzte Marke, solange das
-  zugehörige Flag `0` ist stattdessen der **gespeicherte** Wert
+* `active`: `1` = calibration mode running, `0` = not (any more)
+* `flags`: bit 0 = centre set, bit 1 = left set, bit 2 = right set,
+  bit 3 = torque free
+* `pos`: last commanded raw position `0..1023`
+* `centre`/`left`/`right`: the mark set in this run; as long as the
+  corresponding flag is `0`, the **stored** value instead
 
-| status | Bedeutung |
+| status | Meaning |
 |---|---|
-| `0x00` | Aktion ausgeführt |
-| `0x01` | gespeichert, Modus beendet |
-| `0x02` | abgelehnt — unvollständig oder unplausibel, **nichts geschrieben** |
-| `0x03` | Servo antwortet nicht |
-| `0x04` | Aktion braucht einen laufenden Kalibriermodus (erst `0x40`) |
-| `0x05` | Bereichsende `0`/`1023` erreicht |
+| `0x00` | action carried out |
+| `0x01` | saved, mode ended |
+| `0x02` | rejected — incomplete or implausible, **nothing written** |
+| `0x03` | servo does not respond |
+| `0x04` | action needs a running calibration mode (send `0x40` first) |
+| `0x05` | end of range `0`/`1023` reached |
 
 ### `0x82` PID_RSP
 ```
 A5 82 <int32 Kp×1000> <int32 Ki×1000> <int32 Kd×1000>
 ```
-Liefert nur die drei Regelparameter, nicht Limits/Timeouts.
+Returns only the three control parameters, not limits/timeouts.
 
 ### `0x84` PID_SAVED
 ```
 A5 84 <status>
 ```
-`0x00` = ins NVS geschrieben, `0x01` = fehlgeschlagen (Partition voll oder
-defekt). Kommt nur als Antwort auf `0x83`.
+`0x00` = written to NVS, `0x01` = failed (partition full or
+defective). Only sent as a response to `0x83`.
 
 ### `0x93` MOVE_DONE
 ```
-A5 93 <moveId> <status> <int32 ist-position in 1/10 Grad>
+A5 93 <moveId> <status> <int32 actual position in 1/10 degree>
 ```
 
-| status | Bedeutung |
+| status | Meaning |
 |---|---|
-| `0x00` | **OK** — Ziel erreicht und für die Verweilzeit gehalten |
-| `0x01` | **TIMEOUT** — Ziel in `timeoutMs` nicht erreicht, abgebrochen |
-| `0x02` | **ABORTED** — durch `0x91`, `0x10`, `0xFF` oder eine neue Fahrt abgelöst |
+| `0x00` | **OK** — target reached and held for the dwell time |
+| `0x01` | **TIMEOUT** — target not reached within `timeoutMs`, aborted |
+| `0x02` | **ABORTED** — replaced by `0x91`, `0x10`, `0xFF` or a new move |
 
-Nach *jedem* Ende geht der Motor in **Coast, nicht in Positionshaltung**. Bei
-äußerer Last oder Hangabtrieb driftet die Achse danach weg. Wer halten will,
-muss zyklisch neu anfahren.
+After *every* end, the motor goes into **coast, not into position hold**. With
+an external load or on a slope, the axis then drifts away. Anyone who wants to
+hold must move to the position again cyclically.
 
-> Das Positionsfeld ist — anders als die Fahrweite in `0x90` — **absolut**:
-> Encoder-Stand seit Boot bzw. seit `z` auf der Konsole. Es dient als Telemetrie,
-> nicht als Bezug für die nächste Fahrt.
+> Unlike the travel distance in `0x90`, the position field is **absolute**:
+> encoder count since boot or since `z` on the console. It serves as
+> telemetry, not as the reference for the next move.
 
 ### `0x94` PROGRESS_RSP
 ```
-A5 94 <moveId> <aktiv> <prozent> <int32 ist> <int32 ziel>
+A5 94 <moveId> <active> <percent> <int32 actual> <int32 target>
 ```
-* `aktiv`: `1` = Fahrt läuft, `0` = idle. Bei `0` beziehen sich die restlichen
-  Felder auf die **zuletzt** gefahrene Bewegung.
-* `prozent`: `0..100`, berechnet aus zurückgelegtem Weg / Gesamtweg. Bei
-  Überschwingen gedeckelt auf 100.
-* `ist` / `ziel`: 1/10 Grad, **absolut** (Encoder-Stand seit Boot). `ziel` ist die
-  aus der relativen Fahrweite berechnete Endposition.
+* `active`: `1` = move running, `0` = idle. With `0`, the remaining fields
+  refer to the **most recent** move.
+* `percent`: `0..100`, calculated from distance covered / total distance.
+  Capped at 100 on overshoot.
+* `actual` / `target`: 1/10 degree, **absolute** (encoder count since boot).
+  `target` is the end position calculated from the relative travel distance.
 
 ### `0xA1` BATTERY_RSP / `0xA2` BATTERY_WARN
 ```
-A5 A1 <int32 pack-mV> <int16 zelle-mV>
+A5 A1 <int32 pack-mV> <int16 cell-mV>
 ```
-Identische Nutzlast, unterschiedlicher Anlass.
+Identical payload, different trigger.
 
-* Der ESP misst **alle 15 s** selbstständig.
-* `0xA1` kommt nur auf Anfrage (`0xA0`) und liefert den letzten Messwert.
-* `0xA2` kommt **unaufgefordert**, sobald die Zellspannung unter **3,80 V**
-  fällt (4S-Pack ⇒ 15,2 V), und wiederholt sich danach **höchstens einmal pro
-  Minute**, solange der Zustand anhält.
-* Entwarnung erst oberhalb **3,85 V/Zelle** (Hysterese). Es gibt **kein**
-  eigenes Entwarn-Paket — das Ausbleiben von `0xA2` ist das Signal.
+* The ESP measures **every 15 s** on its own.
+* `0xA1` only comes on request (`0xA0`) and returns the last measured value.
+* `0xA2` comes **unsolicited** as soon as the cell voltage falls below
+  **3.80 V** (4S pack ⇒ 15.2 V), and then repeats **at most once per
+  minute** while the condition persists.
+* All-clear only above **3.85 V/cell** (hysteresis). There is **no**
+  separate all-clear packet — the absence of `0xA2` is the signal.
 
-> Der ESP schaltet bei Unterspannung **nichts ab**. Reagieren muss der Jetson.
+> The ESP does **not switch anything off** on undervoltage. The Jetson must react.
 
 ### `0xB1` TIME_RSP
 ```
 A5 B1 <seq> <int64 t_rx_us> <int64 t_tx_us>
 ```
 
-* `seq`: unverändert aus der Anfrage zurück, damit die Bridge Antworten
-  zuordnen kann, auch wenn eine Runde verlorengeht.
-* `t_rx_us`: ESP-Uhr, als das **letzte Byte der Anfrage** angekommen war.
-* `t_tx_us`: ESP-Uhr, wenn das **letzte Byte dieser Antwort** die Leitung
-  verlässt. Die Zeit zum Rausschieben der 20 Rahmenbyte (1,74 ms bei 115200)
-  ist bereits eingerechnet — der Wert liegt also in der Zukunft, wenn der ESP
-  ihn schreibt.
+* `seq`: returned unchanged from the request, so that the bridge can match
+  responses even if a round gets lost.
+* `t_rx_us`: ESP clock when the **last byte of the request** had arrived.
+* `t_tx_us`: ESP clock when the **last byte of this response** leaves the
+  line. The time to shift out the 20 frame bytes (1.74 ms at 115200) is
+  already included — so the value lies in the future when the ESP writes
+  it.
 
-Beide Werte sind volle `int64`-Mikrosekunden seit ESP-Boot, kein Überlauf.
-Rechnung siehe Abschnitt 5.
+Both values are full `int64` microseconds since ESP boot, no overflow.
+For the calculation see section 5.
 
 ### `0xC1` TELEMETRY
 ```
-A5 C1 <int32 pos in 1/10 grad> <int32 tempo in 1/10 grad/s> <int16 duty> <int16 mA>
+A5 C1 <int32 pos in 1/10 deg> <int32 speed in 1/10 deg/s> <int16 duty> <int16 mA>
 ```
 
-Der Fahrzustand, den der ESP von sich aus im Takt von `0xC0` schickt.
+The drive state that the ESP sends on its own at the period set by `0xC0`.
 
-**Drei der vier Felder sind vorzeichenbehaftet, eines nicht** — das ist die
-wahrscheinlichste Stolperstelle beim Parsen:
+**Three of the four fields are signed, one is not** — this is the most likely
+pitfall when parsing:
 
-| Feld | Typ | Vorzeichen |
+| Field | Type | Signed |
 |---|---|---|
-| `pos` | `int32` | **ja** — negativ, wenn die Welle unter dem Startpunkt steht |
-| `tempo` | `int32` | **ja** — negativ bei Rückwärtsfahrt |
-| `duty` | `int16` | **ja** — negativ bei Rückwärtsfahrt |
-| `mA` | `int16` | **nein** — immer ≥ 0 |
+| `pos` | `int32` | **yes** — negative when the shaft is below the starting point |
+| `speed` | `int32` | **yes** — negative when reversing |
+| `duty` | `int16` | **yes** — negative when reversing |
+| `mA` | `int16` | **no** — always ≥ 0 |
 
-* `pos`: Stellung der Ausgangswelle, **absolut** — Encoderstand seit Boot bzw.
-  seit `z` auf der Konsole. Derselbe Bezug wie in `0x93`/`0x94`.
-* `tempo`: Drehgeschwindigkeit der Ausgangswelle. `1800` = 180 °/s = 30 U/min,
-  `-1800` dasselbe rückwärts.
-* `duty`: was an der Brücke anliegt, −1023…+1023. `0` bei Coast **und** bei
-  Bremse — das ist kein Fehler, es liegt dann wirklich kein Tastverhältnis an.
-* `mA`: Motorstrom. Der VNH5019 meldet auf seinem CS-Ausgang **nur den
-  Betrag**, nicht die Richtung. Wer die Richtung des Stroms braucht, liest sie
-  am Vorzeichen von `duty` ab — mit der Einschränkung, dass beide beim
-  Ausrollen und Bremsen nichts Sinnvolles hergeben.
+* `pos`: position of the output shaft, **absolute** — encoder count since boot
+  or since `z` on the console. The same reference as in `0x93`/`0x94`.
+* `speed`: rotational speed of the output shaft. `1800` = 180 °/s = 30 rpm,
+  `-1800` the same in reverse.
+* `duty`: what is applied to the bridge, −1023…+1023. `0` when coasting **and**
+  when braking — this is not an error, there really is no duty cycle applied
+  then.
+* `mA`: motor current. The VNH5019 reports **only the magnitude** on its CS
+  output, not the direction. Anyone who needs the direction of the current
+  reads it from the sign of `duty` — with the restriction that neither gives
+  anything meaningful while coasting or braking.
 
-> Welche Drehrichtung "vorwärts" ist, hängt daran, wie Motor und Encoder
-> verdrahtet sind — das Protokoll legt es nicht fest. Dafür gibt es in
-> `src/main.cpp` den Schalter `DRIVE_INVERT`:
+> Which direction of rotation is "forward" depends on how the motor and the
+> encoder are wired — the protocol does not define it. For this there is the
+> `DRIVE_INVERT` switch in `src/main.cpp`:
 >
-> | Symptom | Ursache | Abhilfe |
+> | Symptom | Cause | Remedy |
 > |---|---|---|
-> | positiver Motorwert fährt rückwärts, `tempo` passt dazu | das Fahrzeug ist als Ganzes andersherum verdrahtet | `DRIVE_INVERT = true` |
-> | Motor stimmt, aber `tempo` und `pos` haben das falsche Vorzeichen | nur die Encoderspuren A/B sind vertauscht | Spuren tauschen, `DRIVE_INVERT` **nicht** anfassen |
+> | positive motor value drives in reverse, `speed` matches it | the vehicle as a whole is wired the other way round | `DRIVE_INVERT = true` |
+> | motor is correct, but `speed` and `pos` have the wrong sign | only the encoder channels A/B are swapped | swap the channels, do **not** touch `DRIVE_INVERT` |
 >
-> `DRIVE_INVERT` dreht Motor **und** Encoder zusammen. Nur eines von beiden zu
-> drehen wäre ein Eigentor: die Positionsregelung liest dann ein Vorzeichen,
-> das nicht zu ihrer Stellgröße passt, und fährt vom Ziel weg statt darauf
-> zu, bis der Timeout greift.
+> `DRIVE_INVERT` flips the motor **and** the encoder together. Flipping only one
+> of the two would be an own goal: the position controller then reads a sign
+> that does not match its control output, and drives away from the target
+> instead of towards it, until the timeout takes effect.
 
-> **Position und Tempo entstehen beide im 10-ms-Takt des Motortasks** und sind
-> in jedem Paket frisch. `0xC0` ist deshalb auf minimal **10 ms** begrenzt —
-> schneller zu senden hiesse, dasselbe Paket zweimal zu schicken.
+> **Position and speed are both produced in the 10 ms cycle of the motor task**
+> and are fresh in every packet. `0xC0` is therefore limited to a minimum of
+> **10 ms** — sending faster would mean sending the same packet twice.
 >
-> Diese Grenze steht in `TELEMETRY_MS_MIN`, und zwar **zweimal**: in
-> `src/main.cpp` und in `esp_serial_bridge.py`. Bindend ist die in der
-> Firmware; wer nur die Python-Seite ändert, bekommt weiter den alten Takt.
+> This limit is in `TELEMETRY_MS_MIN`, and **twice** at that: in
+> `src/main.cpp` and in `esp_serial_bridge.py`. The firmware value is the
+> binding one; anyone who changes only the Python side still gets the old
+> period.
 >
-> **Sendetakt und Messfenster sind zwei verschiedene Dinge.** Das Tempo bildet
-> der ESP aus einem *gleitenden* Fenster über die letzten `n` Abtastungen:
+> **Send period and measurement window are two different things.** The ESP
+> computes the speed from a *sliding* window over the last `n` samples:
 >
 > ```
-> tempo = (count[jetzt] - count[jetzt - n]) / (t[jetzt] - t[jetzt - n])
+> speed = (count[now] - count[now - n]) / (t[now] - t[now - n])
 > ```
 >
-> Bei jeder Abtastung fällt ein neuer Wert an — die Ausgaberate hängt also
-> nicht an `n`. Was an `n` hängt, ist die Auflösung, denn ein einzelner
-> Encoderimpuls im Fenster ist der kleinste Sprung, den die Messung machen
-> kann:
+> A new value is produced at every sample — so the output rate does not depend
+> on `n`. What does depend on `n` is the resolution, because a single encoder
+> pulse in the window is the smallest step the measurement can make:
 >
-> | `n` | Fenster | ein Impuls | Verzögerung |
+> | `n` | Window | One pulse | Delay |
 > |---|---|---|---|
-> | 1 | 10 ms | 14,7 U/min = 88 °/s | 5 ms |
-> | 5 | 50 ms | 2,9 U/min = 17,6 °/s | 25 ms |
-> | 10 | 100 ms | 1,5 U/min = 8,8 °/s | 50 ms |
+> | 1 | 10 ms | 14.7 rpm = 88 °/s | 5 ms |
+> | 5 | 50 ms | 2.9 rpm = 17.6 °/s | 25 ms |
+> | 10 | 100 ms | 1.5 rpm = 8.8 °/s | 50 ms |
 >
-> bei 408 Impulsen je Umdrehung der Ausgangswelle und rund 30 U/min
-> Höchstdrehzahl. **Mit `n = 1` liegt der kleinste Messschritt in derselben
-> Grössenordnung wie der Vollausschlag** — das Tempo springt dann zwischen
-> wenigen diskreten Stufen hin und her. Das ist kein Fehler, sondern die
-> Auflösung des Encoders bei 10 ms.
+> at 408 pulses per revolution of the output shaft and a top speed of about
+> 30 rpm. **With `n = 1` the smallest measurement step is of the same order
+> of magnitude as full scale** — the speed then jumps back and forth between a
+> few discrete levels. This is not an error, but the resolution of the encoder
+> at 10 ms.
 >
-> Eingestellt wird `n` auf der USB-Konsole mit `sw<n>`, z. B. `sw5`. Die
-> Verzögerung beträgt exakt ein halbes Fenster — das ist der Vorzug des
-> gleitenden Fensters gegenüber einem EMA, dessen Zeitkonstante man nur
-> schätzen kann.
+> `n` is set on the USB console with `sw<n>`, e.g. `sw5`. The delay is exactly
+> half a window — this is the advantage of the sliding window over an EMA,
+> whose time constant can only be estimated.
 >
-> Wer beides will, feine Auflösung *und* 10 ms Verzögerung, kommt mit diesem
-> Encoder nicht weiter: dafür bräuchte es Zeitstempel einzelner Flanken
-> (M/T-Verfahren) statt Impulse je Fenster.
+> Anyone who wants both, fine resolution *and* 10 ms delay, cannot get there
+> with this encoder: that would need timestamps of individual edges (M/T
+> method) instead of pulses per window.
 
-> Der Takt ist weich: der ESP sendet aus seinem `loop()` heraus. Genau dafür
-> gibt es den Sendezeitstempel — der Jetson soll den Zeitpunkt **ablesen**, statt
-> ihn aus dem Nenn-Takt hochzurechnen.
+> The period is soft: the ESP sends from within its `loop()`. This is exactly
+> what the send timestamp is for — the Jetson should **read** the time instead
+> of extrapolating it from the nominal period.
 
 ### `0xC0` TELEM_RATE
 ```
-A5 C0 <uint16 takt in ms>
+A5 C0 <uint16 period in ms>
 ```
-`0` schaltet ab, sonst 20…60000 ms; Werte darunter zieht der ESP still auf 20.
-Beantwortet wird der Befehl mit einem sofortigen `0xC1` — das ist gleichzeitig
-die Quittung und der erste Messwert.
+`0` switches it off, otherwise 20…60000 ms; the ESP silently raises lower
+values to 20. The command is answered with an immediate `0xC1` — this is both
+the acknowledgement and the first measured value.
 
-Der Takt liegt **nicht** im NVS. Nach einem ESP-Reset ist die Telemetrie aus;
-die Bridge stellt sie beim Verbinden neu ein.
+The period is **not** stored in NVS. After an ESP reset the telemetry is off;
+the bridge sets it again when it connects.
 
 ### `0xB3` STAMP_RSP
 ```
-A5 B3 <modus>
+A5 B3 <mode>
 ```
-`0` = ESP sendet `0xA5`-Rahmen, `1` = ESP sendet `0xA6`-Rahmen mit
-Sendezeitstempel. Kommt als Antwort auf `0xB2` und außerdem unaufgefordert,
-wenn jemand den Modus auf der USB-Konsole mit `ts0`/`ts1` umstellt.
+`0` = ESP sends `0xA5` frames, `1` = ESP sends `0xA6` frames with a send
+timestamp. Sent as a response to `0xB2`, and also unsolicited when someone
+changes the mode on the USB console with `ts0`/`ts1`.
 
 ---
 
-## 5. Zeitsynchronisation
+## 5. Time synchronisation
 
-Ziel: zu jedem Paket vom ESP wissen, **wann es losgeschickt wurde** — ausgedrückt
-in der Uhr des Jetson, damit sich Ereignisse mit Kamera-, LiDAR- und ROS-Daten
-zusammenlegen lassen.
+Goal: for every packet from the ESP, know **when it was sent** — expressed in
+the Jetson's clock, so that events can be merged with camera, LiDAR and ROS
+data.
 
-Das zerfällt in zwei unabhängige Teile:
+This splits into two independent parts:
 
-1. **Der Stempel.** Jedes Paket sagt selbst, wann es rausging — das ist der
-   `0xA6`-Rahmen aus Abschnitt 2. Der Wert steht in der ESP-Uhr.
-2. **Der Uhrenversatz.** Ein Ping-Pong (`0xB0`/`0xB1`) misst, wie weit ESP-Uhr
-   und Jetson-Uhr auseinanderliegen. Damit wird aus dem Stempel ein Zeitpunkt
-   in der Jetson-Uhr.
+1. **The stamp.** Every packet says itself when it went out — this is the
+   `0xA6` frame from section 2. The value is in the ESP clock.
+2. **The clock offset.** A ping-pong (`0xB0`/`0xB1`) measures how far apart
+   the ESP clock and the Jetson clock are. This turns the stamp into a point
+   in time in the Jetson clock.
 
-### 5.1 Die beiden Uhren
+### 5.1 The two clocks
 
 | | ESP | Jetson |
 |---|---|---|
-| Quelle | `esp_timer_get_time()` | `time.monotonic()` (= `CLOCK_MONOTONIC`) |
-| Auflösung | 1 µs | 1 ns (praktisch µs) |
-| Nullpunkt | Boot des ESP | Boot des Jetson |
-| Überlauf | keiner (`int64`) | keiner |
+| Source | `esp_timer_get_time()` | `time.monotonic()` (= `CLOCK_MONOTONIC`) |
+| Resolution | 1 µs | 1 ns (µs in practice) |
+| Zero point | boot of the ESP | boot of the Jetson |
+| Overflow | none (`int64`) | none |
 
-**Für die Synchronisation muss der Jetson eine monotone Uhr nehmen, nicht
-`time.time()`.** Ein NTP-Sprung würde sonst mitten in der Messung den Versatz
-verschieben. Der Bezug zur Wanduhr wird erst ganz am Ende hergestellt, mit einem
-einmal gemessenen Abstand `CLOCK_REALTIME − CLOCK_MONOTONIC`.
+**For the synchronisation the Jetson must use a monotonic clock, not
+`time.time()`.** Otherwise an NTP jump would shift the offset in the middle of
+the measurement. The reference to the wall clock is only established at the
+very end, with a distance `CLOCK_REALTIME − CLOCK_MONOTONIC` measured once.
 
-### 5.2 Der Ablauf
+### 5.2 The procedure
 
 ```
 Jetson                                    ESP
   |                                        |
   |--- A5 B0 <seq> -------------->         |
-  |    t1 = letztes Byte raus              |
-  |                                     t2 = letztes Byte rein
+  |    t1 = last byte out                  |
+  |                                     t2 = last byte in
   |                                        |
   |         <---- A5 B1 seq t2 t3 ---------|
-  |    t4 = letztes Byte rein           t3 = letztes Byte raus
+  |    t4 = last byte in                t3 = last byte out
 ```
 
-Alle vier Zeitpunkte meinen **das letzte Byte des jeweiligen Rahmens auf der
-Leitung**. Das ist der einzige Bezugspunkt, den beide Seiten sauber treffen
-können, und er macht die Rechnung symmetrisch — sonst stünde die
-Übertragungsdauer der 20-Byte-Antwort gegen die der 3-Byte-Anfrage und
-verfälschte den Versatz um ~0,7 ms.
+All four points in time refer to **the last byte of the respective frame on
+the line**. This is the only reference point that both sides can hit cleanly,
+and it makes the calculation symmetric — otherwise the transmission time of
+the 20-byte response would stand against that of the 3-byte request and
+distort the offset by ~0.7 ms.
 
-Wie beide Seiten diesen Punkt treffen:
+How the two sides hit this point:
 
-* **`t1`**: Puffer leerlaufen lassen, **dann** die Uhr nehmen, **dann**
-  schreiben — und die Übertragungsdauer des Rahmens (10 Bit je Byte bei 8N1)
-  dazurechnen. Also *gerechnet*, nicht gemessen.
+* **`t1`**: let the buffer drain, **then** take the clock, **then** write —
+  and add the transmission time of the frame (10 bits per byte at 8N1). So it
+  is *calculated*, not measured.
 
-  > **Nicht** `write()` und danach `flush()` messen. Das sieht sauberer aus,
-  > taugt aber nicht: `flush()` läuft auf `tcdrain()` hinaus, und das kehrt je
-  > nach Treiber — auf dem Tegra-UART des Jetson zuverlässig — deutlich später
-  > zurück als das letzte Byte die Leitung verlässt. `t1` wird dadurch zu spät,
-  > im Extremfall später als `t4`, und der Umlauf rechnerisch **negativ**.
+  > Do **not** measure `write()` followed by `flush()`. That looks cleaner but
+  > does not work: `flush()` ends up in `tcdrain()`, and depending on the
+  > driver — reliably on the Jetson's Tegra UART — that returns much later than
+  > the last byte leaves the line. `t1` then becomes too late, in the extreme
+  > case later than `t4`, and the round trip is mathematically **negative**.
 
-* **`t2`**: der ESP nimmt die Uhr, sobald das Paket vollständig ist.
-* **`t3`**: der ESP nimmt die Uhr unmittelbar vor dem Schreiben und **addiert
-  die Übertragungsdauer des Rahmens**. Vorher lässt er den Sendepuffer
-  leerlaufen, damit die Rechnung stimmt. Dieselbe Methode wie bei `t1`.
-* **`t4`**: die Bridge nimmt die Uhr, wenn das letzte Byte des Rahmens gelesen
-  ist — also nach dem Zusammensetzen des Pakets, nicht beim Startbyte.
+* **`t2`**: the ESP takes the clock as soon as the packet is complete.
+* **`t3`**: the ESP takes the clock immediately before writing and **adds the
+  transmission time of the frame**. Before that it lets the send buffer drain,
+  so that the calculation is correct. The same method as for `t1`.
+* **`t4`**: the bridge takes the clock when the last byte of the frame has
+  been read — that is, after the packet has been assembled, not at the start
+  byte.
 
-  > **Blockweises Lesen zerstört `t4`.** `ser.read(64)` kehrt erst zurück, wenn
-  > 64 Byte beisammen sind oder der Timeout abläuft; alle Pakete in diesem Block
-  > bekommen dann denselben Empfangszeitpunkt, nämlich den des letzten. Bei
-  > laufender Telemetrie sind das leicht 150 ms Fehler. Richtig ist
-  > `read(1)` — das blockiert nur bis zum ersten Byte — und danach
-  > `read(in_waiting)` für den Rest ohne weiteres Warten.
+  > **Reading in blocks destroys `t4`.** `ser.read(64)` only returns when
+  > 64 bytes have accumulated or the timeout expires; all packets in this block
+  > then get the same receive time, namely that of the last one. With
+  > telemetry running, that is easily an error of 150 ms. The correct way is
+  > `read(1)` — this only blocks until the first byte — followed by
+  > `read(in_waiting)` for the rest without further waiting.
 
-### 5.3 Die Rechnung
+### 5.3 The calculation
 
-Die Standard-NTP-Formeln:
-
-```
-versatz  = ((t2 - t1) + (t3 - t4)) / 2       # ESP-Uhr minus Jetson-Uhr
-umlauf   = (t4 - t1) - (t3 - t2)             # reine Leitungs- + Wartezeit
-```
-
-Damit:
+The standard NTP formulas:
 
 ```
-jetson_zeit = esp_stempel - versatz
+offset   = ((t2 - t1) + (t3 - t4)) / 2       # ESP clock minus Jetson clock
+rtt      = (t4 - t1) - (t3 - t2)             # pure line time + waiting time
 ```
 
-Der Versatz stimmt nur, wenn Hin- und Rückweg gleich lang sind. Sie sind es im
-Mittel, aber nicht in jeder einzelnen Runde — der ESP liest seinen UART aus
-`loop()` heraus, `t2` kommt also je nach Schleifendurchlauf verspätet.
+Then:
 
-**Deshalb: mehrere Runden messen und die mit dem kleinsten `umlauf` nehmen.**
-Jede Verzögerung, die die Symmetrie stört, verlängert auch den Umlauf; die
-schnellste Runde ist damit automatisch die ehrlichste. Acht bis sechzehn Runden
-im Abstand von ~20 ms reichen.
+```
+jetson_time = esp_stamp - offset
+```
 
-Zwei Fallen bei diesem Filter, beide schon einmal zugeschlagen:
+The offset is only correct if the outbound and return paths are equally long.
+They are on average, but not in every single round — the ESP reads its UART
+from within `loop()`, so `t2` arrives late by a varying amount depending on the
+loop iteration.
 
-* **Ein negativer Umlauf ist physikalisch unmöglich** und heißt, dass eine der
-  vier Zeitmessungen falsch war. Solche Runden müssen **verworfen** werden —
-  sonst sucht `min()` sich ausgerechnet die kaputteste als „beste" heraus.
-* **Die Schranke muss additiv sein** (`bester + 2 ms`), nicht multiplikativ
-  (`bester × 2`). Bei einem negativen Bestwert wird die multiplikative Schranke
-  *kleiner* als der Bestwert, nichts kommt durch, und ein Fallback auf „dann
-  eben alle" schaufelt den Müll erst recht in die Schätzung.
+**Therefore: measure several rounds and take the one with the smallest `rtt`.**
+Every delay that disturbs the symmetry also lengthens the round trip; the
+fastest round is therefore automatically the most honest one. Eight to sixteen
+rounds at intervals of ~20 ms are enough.
 
-Bleibt nichts Brauchbares übrig, ist der Versatz **ungültig** — und die Bridge
-stempelt ehrlich mit der Lesezeit, statt eine falsche Sendezeit zu erfinden.
+Two traps with this filter, both of which have already struck once:
+
+* **A negative round trip is physically impossible** and means that one of the
+  four time measurements was wrong. Such rounds must be **discarded** —
+  otherwise `min()` picks precisely the most broken one as the "best".
+* **The bound must be additive** (`best + 2 ms`), not multiplicative
+  (`best × 2`). With a negative best value, the multiplicative bound becomes
+  *smaller* than the best value, nothing gets through, and a fallback to "then
+  just take all of them" shovels the garbage into the estimate all the more.
+
+If nothing usable remains, the offset is **invalid** — and the bridge honestly
+stamps with the read time instead of inventing a false send time.
 
 ### 5.4 Drift
 
-Beide Uhren hängen an eigenen Quarzen, typisch ±20…50 ppm. Gegeneinander sind
-das bis zu 100 ppm, also **0,1 ms Abweichung pro Sekunde** — nach zehn Minuten
-60 ms.
+Both clocks run on their own crystals, typically ±20…50 ppm. Against each other
+that is up to 100 ppm, i.e. **0.1 ms deviation per second** — 60 ms after ten
+minutes.
 
-Zwei Möglichkeiten, das Übliche zuerst:
+Two options, the usual one first:
 
-* **Nachsynchronisieren.** Alle 10 s eine Messrunde. Der Versatz bleibt dann
-  unter ~1 ms. Kostet 20 Byte pro Runde, also nichts.
-* **Drift schätzen.** Über die letzten Messpunkte eine Gerade
-  `versatz(t) = a + b·t` legen (kleinste Quadrate). `b` ist die relative
-  Gangabweichung. Damit bleibt der Fehler auch zwischen den Runden klein und der
-  Sprung beim Nachsynchronisieren verschwindet. Lohnt sich, wenn Zeitstempel zu
-  Bilddaten passen müssen.
+* **Resynchronise.** One measurement round every 10 s. The offset then stays
+  below ~1 ms. Costs 20 bytes per round, i.e. nothing.
+* **Estimate the drift.** Fit a straight line `offset(t) = a + b·t` through the
+  last measurement points (least squares). `b` is the relative rate deviation.
+  This keeps the error small between rounds as well, and the jump on
+  resynchronisation disappears. Worth it when timestamps have to match image
+  data.
 
-Beim Nachsynchronisieren nie hart auf den neuen Wert springen, sondern
-einschleifen (`versatz = 0,8·alt + 0,2·neu`) — ein Sprung bringt sonst die
-Reihenfolge bereits abgelegter Ereignisse durcheinander.
+When resynchronising, never jump hard to the new value, but blend it in
+(`offset = 0.8·old + 0.2·new`) — otherwise a jump mixes up the order of events
+that have already been stored.
 
-### 5.5 Der 32-Bit-Stempel im Rahmen
+### 5.5 The 32-bit stamp in the frame
 
-`0xA6` überträgt nur die unteren 32 Bit der ESP-Uhr. Das läuft alle
-**71,6 Minuten** über. `0xB1` liefert dagegen den vollen `int64`. Auspacken:
+`0xA6` only transmits the lower 32 bits of the ESP clock. This overflows every
+**71.6 minutes**. `0xB1`, on the other hand, returns the full `int64`. Unwrapping:
 
 ```python
-def unwrap(stamp32: int, letzter_voller_wert: int) -> int:
-    grob = (letzter_voller_wert & ~0xFFFFFFFF) | stamp32
-    for kandidat in (grob - 2**32, grob, grob + 2**32):
-        if abs(kandidat - letzter_voller_wert) < 2**31:
-            return kandidat
-    return grob
+def unwrap(stamp32: int, last_full_value: int) -> int:
+    coarse = (last_full_value & ~0xFFFFFFFF) | stamp32
+    for candidate in (coarse - 2**32, coarse, coarse + 2**32):
+        if abs(candidate - last_full_value) < 2**31:
+            return candidate
+    return coarse
 ```
 
-Solange die Bridge mindestens alle 35 Minuten eine Runde `0xB0` fährt (bei 10 s
-Takt garantiert), ist das eindeutig.
+As long as the bridge runs a `0xB0` round at least every 35 minutes
+(guaranteed with a 10 s period), this is unambiguous.
 
-### 5.6 Was der Stempel *nicht* sagt
+### 5.6 What the stamp does *not* tell you
 
-Der Stempel ist der **Sendezeitpunkt des Pakets**, nicht der Zeitpunkt des
-Ereignisses. Zwischen beiden liegt bei manchen Paketen etwas:
+The stamp is the **send time of the packet**, not the time of the event. For
+some packets there is a gap between the two:
 
-| Paket | Abstand Ereignis → Senden |
+| Packet | Gap event → send |
 |---|---|
-| `0x93` MOVE_DONE | bis zu ein Reglertakt (10 ms) plus ein `loop()`-Durchlauf — der Regler läuft auf Core 0 und reicht das Ergebnis über eine Queue an Core 1 |
-| `0x70` BUTTON | die 200 ms Entprellzeit liegen **vor** dem Ereignis, danach ein `loop()`-Durchlauf |
-| `0xA1`/`0xA2` Akku | der Messwert ist bis zu 15 s alt (Messraster), der Stempel ist trotzdem taufrisch |
-| `0x42`, `0x82`, `0x94` | Antworten, direkt im Anschluss an den Befehl erzeugt — Abstand vernachlässigbar |
+| `0x93` MOVE_DONE | up to one controller cycle (10 ms) plus one `loop()` iteration — the controller runs on core 0 and passes the result to core 1 through a queue |
+| `0x70` BUTTON | the 200 ms debounce time lies **before** the event, followed by one `loop()` iteration |
+| `0xA1`/`0xA2` battery | the measured value is up to 15 s old (measurement grid), the stamp is still brand new |
+| `0x42`, `0x82`, `0x94` | responses, generated directly after the command — negligible gap |
 
-Für Latenzmessungen des Links ist der Stempel exakt richtig. Für „wann wurde der
-Taster gedrückt" ist er eine obere Schranke.
+For latency measurements of the link the stamp is exactly right. For "when was
+the button pressed" it is an upper bound.
 
-### 5.7 Fehlerbudget
+### 5.7 Error budget
 
-| Quelle | Größenordnung | Gegenmittel |
+| Source | Order of magnitude | Countermeasure |
 |---|---|---|
-| `loop()`-Verzögerung beim Lesen auf dem ESP | 0,1…5 ms, stark schwankend | kleinsten Umlauf aus N Runden nehmen |
-| `t4` in Python (Scheduling, `select`) | 0,1…1 ms | dito |
-| Übertragungsdauer der Rahmen | 0,26 / 1,74 ms | ist beidseitig eingerechnet |
-| Quarzdrift | 0,1 ms/s | alle 10 s nachsynchronisieren |
-| `tcdrain()` kehrt spät zurück (Tegra) | bis mehrere ms, kann `umlauf` negativ machen | `t1` rechnen statt messen (5.2) |
-| Blockweises Lesen für `t4` | bis zum Lese-Timeout, also ~50…150 ms | `read(1)` + `read(in_waiting)` (5.2) |
-| Debug-Ausgaben auf der USB-Konsole | bis mehrere ms | beim Messen `dbg0` setzen |
+| `loop()` delay when reading on the ESP | 0.1…5 ms, highly variable | take the smallest round trip from N rounds |
+| `t4` in Python (scheduling, `select`) | 0.1…1 ms | ditto |
+| Transmission time of the frames | 0.26 / 1.74 ms | included on both sides |
+| Crystal drift | 0.1 ms/s | resynchronise every 10 s |
+| `tcdrain()` returns late (Tegra) | up to several ms, can make `rtt` negative | calculate `t1` instead of measuring it (5.2) |
+| Reading in blocks for `t4` | up to the read timeout, i.e. ~50…150 ms | `read(1)` + `read(in_waiting)` (5.2) |
+| Debug output on the USB console | up to several ms | set `dbg0` while measuring |
 
-Realistisch sind damit **±1 ms** ohne besonderen Aufwand und **±0,2 ms** mit
-Driftschätzung und ruhigem Link. Wer besser braucht, kommt um eine
-Hardwareleitung (PPS-Puls vom Jetson auf einen ESP-Interrupt) nicht herum.
+Realistically this gives **±1 ms** without special effort and **±0.2 ms** with
+drift estimation and a quiet link. Anyone who needs better cannot avoid a
+hardware line (PPS pulse from the Jetson to an ESP interrupt).
 
-### 5.8 Reihenfolge beim Verbindungsaufbau
+### 5.8 Order when establishing the connection
 
-1. Port öffnen, Lese-Thread starten.
-2. 8–16 Runden `0xB0` → erster Versatz.
-3. `A5 B2 01` senden, auf `0xB3` warten. Ab jetzt kommen `0xA6`-Rahmen.
-4. Im Betrieb alle 10 s eine Runde `0xB0` nachschieben.
+1. Open the port, start the read thread.
+2. 8–16 rounds of `0xB0` → first offset.
+3. Send `A5 B2 01`, wait for `0xB3`. From now on `0xA6` frames arrive.
+4. During operation, send one more round of `0xB0` every 10 s.
 
-Punkt 2 vor Punkt 3: ohne Versatz ist ein Stempel wertlos, und `0xB1` braucht
-den Stempelmodus nicht.
+Step 2 before step 3: without an offset a stamp is worthless, and `0xB1` does
+not need the stamp mode.
 
-### 5.9 Referenzimplementierung
+### 5.9 Reference implementation
 
-`docs/timesync_jetson.py` enthält die Jetson-Seite als eigenständige Klasse:
-Ping-Pong, Minimum-Filter, Driftschätzung, Unwrapping und das Parsen beider
-Rahmenformen. Ohne Hardware testbar:
+`docs/timesync_jetson.py` contains the Jetson side as a standalone class:
+ping-pong, minimum filter, drift estimation, unwrapping and parsing of both
+frame forms. Testable without hardware:
 
 ```
 python3 docs/timesync_jetson.py --selftest
 ```
 
-Benutzt wird sie von `src/esp_serial_bridge.py` — siehe Abschnitt 6.
+It is used by `src/esp_serial_bridge.py` — see section 6.
 
 ---
 
-## 6. ROS-2-Bridge
+## 6. ROS 2 bridge
 
-`src/esp_serial_bridge.py` ist die fertige Gegenstelle: `EspLink` macht das
-Protokoll (ohne ROS-Abhängigkeit, damit ohne Roboter testbar), `EspBridgeNode`
-hängt es an ROS. Selbsttest ohne Hardware und ohne ROS:
+`src/esp_serial_bridge.py` is the finished counterpart: `EspLink` handles the
+protocol (without a ROS dependency, so it can be tested without the robot),
+`EspBridgeNode` connects it to ROS. Self-test without hardware and without ROS:
 
 ```
 python3 src/esp_serial_bridge.py --selftest
 ```
 
-**Jede Nachricht mit `header.stamp` trägt den Sendezeitpunkt des ESP**,
-umgerechnet in die ROS-Uhr. Die Laufzeit wird dafür in der monotonen Uhr
-gemessen und von der ROS-Zeit des Lesens abgezogen — das bleibt auch unter
-`use_sim_time` richtig.
+**Every message with `header.stamp` carries the ESP's send time**, converted
+to the ROS clock. For this, the transit time is measured in the monotonic clock
+and subtracted from the ROS time of reading — this also stays correct under
+`use_sim_time`.
 
-### Was hineingeht
+### What goes in
 
-| Topic | Typ | Wirkung |
+| Topic | Type | Effect |
 |---|---|---|
-| `/cmd_vel` | `geometry_msgs/Twist` | `linear.x` → Motor, `angular.z` → Lenkung |
-| `~/motor` | `std_msgs/Int32` | roher Duty, −1023…+1023 |
+| `/cmd_vel` | `geometry_msgs/Twist` | `linear.x` → motor, `angular.z` → steering |
+| `~/motor` | `std_msgs/Int32` | raw duty, −1023…+1023 |
 | `~/steer` | `std_msgs/Float32` | −100…+100 |
-| `~/move` | `std_msgs/Float32` | Grad, **relativ** zur jetzigen Stellung |
+| `~/move` | `std_msgs/Float32` | degrees, **relative** to the current position |
 | `~/led` | `std_msgs/Bool` | |
-| `~/trim` | `std_msgs/Int32` | 0 = links, 1 = rechts, 2 = speichern |
-| `~/emergency` | `std_msgs/Empty` | Nothalt |
-| `~/pid_set` | `std_msgs/Float32MultiArray` | `[id, wert]` oder alle neun Werte |
-| `~/cal` | `std_msgs/Int32MultiArray` | `[aktion, arg]` |
-| `~/cal_action` | `std_msgs/String` | dasselbe im Klartext: `plus`, `left`, `save` … |
+| `~/trim` | `std_msgs/Int32` | 0 = left, 1 = right, 2 = save |
+| `~/emergency` | `std_msgs/Empty` | emergency stop |
+| `~/pid_set` | `std_msgs/Float32MultiArray` | `[id, value]` or all nine values |
+| `~/cal` | `std_msgs/Int32MultiArray` | `[action, arg]` |
+| `~/cal_action` | `std_msgs/String` | the same in plain text: `plus`, `left`, `save` … |
 
-### Was herauskommt
+### What comes out
 
-| Topic | Typ | Inhalt |
+| Topic | Type | Content |
 |---|---|---|
-| `~/button` | `std_msgs/Header` | Tastendruck — der Inhalt *ist* der Zeitstempel |
-| `~/joint_states` | `sensor_msgs/JointState` | Stellung in rad, aus `0xC1` zusätzlich `velocity` in rad/s |
-| `~/speed` | `std_msgs/Float32` | Drehgeschwindigkeit in °/s, **vorzeichenbehaftet** |
-| `~/motor_state` | `std_msgs/Float32MultiArray` | `[duty, ampere]` — Duty signed, Strom nicht |
-| `~/move_done` | `std_msgs/Int32MultiArray` | `[move_id, status, zehntelgrad]` |
+| `~/button` | `std_msgs/Header` | button press — the content *is* the timestamp |
+| `~/joint_states` | `sensor_msgs/JointState` | position in rad, from `0xC1` additionally `velocity` in rad/s |
+| `~/speed` | `std_msgs/Float32` | rotational speed in °/s, **signed** |
+| `~/motor_state` | `std_msgs/Float32MultiArray` | `[duty, ampere]` — duty signed, current not |
+| `~/move_done` | `std_msgs/Int32MultiArray` | `[move_id, status, tenths_of_degree]` |
 | `~/move_progress` | `std_msgs/Float32` | 0…100 % |
-| `~/battery` | `sensor_msgs/BatteryState` | Pack- und Zellspannung |
-| `~/battery_low` | `std_msgs/Bool` | Unterspannungswarnung (latched) |
-| `~/cal_state` | `std_msgs/Int32MultiArray` | Zustand der Kalibrierung |
+| `~/battery` | `sensor_msgs/BatteryState` | pack and cell voltage |
+| `~/battery_low` | `std_msgs/Bool` | undervoltage warning (latched) |
+| `~/cal_state` | `std_msgs/Int32MultiArray` | state of the calibration |
 | `~/pid` | `std_msgs/Float32MultiArray` | `[kp, ki, kd]` (latched) |
-| `~/console` | `std_msgs/String` | ASCII-Zeilen des ESP |
-| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Uhrenversatz, Drift, Umlauf, Zähler |
-| `~/latency_ms` | `std_msgs/Float32` | Laufzeit *dieses* Pakets: abgeschickt → gelesen |
-| `~/rtt_ms` | `std_msgs/Float32` | kürzester Umlauf der letzten Abgleichrunde, 1 Hz |
-| `~/offset_ms` | `std_msgs/Float64` | Uhrenversatz, 1 Hz |
-| `~/drift_ppm` | `std_msgs/Float32` | geschätzter Quarzdrift, 1 Hz |
+| `~/console` | `std_msgs/String` | ASCII lines from the ESP |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | clock offset, drift, round trip, counters |
+| `~/latency_ms` | `std_msgs/Float32` | transit time of *this* packet: sent → read |
+| `~/rtt_ms` | `std_msgs/Float32` | shortest round trip of the last sync round, 1 Hz |
+| `~/offset_ms` | `std_msgs/Float64` | clock offset, 1 Hz |
+| `~/drift_ppm` | `std_msgs/Float32` | estimated crystal drift, 1 Hz |
 
-Die letzten vier tragen dieselben Zahlen wie `/diagnostics`, nur als Zahl statt
-als Text — `DiagnosticArray` speichert seine Werte als Strings, und ein String
-lässt sich nicht plotten. `~/offset_ms` ist `Float64`, weil der Versatz mehrere
-Millionen Millisekunden groß wird; `float32` hätte dort nur noch 1-ms-Schritte
-und der Drift verschwände im Rauschen.
+The last four carry the same numbers as `/diagnostics`, only as numbers
+instead of text — `DiagnosticArray` stores its values as strings, and a string
+cannot be plotted. `~/offset_ms` is `Float64` because the offset grows to
+several million milliseconds; `float32` would only have 1 ms steps there and
+the drift would disappear in the noise.
 
 ### Services
 
-Alles, was eine Quittung hat, ist ein Service statt eines Topics — sonst
-erfährt der Aufrufer nie, ob es geklappt hat.
+Everything that has an acknowledgement is a service instead of a topic —
+otherwise the caller never finds out whether it worked.
 
-| Service | Typ |
+| Service | Type |
 |---|---|
 | `~/emergency_stop`, `~/move_abort` | `std_srvs/Trigger` |
 | `~/pid_get`, `~/pid_save` | `std_srvs/Trigger` |
@@ -747,169 +750,170 @@ erfährt der Aufrufer nie, ob es geklappt hat.
 | `~/trim_save`, `~/torque_report`, `~/resync` | `std_srvs/Trigger` |
 | `~/set_led`, `~/set_stamp_mode`, `~/servo_torque_free` | `std_srvs/SetBool` |
 
-### Parameter
+### Parameters
 
 `port`, `baud`, `servo_id`, `stamp_mode`, `sync_rounds`, `sync_interval`,
 `heartbeat_period`, `cmd_vel_timeout`, `battery_period`, `progress_period`,
 `telemetry_period`, `max_linear`, `max_angular`.
 
-`telemetry_period` (Default 0,05 s = 20 Hz) ist der Takt, in dem der ESP
-Position und Geschwindigkeit von sich aus schickt. Zur Laufzeit änderbar:
+`telemetry_period` (default 0.05 s = 20 Hz) is the period at which the ESP
+sends position and speed on its own. Can be changed at runtime:
 
 ```
 ros2 param set /esp_serial_bridge telemetry_period 0.1
 ```
 
-`0` schaltet die Telemetrie ab. Kleiner als 0,02 s nimmt der ESP nicht an —
-die Bridge meldet das als Warnung, statt es stillschweigend zu schlucken.
+`0` switches the telemetry off. The ESP does not accept less than 0.02 s —
+the bridge reports this as a warning instead of silently swallowing it.
 
-> **`max_linear` und `max_angular` musst du ausmessen.** Der ESP regelt die
-> Drehzahl nicht — `/cmd_vel` wird geradeaus auf PWM umgerechnet. Die beiden
-> Werte sagen, welche Geschwindigkeit bzw. Drehrate voller Ausschlag bedeutet.
+> **You have to measure `max_linear` and `max_angular`.** The ESP does not
+> control the speed — `/cmd_vel` is converted directly to PWM. The two values
+> say which speed or turn rate full deflection means.
 
-### `/diagnostics` lesen
+### Reading `/diagnostics`
 
-| Schlüssel | gesund | Alarmzeichen |
+| Key | Healthy | Warning sign |
 |---|---|---|
-| `versatz_ms` | beliebig groß, auch mehrere Stunden | `-` (kein Abgleich) |
-| `umlauf_ms` | 0,3…3 ms | **negativ** oder > 50 ms |
-| `drift_ppm` | −100…+100 | dreistellig |
-| `sync_verworfen` | `0` | > 0 (unbrauchbare Messrunden) |
-| `zeitstempel` | `an` | `aus` |
-| `esp_neustarts` | konstant | steigt im Betrieb |
+| `offset_ms` | any size, even several hours | `-` (no sync) |
+| `rtt_ms` | 0.3…3 ms | **negative** or > 50 ms |
+| `drift_ppm` | −100…+100 | three digits |
+| `sync_rejected` | `0` | > 0 (unusable measurement rounds) |
+| `timestamps` | `on` | `off` |
+| `esp_reboots` | constant | rises during operation |
 
-> **Ein riesiger `versatz_ms` ist normal und kein Fehler.** Die ESP-Uhr zählt
-> ab seinem Boot, die Jetson-Uhr ab dessen Boot. Läuft der Jetson seit zwei
-> Stunden und der ESP seit fünf Minuten, sind das rund −7 000 000 ms. Genau
-> diesen Abstand zu kennen ist der ganze Zweck der Übung.
+> **A huge `offset_ms` is normal and not an error.** The ESP clock counts from
+> its boot, the Jetson clock from the Jetson's boot. If the Jetson has been
+> running for two hours and the ESP for five minutes, that is about
+> −7 000 000 ms. Knowing exactly this distance is the whole point of the
+> exercise.
 >
-> **Ein negativer `umlauf_ms` dagegen ist immer ein Fehler** — siehe 5.2 und
+> **A negative `rtt_ms`, on the other hand, is always an error** — see 5.2 and
 > 5.3.
 
-### Fertiges Foxglove-Layout
+### Ready-made Foxglove layout
 
-`docs/foxglove_esp_bridge.json` zeigt alle Topics und Services der Bridge.
-In Foxglove laden: **Layout → Import from file…**
+`docs/foxglove_esp_bridge.json` shows all topics and services of the bridge.
+To load it in Foxglove: **Layout → Import from file…**
 
-| Reiter | Inhalt |
+| Tab | Content |
 |---|---|
-| Fahren | Teleop auf `/cmd_vel`, Nothalt, Positionsfahrt, Tempo/Duty, Stellung, Strom |
-| Zeit & Link | Latenz, Umlauf, Drift, Versatz, Knopf zum Neuabgleich |
-| Akku & Zustand | Pack- und Zellspannung, Unterspannungslampe, Fahrfortschritt, Tastendruck |
-| Diagnose & Konsole | `/diagnostics` als Tabelle, ESP-Konsole, `/rosout` |
-| Kalibrieren | Lenkung einmessen, Servo freigeben, speichern |
-| Service | Nothalt, Fahrt abbrechen, PID lesen/speichern, Zeitstempel, LED, Servolast |
-| Befehle | die Roh-Topics `motor`, `steer`, `trim`, `led`, `pid_set`, `cal` |
+| Fahren (Drive) | teleop on `/cmd_vel`, emergency stop, position move, speed/duty, position, current |
+| Zeit & Link (Time & link) | latency, round trip, drift, offset, button for resync |
+| Akku & Zustand (Battery & state) | pack and cell voltage, undervoltage lamp, move progress, button press |
+| Diagnose & Konsole (Diagnostics & console) | `/diagnostics` as a table, ESP console, `/rosout` |
+| Kalibrieren (Calibrate) | calibrate the steering, release the servo, save |
+| Service | emergency stop, abort move, read/save PID, timestamps, LED, servo load |
+| Befehle (Commands) | the raw topics `motor`, `steer`, `trim`, `led`, `pid_set`, `cal` |
 
-Zwei Stellen, die je nach Aufbau angepasst werden müssen:
+Two places that have to be adapted depending on the setup:
 
-* Das Diagnose-Panel ist auf `hardware_id = /dev/ttyTHS1` eingestellt — das
-  ist der Parameter `port`. Bei einem anderen Port das Panel neu auswählen.
-* Alle Pfade beginnen mit `/esp_serial_bridge/`. Läuft die Node unter einem
-  anderen Namen oder in einem Namespace, in der Datei einmal ersetzen.
+* The diagnostics panel is set to `hardware_id = /dev/ttyTHS1` — this is the
+  `port` parameter. With a different port, select the panel again.
+* All paths start with `/esp_serial_bridge/`. If the node runs under a
+  different name or in a namespace, replace it once in the file.
 
-### Latenz in Foxglove anzeigen
+### Showing latency in Foxglove
 
-**Plot-Panel → Pfad eintragen.** Die Pfade sind Topic plus Feldname:
+**Plot panel → enter path.** The paths are topic plus field name:
 
-| Was | Pfad |
+| What | Path |
 |---|---|
-| Laufzeit je Paket | `/esp_serial_bridge/latency_ms.data` |
-| Umlauf (Link-Gesundheit) | `/esp_serial_bridge/rtt_ms.data` |
+| Transit time per packet | `/esp_serial_bridge/latency_ms.data` |
+| Round trip (link health) | `/esp_serial_bridge/rtt_ms.data` |
 | Drift | `/esp_serial_bridge/drift_ppm.data` |
 
-X-Achse auf **timestamp** stellen, nicht auf *index* — sonst zeigt der Graph
-die Nachrichtennummer statt der Zeit.
+Set the x-axis to **timestamp**, not to *index* — otherwise the graph shows
+the message number instead of the time.
 
-`latency_ms` kommt so oft, wie gestempelte Pakete eintreffen — bei 50-ms-Telemetrie
-also 20-mal pro Sekunde. Die anderen drei kommen im Sekundentakt.
+`latency_ms` arrives as often as stamped packets arrive — with 50 ms telemetry,
+that is 20 times per second. The other three arrive once per second.
 
-> **Warum nicht direkt aus `/diagnostics` plotten?** Foxglove hat dafür das
-> Diagnostics-Panel, das die Werte als Tabelle zeigt. Plotten kann es sie nicht:
-> in `DiagnosticArray` steht jeder Wert als Text, und `"0.601"` ist für das
-> Plot-Panel kein Zahlenwert. Deshalb die eigenen Topics oben.
+> **Why not plot directly from `/diagnostics`?** Foxglove has the Diagnostics
+> panel for that, which shows the values as a table. It cannot plot them:
+> in `DiagnosticArray` every value is text, and `"0.601"` is not a numeric
+> value for the Plot panel. Hence the separate topics above.
 
-Ein zweiter Weg, der ganz ohne Zusatz-Topics auskommt: das Plot-Panel kann als
-X-Achse **receive time** und als Y-Achse `header.stamp` eines gestempelten
-Topics zeichnen — zum Beispiel `/esp_serial_bridge/joint_states`. Der Abstand
-zwischen beiden *ist* die Latenz. Ablesen lässt sich das aber nur grob, weil
-Foxglove die Differenz nicht selbst bildet.
+A second way that needs no extra topics at all: the Plot panel can draw
+**receive time** as the x-axis and `header.stamp` of a stamped topic as the
+y-axis — for example `/esp_serial_bridge/joint_states`. The gap between the two
+*is* the latency. It can only be read roughly, though, because Foxglove does
+not compute the difference itself.
 
-### Zwei Dinge, die die Bridge von selbst tut
+### Two things the bridge does by itself
 
-* **Heartbeat.** Der ESP lässt den Motor auslaufen, wenn 5 s lang kein Befehl
-  kommt. Der letzte Motorbefehl geht deshalb zyklisch neu raus — während einer
-  Positionsfahrt bewusst nicht, die darf länger dauern.
-* **Watchdog auf `/cmd_vel`.** Bleibt es länger als `cmd_vel_timeout` aus,
-  geht der Motor in Coast. Sonst würde eine abgestürzte Steuerung den Roboter
-  weiterfahren lassen.
-
----
-
-## 7. Bekannte Lücken
-
-Bewusst offen gelassen, für die Bridge relevant:
-
-* **Keine Prüfsumme, kein Längenfeld.** Ein verlorenes Byte kaskadiert bis zum
-  nächsten `0xA5`. Der 100-ms-Timeout des ESP fängt das ab, die Bridge braucht
-  eine entsprechende Absicherung.
-* **Keine Quittung für `0x10`, `0x20`, `0x30`, `0x60`, `0x80`.** Fire-and-forget.
-  Ob ein PID-Wert ankam, lässt sich nur per `0x81` gegenprüfen.
-* **`0x80` allein ist flüchtig.** Ohne anschließendes `0x83` sind die Werte nach
-  dem nächsten Reset wieder auf dem gespeicherten Stand.
-* **Kein Boot-/Ready-Paket.** Die Bridge merkt einen ESP-Reset nicht direkt. Wer
-  das braucht, erkennt es an der Startup-ASCII-Zeile `System Ready. ...` oder
-  fragt zyklisch `0x81` ab. Seit der Zeitsynchronisation gibt es einen zweiten,
-  eindeutigen Weg: **springt `t_rx_us` in `0xB1` zurück, hat der ESP neu
-  gebootet** — die Uhr läuft ab Boot. Dann Versatz und Driftschätzung wegwerfen
-  und neu messen, sonst datiert die Bridge alles um die alte Laufzeit falsch.
-* **Der Stempel ist der Sendezeitpunkt, nicht der Ereigniszeitpunkt.** Wie weit
-  beides auseinanderliegt, steht in Abschnitt 5.6. Für `0x93` MOVE_DONE sind es
-  bis zu 10 ms.
-* **Die Positions-Telemetrie ist flüchtig.** Fahrbefehle sind relativ und daher
-  reset-fest, aber die in `0x93`/`0x94` gemeldeten Absolutwerte beginnen nach
-  jedem ESP-Reset wieder bei 0. Wer Wegstrecke über Neustarts hinweg mitzählt,
-  muss das auf der Jetson-Seite tun.
-* **`0x50` TORQUE antwortet nicht** über UART — das Ergebnis geht nur auf die
-  USB-Konsole. (`0x40`/`0x41` antworten seit der manuellen Kalibrierung mit
-  `0x42`.)
-* **Die Kalibrierung ist ein Handbetrieb.** `0x41` bewegt den Servo pro Paket um
-  genau einen Schritt; die Bridge muss die Schritte einzeln absetzen und dem
-  Bediener die `0x42`-Rückmeldung zeigen. Es gibt bewusst keine Aktion, die
-  selbsttätig bis zum Anschlag fährt.
+* **Heartbeat.** The ESP lets the motor coast if no command arrives for 5 s.
+  The last motor command is therefore resent cyclically — deliberately not
+  during a position move, which may take longer.
+* **Watchdog on `/cmd_vel`.** If it stays silent for longer than
+  `cmd_vel_timeout`, the motor goes into coast. Otherwise a crashed controller
+  would let the robot keep driving.
 
 ---
 
-## 8. Mitschnitt auf der ESP-Seite (Bring-up)
+## 7. Known gaps
 
-Der ESP protokolliert den Jetson-Link auf seiner **USB-Konsole** (separate
-Schnittstelle, 115200). Beim Entwickeln der Bridge ist das die schnellste
-Antwort auf „kommt überhaupt etwas an?".
+Deliberately left open, relevant for the bridge:
+
+* **No checksum, no length field.** A lost byte cascades until the next
+  `0xA5`. The ESP's 100 ms timeout catches this; the bridge needs an
+  equivalent safeguard.
+* **No acknowledgement for `0x10`, `0x20`, `0x30`, `0x60`, `0x80`.** Fire-and-forget.
+  Whether a PID value arrived can only be cross-checked with `0x81`.
+* **`0x80` on its own is volatile.** Without a subsequent `0x83`, the values
+  are back to the stored state after the next reset.
+* **No boot/ready packet.** The bridge does not notice an ESP reset directly.
+  Anyone who needs this recognises it by the startup ASCII line
+  `System Ready. ...` or polls `0x81` cyclically. Since the time
+  synchronisation there is a second, unambiguous way: **if `t_rx_us` in `0xB1`
+  jumps back, the ESP has rebooted** — the clock runs from boot. Then discard
+  the offset and the drift estimate and measure again, otherwise the bridge
+  dates everything wrongly by the old uptime.
+* **The stamp is the send time, not the event time.** How far apart the two
+  are is given in section 5.6. For `0x93` MOVE_DONE it is up to 10 ms.
+* **The position telemetry is volatile.** Move commands are relative and
+  therefore reset-proof, but the absolute values reported in `0x93`/`0x94`
+  start at 0 again after every ESP reset. Anyone who keeps counting distance
+  across restarts must do so on the Jetson side.
+* **`0x50` TORQUE does not respond** over UART — the result only goes to the
+  USB console. (`0x40`/`0x41` respond with `0x42` since the manual
+  calibration was introduced.)
+* **Calibration is a manual operation.** `0x41` moves the servo by exactly one
+  step per packet; the bridge must send the steps one at a time and show the
+  operator the `0x42` feedback. There is deliberately no action that drives to
+  the end stop by itself.
+
+---
+
+## 8. Logging on the ESP side (bring-up)
+
+The ESP logs the Jetson link on its **USB console** (separate interface,
+115200). When developing the bridge, this is the quickest answer to "is
+anything arriving at all?".
 
 ```
-[RX] MOVE          id=3 ziel=90.5 grad
+[RX] MOVE          id=3 by +90.5 deg
 [TX] MOVE_DONE 03 00 00 00 03 84
-[RX] UNBEKANNT cmd=0x55 - verworfen
-[RX] ABBRUCH cmd=0x10 MOTOR nach 2/3 Byte (>100 ms Pause) - resync
+[RX] UNKNOWN cmd=0x55 - discarded
+[RX] ABORT cmd=0x10 MOTOR after 2/3 bytes (>100 ms gap) - resync
 ```
 
-Steuerung über die USB-Konsole:
+Control via the USB console:
 
-| Befehl | Wirkung |
+| Command | Effect |
 |---|---|
-| `dbg` | Statistik: Pakete, unbekannte CMDs, Abbrüche, Streubytes, Uhr, Sync-Zähler |
-| `dbg0` | Mitschnitt aus |
-| `dbg1` | dekodierte Pakete (Default) |
-| `dbg2` | zusätzlich alle Rohbytes inkl. Sync-Suche |
-| `ts` | Stand der ESP-Uhr und Stempelmodus |
-| `ts0` / `ts1` | Sendezeitstempel (`0xA6`-Rahmen) aus / an |
-| `tel` | Fahrzustand einmal anzeigen |
-| `tel<ms>` | Telemetrietakt setzen, `tel0` = aus |
+| `dbg` | statistics: packets, unknown CMDs, aborts, stray bytes, clock, sync counter |
+| `dbg0` | logging off |
+| `dbg1` | decoded packets (default) |
+| `dbg2` | additionally all raw bytes including the sync search |
+| `ts` | state of the ESP clock and stamp mode |
+| `ts0` / `ts1` | send timestamp (`0xA6` frames) off / on |
+| `tel` | show the drive state once |
+| `tel<ms>` | set the telemetry period, `tel0` = off |
 
-`ts0`/`ts1` schicken dem Jetson unaufgefordert ein `0xB3` — die Bridge bekommt
-die Umstellung also mit, auch wenn sie von der Konsole kam.
+`ts0`/`ts1` send the Jetson an unsolicited `0xB3` — so the bridge notices the
+change even if it came from the console.
 
-Gestempelte Pakete stehen im Mitschnitt mit ihrer Rohzeit:
+Stamped packets appear in the log with their raw time:
 
 ```
 [TX] MOVE_DONE t=45120833 03 00 00 00 03 84
@@ -917,134 +921,134 @@ Gestempelte Pakete stehen im Mitschnitt mit ihrer Rohzeit:
 [TX] TIME_RSP 07 00 00 00 00 02 B0 4C 21 00 00 00 00 02 B0 4E 95
 ```
 
-Dieselbe Kalibrierung lässt sich ohne Jetson direkt auf der USB-Konsole fahren —
-nützlich zum Gegenprüfen, wenn die Bridge sich anders verhält als erwartet:
+The same calibration can be run directly on the USB console without the
+Jetson — useful for cross-checking when the bridge behaves differently than
+expected:
 
-| Befehl | Wirkung |
+| Command | Effect |
 |---|---|
-| `cal` (oder `x`) | starten; bei laufender Kalibrierung Status anzeigen |
-| `+` / `-` | ein Schritt, `+50` für einmalig 50 Ticks |
-| `caln<t>` | Schrittweite in Ticks |
-| `calm` / `call` / `calr` | Mitte / linken / rechten Anschlag merken |
-| `calfree` / `calhold` | Torque aus (von Hand stellen) / wieder halten |
-| `calgo` | gemerkte Mitte anfahren |
-| `calsave` / `calq` | speichern / abbrechen |
+| `cal` (or `x`) | start; while calibration is running, show the status |
+| `+` / `-` | one step, `+50` for a one-off 50 ticks |
+| `caln<t>` | step size in ticks |
+| `calm` / `call` / `calr` | store centre / left / right end stop |
+| `calfree` / `calhold` | torque off (set by hand) / hold again |
+| `calgo` | move to the stored centre |
+| `calsave` / `calq` | save / abort |
 
-Beim Deuten hilft:
+Help with interpreting:
 
-* **`ABBRUCH ... nach n/m Byte`** — die Bridge hat ein Paket in mehreren
-  `write()`-Aufrufen mit Pause geschickt. Ein Paket muss in einem Rutsch raus.
-* **`UNBEKANNT cmd=0x??`** — Sync-Verlust oder falsches CMD-Byte. Wenn das
-  Byte plausibel wie Nutzlast aussieht, stimmt vermutlich eine Payload-Länge
-  in der Tabelle der Bridge nicht.
-* **Viele Streubytes bei `dbg2`, davon ASCII** — normal, das sind die
-  Klartextzeilen des ESP (siehe Abschnitt 2, Regel 4).
-* **`dbg` zeigt 0 Pakete und 0 Streubytes** — es kommt physisch nichts an.
-  Verkabelung (RX/TX gekreuzt?), gemeinsame Masse, Baudrate prüfen.
+* **`ABORT ... after n/m bytes`** — the bridge sent a packet in several
+  `write()` calls with a pause. A packet must go out in one go.
+* **`UNKNOWN cmd=0x??`** — sync loss or wrong CMD byte. If the byte plausibly
+  looks like payload, a payload length in the bridge's table is probably
+  wrong.
+* **Many stray bytes with `dbg2`, some of them ASCII** — normal, these are the
+  ESP's plain-text lines (see section 2, rule 4).
+* **`dbg` shows 0 packets and 0 stray bytes** — nothing is physically
+  arriving. Check the wiring (RX/TX crossed?), common ground and baud rate.
 
-> `dbg1` schreibt eine Zeile pro Paket. Ein Motor-Heartbeat im 100-ms-Takt
-> erzeugt damit 10 Zeilen/s. Für Dauerfahrten `dbg0` setzen.
+> `dbg1` writes one line per packet. A motor heartbeat at a 100 ms period
+> therefore produces 10 lines/s. For continuous driving, set `dbg0`.
 
 ---
 
-## 9. Referenzwerte
+## 9. Reference values
 
 | | |
 |---|---|
-| Encoder | 408 Counts pro Umdrehung der Ausgangswelle (4× Quadratur) |
-| PWM | 20 kHz, 10 Bit (0..1023) |
-| Motortreiber | VNH5019 (INA/INB/PWM) |
-| Regler-Takt | 100 Hz (10 ms) auf Core 0 |
-| Anfahrrampe | max. 25 Duty-Stufen pro 10 ms ⇒ ~410 ms auf Vollgas |
-| Akku | 4S, Warnung < 3,80 V/Zelle, Entwarnung > 3,85 V/Zelle |
-| Lenkung | SCServo SCS/SCSCL, ID 1, Hub auf 80 % begrenzt |
-| ESP-Uhr | `esp_timer`, µs seit Boot, `int64` (kein Überlauf) |
-| Rahmenstempel | untere 32 Bit davon ⇒ Überlauf alle 71,6 min |
-| Byte auf der Leitung | 10 Bit bei 8N1 ⇒ 86,8 µs bei 115200 |
-| Sync-Runde | 3 B hin + 20 B zurück ⇒ 2,0 ms reine Übertragung |
-| Drehzahlmessung | alle 100 ms, exponentiell geglättet (α = 0,30) |
-| Telemetrie bei 20 Hz | 18 B je Paket ⇒ 360 B/s, ~3 % der Leitung |
-| erreichbare Genauigkeit | ±1 ms einfach, ±0,2 ms mit Driftschätzung |
+| Encoder | 408 counts per revolution of the output shaft (4× quadrature) |
+| PWM | 20 kHz, 10 bit (0..1023) |
+| Motor driver | VNH5019 (INA/INB/PWM) |
+| Controller cycle | 100 Hz (10 ms) on core 0 |
+| Acceleration ramp | max. 25 duty steps per 10 ms ⇒ ~410 ms to full throttle |
+| Battery | 4S, warning < 3.80 V/cell, all-clear > 3.85 V/cell |
+| Steering | SCServo SCS/SCSCL, ID 1, travel limited to 80 % |
+| ESP clock | `esp_timer`, µs since boot, `int64` (no overflow) |
+| Frame stamp | lower 32 bits of it ⇒ overflow every 71.6 min |
+| Byte on the line | 10 bits at 8N1 ⇒ 86.8 µs at 115200 |
+| Sync round | 3 B out + 20 B back ⇒ 2.0 ms pure transmission |
+| Speed measurement | every 100 ms, exponentially smoothed (α = 0.30) |
+| Telemetry at 20 Hz | 18 B per packet ⇒ 360 B/s, ~3 % of the line |
+| Achievable accuracy | ±1 ms simple, ±0.2 ms with drift estimation |
 
-### Gemessen auf dem Jetson (Referenz zum Vergleichen)
+### Measured on the Jetson (reference for comparison)
 
-Jetson Orin, `/dev/ttyTHS1`, Telemetrie mit 20 Hz, ESP im Leerlauf:
+Jetson Orin, `/dev/ttyTHS1`, telemetry at 20 Hz, ESP idle:
 
-| | gemessen | Alarmschwelle |
+| | Measured | Alarm threshold |
 |---|---|---|
-| `umlauf_ms` | 0,60 | negativ oder > 50 |
-| `drift_ppm` | −57 | dreistellig |
-| `sync_verworfen` | 0 | > 0 |
-| daraus Stempelgenauigkeit | ~±0,3 ms | |
+| `rtt_ms` | 0.60 | negative or > 50 |
+| `drift_ppm` | −57 | three digits |
+| `sync_rejected` | 0 | > 0 |
+| resulting stamp accuracy | ~±0.3 ms | |
 
-Weicht dein Link davon deutlich ab, stimmt etwas nicht — die üblichen
-Ursachen stehen in 5.2 und im Fehlerbudget 5.7.
+If your link differs significantly from this, something is wrong — the usual
+causes are in 5.2 and in the error budget 5.7.
 
 ---
 
-## 10. Prompt für den Jetson-Chat
+## 10. Prompt for the Jetson chat
 
-> **Weitgehend erledigt:** `src/esp_serial_bridge.py` ist die Bridge, Abschnitt 6
-> beschreibt sie. Dieser Prompt bleibt als Beschreibung der Anforderungen
-> stehen — nützlich, wenn die Bridge einmal neu aufgesetzt oder gegengeprüft
-> werden soll.
+> **Largely done:** `src/esp_serial_bridge.py` is the bridge, section 6
+> describes it. This prompt remains as a description of the requirements —
+> useful if the bridge ever has to be set up again or cross-checked.
 
-> Ich habe einen ESP32-S3, der über UART (115200 8N1) einen Fahrmotor, eine
-> Servolenkung und die Akkuüberwachung eines Roboters steuert. Das Protokoll ist
-> in der beigefügten Spezifikation vollständig beschrieben. Ich brauche auf dem
-> Jetson eine Python-Bridge dagegen.
+> I have an ESP32-S3 that controls a drive motor, a servo steering and the
+> battery monitoring of a robot over UART (115200 8N1). The protocol is fully
+> described in the attached specification. I need a Python bridge for it on
+> the Jetson.
 >
-> **Was sich gegenüber der bisherigen Bridge geändert hat und deshalb umgeschrieben
-> werden muss:**
+> **What has changed compared with the previous bridge and therefore has to be
+> rewritten:**
 >
-> 1. **Der Empfangspfad wird asynchron.** Bisher kam vom ESP praktisch nur das
->    Button-Event. Jetzt schickt er auch unaufgefordert `0x93` MOVE_DONE und
->    `0xA2` BATTERY_WARN. Ein Request-Response-Modell reicht nicht mehr — es
->    braucht einen dauerhaft lesenden Thread, der Pakete in eine Queue legt und
->    per Callback verteilt.
+> 1. **The receive path becomes asynchronous.** Until now, practically only the
+>    button event came from the ESP. Now it also sends `0x93` MOVE_DONE and
+>    `0xA2` BATTERY_WARN unsolicited. A request-response model is no longer
+>    enough — it needs a permanently reading thread that puts packets into a
+>    queue and dispatches them via callbacks.
 >
-> 2. **Der RX-Parser muss variable Paketlängen können.** Vorher feste 3 Byte,
->    jetzt 1 bis 12 Byte Nutzlast je nach CMD. Die Längentabelle aus der Spec
->    fest verdrahten, unbekannte CMDs verwerfen und zum nächsten `0xA5` resynchen.
->    Wichtig: der Strom enthält zusätzlich ASCII-Statuszeilen vom ESP, die
->    übersprungen (und am besten geloggt) werden müssen.
+> 2. **The RX parser must handle variable packet lengths.** Previously a fixed
+>    3 bytes, now 1 to 12 bytes of payload depending on the CMD. Hard-wire the
+>    length table from the spec, discard unknown CMDs and resync to the next
+>    `0xA5`. Important: the stream additionally contains ASCII status lines
+>    from the ESP, which must be skipped (and ideally logged).
 >
-> 3. **Positionsfahrten sind relativ und brauchen ID-Tracking.** `0x90` bekommt eine `moveId`
->    mitgegeben, das Ergebnis kommt irgendwann später als `0x93` mit derselben ID
->    und einem Status (OK / Timeout / Aborted). Bau das als `asyncio.Future` oder
->    Callback pro ID, sodass aufrufender Code auf eine bestimmte Fahrt warten
->    kann. Es kann immer nur eine Fahrt gleichzeitig laufen; eine neue löst die
->    alte ab und die alte quittiert mit Status `0x02`.
+> 3. **Position moves are relative and need ID tracking.** `0x90` is given a `moveId`,
+>    the result comes at some later point as `0x93` with the same ID and a
+>    status (OK / Timeout / Aborted). Build this as an `asyncio.Future` or a
+>    callback per ID, so that calling code can wait for a specific move. Only
+>    one move can run at a time; a new one replaces the old one, and the old
+>    one acknowledges with status `0x02`.
 >
-> 4. **Ein Heartbeat ist neu und zwingend.** Der ESP stoppt den Motor
->    selbstständig, wenn 5 s lang kein Befehl kommt. Für Dauerfahrt muss die
->    Bridge `0x10` MOTOR zyklisch nachschicken (alle 100–500 ms). Positionsfahrten
->    sind ausgenommen, dort darf der Heartbeat pausieren.
+> 4. **A heartbeat is new and mandatory.** The ESP stops the motor on its own
+>    if no command arrives for 5 s. For continuous driving the bridge must
+>    resend `0x10` MOTOR cyclically (every 100–500 ms). Position moves are
+>    exempt; the heartbeat may pause during them.
 >
-> 5. **PID-Parameter sind zweistufig.** `0x80` PID_SET ändert nur den laufenden
->    Wert, erst `0x83` PID_SAVE schreibt den ganzen Satz ins NVS und quittiert mit
->    `0x84`. Beim Tuning also viele `0x80` und am Ende genau ein `0x83` — nicht
->    nach jedem Parameter speichern.
+> 5. **PID parameters are two-stage.** `0x80` PID_SET only changes the running
+>    value; only `0x83` PID_SAVE writes the whole set to NVS and acknowledges
+>    with `0x84`. So when tuning, many `0x80` and exactly one `0x83` at the
+>    end — do not save after every parameter.
 >
-> 6. **Alle Fließkommawerte gehen als `int32 × 1000` über die Leitung, Big-Endian
->    — auch die ganzzahligen PID-Parameter.** `maxDuty = 700` wird als `700000`
->    kodiert. Das ist die wahrscheinlichste Fehlerquelle, bau dafür Unit-Tests.
+> 6. **All floating-point values go over the wire as `int32 × 1000`, big-endian
+>    — including the integer PID parameters.** `maxDuty = 700` is encoded as
+>    `700000`. This is the most likely source of errors; write unit tests for it.
 >
-> 7. **Akkuwarnungen kommen von selbst.** Kein Polling nötig. Der ESP schaltet bei
->    Unterspannung nichts ab — die Reaktion (Fahrt stoppen, zur Ladestation,
->    Alarm) muss auf der Jetson-Seite passieren.
+> 7. **Battery warnings arrive by themselves.** No polling needed. The ESP does
+>    not switch anything off on undervoltage — the reaction (stop driving, go
+>    to the charging station, alarm) must happen on the Jetson side.
 >
-> 8. **Es gibt eine Zeitsynchronisation.** Der ESP kann jedes Paket mit seinem
->    Sendezeitpunkt stempeln (`0xA6`-Rahmen, mit `0xB2` einzuschalten), und ein
->    Ping-Pong `0xB0`/`0xB1` liefert den Uhrenversatz zwischen ESP und Jetson.
->    Damit bekommt jedes Ereignis einen Zeitpunkt in der Jetson-Uhr, der sich
->    mit Kamera- und LiDAR-Daten zusammenlegen lässt. Die Rechnung, das
->    Fehlerbudget und eine fertige, ohne Hardware testbare Implementierung
->    stehen in Abschnitt 5 bzw. in `docs/timesync_jetson.py` — **übernimm die
->    von dort, statt die NTP-Formeln neu herzuleiten.** Der RX-Parser muss
->    dafür beide Startbytes können und alle vier Zeitpunkte auf das *letzte*
->    Byte des jeweiligen Rahmens beziehen (`flush()` nach dem Senden!).
+> 8. **There is a time synchronisation.** The ESP can stamp every packet with
+>    its send time (`0xA6` frame, switched on with `0xB2`), and a ping-pong
+>    `0xB0`/`0xB1` provides the clock offset between ESP and Jetson. This gives
+>    every event a point in time in the Jetson clock that can be merged with
+>    camera and LiDAR data. The calculation, the error budget and a finished
+>    implementation that can be tested without hardware are in section 5 and
+>    in `docs/timesync_jetson.py` respectively — **take it from there instead
+>    of re-deriving the NTP formulas.** For this, the RX parser must handle both
+>    start bytes and relate all four points in time to the *last* byte of the
+>    respective frame (`flush()` after sending!).
 >
-> Bau die Bridge als Klasse mit sauber getrennten Methoden pro Befehl,
-> Typannotationen und einem Kontextmanager fürs Öffnen/Schließen des Ports.
-> Serialisierung und Parsing sollen ohne echte Hardware testbar sein.
+> Build the bridge as a class with cleanly separated methods per command,
+> type annotations and a context manager for opening/closing the port.
+> Serialisation and parsing should be testable without real hardware.
