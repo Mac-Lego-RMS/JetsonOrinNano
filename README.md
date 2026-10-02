@@ -28,9 +28,8 @@ plugs directly onto the Jetson.
 
 ## Vehicle, team and videos
 
-<!-- PLACEHOLDER: the images appear once v-photos/front.jpg and
-v-photos/left.jpg exist; the video links are filled in video/video.md and here.
-Remove this comment afterwards. -->
+<!-- PLACEHOLDER: fill in the video links here and in video/video.md, then
+remove this comment. -->
 
 | Front | Left |
 |---|---|

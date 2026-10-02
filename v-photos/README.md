@@ -2,9 +2,6 @@
 
 The vehicle from all six sides, as it competes: body on, race battery in.
 
-<!-- PLACEHOLDER: drop the six photos into this folder with exactly these file
-names (lower case, .jpg), then remove this comment. -->
-
 | Front | Back |
 |---|---|
 | ![Vehicle from the front](front.jpg) | ![Vehicle from the back](back.jpg) |
