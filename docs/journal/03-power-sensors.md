@@ -23,7 +23,7 @@ rubric for criterion 2:
 | The rubric asks for | Section | Key evidence |
 | --- | --- | --- |
 | Power architecture, planned distribution | [Dual-input power path](#dual-input-power-path), [Regulation](#regulation) | two hot-swappable inputs, two regulated rails, Jetson deliberately unswitched |
-| Power budget, current draw | [Power budget](#power-budget) | 1.10–1.30 A measured per state; Jetson 76 %; matches the pack runtimes within 7 % |
+| Power budget, current draw | [Power budget](#power-budget) | 1.10–1.30 A measured per state; Jetson 76 %; consistent with the recorded discharge curve |
 | Wiring diagram | [Wiring](#wiring) | vehicle-level wiring, schematic, all four copper layers, pin map |
 | Sensor selection and trade-offs | [Sensor set](#sensor-set), [LiDAR: selection](#lidar-selection) | three LiDARs compared; YOLO replaced for latency; why no ultrasonic or line sensor |
 | Placement justified with the field geometry | [LiDAR: placement](#lidar-placement), [Camera](#camera) | 55 mm scan plane against 100 mm walls, ±0.9° tilt tolerance; scan plane in the camera's view from 0.18 m |
@@ -63,23 +63,53 @@ The board carries four jobs:
 | Capacity | 450 mAh | 1150 mAh |
 | Discharge rating | 60 C (≈27 A) | 60 C (≈69 A) |
 | Stored energy | 6.7 Wh | 17.0 Wh |
-| Observed runtime | ≈22 min | ≈50 min |
-| Implied average current | **≈1.2 A** | **≈1.4 A** |
+| Time to the 3.8 V/cell warning, measured | **10.0 min** | **26.0 min** |
 
-The two runtimes were measured independently and agree on an average system draw
-of roughly **1.2–1.4 A, i.e. 18–20 W**. This is the figure that
-[Power budget](#power-budget) has to reproduce component by component.
+The system draws **1.10 A standing and 1.30 A at full speed, 16–19 W**, measured
+state by state in [Power budget](#power-budget).
 
 The smaller pack is used for competition runs, where its lower mass matters and
-22 minutes is far beyond a 3-minute round. The larger pack is used for
-development and testing, where runtime dominates.
+its 10 minutes to the warning cover a 3-minute round with a large reserve. The
+larger pack is used for development and testing, where runtime dominates.
 
 The 60 C rating is not required by the average current — it is required so that
 the pack voltage does not sag during motor acceleration, which would otherwise
 propagate into the 5 V rail and into the low-voltage warning.
 
-<!-- TODO figure: discharge curves of both packs, recorded with
-ros2 bag record /esp_serial_bridge/battery over a full session per pack. -->
+#### Discharge curve
+
+With the battery monitoring repaired (see below), both packs were recorded from
+full charge with the vehicle standing, all nodes running and the LiDAR turning,
+motor off — the *full system idle* state of the power budget, 1.10 A.
+
+![Pack voltage of both packs over time at the same load, against the low-voltage warning.](../figures/discharge.svg)
+
+Data: bags `Entladung_450` and `Entladung_1150` via
+[`battery_curve.py`](../analysis/battery_curve.py) into
+[`data/discharge.csv`](../data/discharge.csv). Both discharges were ended by hand
+at about 3.7 V per cell: under load we do not take a LiPo lower than that. After
+the race pack, a cable tore off while switching over to the bench supply and the
+Jetson lost power before the recorder had closed the bag, so that bag was
+recovered with `sqlite3 .recover`. Readings of 17.4 V at the start and end, more
+than a 4S pack can deliver, are the bench supply on the second input; they are
+dropped.
+
+| | Race pack, 450 mAh | Endurance pack, 1150 mAh |
+| --- | ---: | ---: |
+| Start | 16.53 V (4.13 V/cell) | 16.89 V (4.22 V/cell) |
+| After 3 min, one round | 16.00 V (4.00 V/cell) | 16.64 V (4.16 V/cell) |
+| **Warning, 15.2 V (3.8 V/cell)** | **after 10.0 min** | **after 26.0 min** |
+| End of recording | 14.90 V after 14.5 min | 14.82 V after 39.9 min |
+
+A round takes 3 minutes and leaves the race pack at 4.0 V per cell, far above the
+warning. A freshly charged race pack therefore covers a round with a large
+reserve.
+
+**The two curves check each other.** The time to the warning scales with the
+capacity: 26.0 / 10.0 = 2.60 against 1150 / 450 = 2.56, within 2 %. The race pack
+also starts 0.36 V lower at the same current. That is expected: 1.10 A is a
+2.4 C load for the small pack but only about 1 C for the large one, so its
+voltage sags further.
 
 #### Battery monitoring
 
@@ -128,7 +158,8 @@ tolerate.
 
 **Fix:** the failed resistor was replaced. After the repair the bridge reports
 15.56 V and a state of charge of 65 % — the percentage is no longer pinned at 100 %,
-so the divider is back in its linear range. <!-- TODO confirm: reported value against a multimeter at the pack terminals -->
+so the divider is back in its linear range. Against a multimeter it is now
+accurate to ±1.1 % (see [Calibration](#battery-voltage)).
 
 The fault is documented here rather than silently repaired because of how it was
 found: not by the warning misbehaving, but by cross-checking one measurement
@@ -370,19 +401,32 @@ Two consequences follow, and both shaped later decisions:
    non-motor share at ~90 % converter efficiency. This is the figure the eFuse
    current limit was set against (see [Protection](#protection)).
 
-#### Cross-check against observed runtime
+#### Cross-check against the discharge curve
 
-The power budget and the observed pack runtimes were measured independently. They
-agree:
+The [discharge curves](#discharge-curve) were recorded in the *full system idle*
+state, 1.10 A. Combining the two measurements:
 
-| Pack | Capacity | Predicted at 1.15 A | Observed |
-| --- | --- | --- | --- |
-| Race | 450 mAh | 23.5 min | ≈22 min |
-| Endurance | 1150 mAh | 60 min | ≈50 min |
+| Point on the curve | Race pack, 450 mAh | Endurance pack, 1150 mAh |
+| --- | ---: | ---: |
+| One round, 3 min | 55 mAh, 12 % | 55 mAh, 5 % |
+| Warning, 3.8 V/cell | 183 mAh, **41 %** | 477 mAh, **41 %** |
+| End of recording, ≈3.7 V/cell | 266 mAh, 59 % | 731 mAh, 64 % |
 
-The race pack matches within 7 %. The endurance pack falls short of the prediction
-because a run is ended at the 3.8 V/cell warning rather than at full discharge,
-leaving usable capacity unused.
+Two packs of very different size reach the warning at the same share of their
+nominal charge. That is what a correct current figure and a correct voltage
+reading together predict; an error in either would show up as a mismatch here.
+Two conclusions follow:
+
+1. **The warning is conservative.** It fires with more than half of the nominal
+   charge still in the pack. That is deliberate: a LiPo that is run deep loses
+   capacity, and the vehicle must not lose its compute during a scored run.
+2. **Driving barely shortens it.** Driving at full speed raises the draw by 18 %,
+   so on the field the warning comes after roughly 10.0 min × 1.10 / 1.30 ≈
+   8.5 minutes on the race pack and 22 minutes on the endurance pack — estimates
+   from the measurements, not separate recordings.
+
+An earlier version of this journal gave runtimes of ≈22 and ≈50 minutes. Those
+were estimates; the recorded curve replaces them.
 
 ### Motor drive
 
@@ -875,7 +919,7 @@ A Hall encoder on the drive motor (BORDSTRACT 12 V, 1 000 rpm gear motor). It wa
 already fitted, and Hall sensing is the most reliable option. Counting both edges
 of both channels gives 408 counts per wheel revolution. The silicone tyre is
 compressed under the weight of the car, so the effective rolling diameter is
-30.0 mm instead of the nominal 32 mm (see [Tyres](02-mobility.md#tyres-cast-silicone)),
+30.0 mm instead of the nominal 32 mm (see [Tyres](02-mobility.md#tires-cast-silicone)),
 and one count is
 
 $$
@@ -1045,6 +1089,29 @@ remaining friction; for the heading they are already uncritical.
 
 ![Gyro noise and motor voltage over the three drive-gear mountings, identical sweep. The dotted line repeats the sweep with the new gear and the wheels removed.](../figures/gear_repair.svg)
 
+**The spectrum confirms each diagnosis independently.** The IMU samples at
+100 Hz, so vibration up to 50 Hz is visible — at 0.6 m/s that is up to seven times
+the wheel rotation frequency. Plotting frequency as a multiple of the wheel
+rotation (the *order*) separates the possible sources: a part that is unbalanced
+or runs out of true shakes once per revolution (order 1); a loose part that knocks
+shakes several times per revolution (higher orders).
+
+- **Improvised adapter:** the largest peaks sit at orders 4 and 7, up to 3 °/s —
+  repeated impacts every revolution, the loose fit.
+- **Adapter repaired:** one single line at order 1, 1.1 °/s at 0.6 m/s and 2.0 °/s
+  at 1.0 m/s — run-out, once per revolution, which is why this noise grew with speed.
+- **New gear:** at 1.0 m/s the order-1 line has dropped to 0.5 °/s. At 0.6 m/s
+  order 1 and its multiples rise again, to 1.6 °/s: the resonance.
+- **Wheels off:** no line at any order, only a broad floor below 0.5 °/s.
+
+The noise level and the spectrum are two independent readings of the same
+recordings, and they point at the same causes.
+
+![Pitch-rate spectrum at 0.6 and 1.0 m/s, frequency as a multiple of the wheel rotation. Peaks at whole orders are tied to the rotating drivetrain.](../figures/vibration_orders.svg)
+
+Data: [`data/mp3_order_spectrum.csv`](../data/mp3_order_spectrum.csv), written by
+[`sweep_noise.py`](../analysis/sweep_noise.py) `--orders`.
+
 ## Calibration
 
 No sensor on this vehicle is trusted on its data sheet or schematic alone. The
@@ -1054,12 +1121,29 @@ the LiDAR against a pillar at known distances.
 ### Battery voltage
 
 The divider on IO1 was checked against the bench supply. That cross-check is what
-found the failed resistor described under [Battery monitoring](#battery-monitoring);
-after the repair the reading is back in its linear range.
+found the failed resistor described under [Battery monitoring](#battery-monitoring).
+After the repair it was checked again over the whole range of a 4S pack, against
+a multimeter at the input:
 
-<!-- TODO: record reported vs. multimeter at 12.0 / 14.0 / 16.0 / 16.8 V into
-data/manual/battery_divider.csv. If the slope is off, add a two-point
-correction to the ESP firmware. -->
+| Multimeter | Reported | Error |
+| ---: | ---: | ---: |
+| 12.0 V | 11.87 V | −0.13 V (−1.1 %) |
+| 14.0 V | 13.90 V | −0.10 V (−0.7 %) |
+| 16.0 V | 16.08 V | +0.08 V (+0.5 %) |
+| 16.8 V | 16.96 V | +0.16 V (+1.0 %) |
+
+Data: [`data/manual/battery_divider.csv`](../data/manual/battery_divider.csv).
+
+The reading is linear — a straight line, reported = 1.062 × actual − 0.91 V, fits
+all four points within 0.06 V — with a slope 6 % too steep, the typical gain error
+of the ESP32-S3's ADC. **We decided not to correct it in the firmware.** The point
+that matters is the warning: a reported 15.2 V is an actual 15.17 V, 3.79 V per
+cell instead of 3.80 V. A correction would move the warning by 0.03 V, which on
+the race pack's discharge curve is about 20 seconds.
+
+The check also explains a reading in the [discharge curve](#discharge-curve): the
+endurance pack starts at a reported 16.89 V, above the 16.8 V of a full 4S pack.
+Corrected, that is 16.76 V — a full pack, as expected.
 
 ### Motor current
 

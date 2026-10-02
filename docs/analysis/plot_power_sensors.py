@@ -7,9 +7,13 @@ and writes four figures:
                    of the system and motion (MP1)
   drive_current    supply current and derived winding current over PWM duty
                    (MP2)
+  discharge        pack voltage over time at a constant load, against the
+                   low-voltage warning
   imu_noise        gyroscope noise per axis over drive-axle speed, and the
                    driven/coasting comparison that separates vibration from
                    electrical interference (MP3)
+  vibration_orders pitch-rate spectrum per speed step over orders of the
+                   wheel rotation: which part of the drivetrain shakes
   gear_repair      pitch and yaw noise and motor voltage over the three
                    drive-gear mountings, and with the wheels removed
 
@@ -181,13 +185,88 @@ def gear_repair(out_dir):
                'data/mp3_before_after.csv (sweep_noise.py)  |  plot_power_sensors.py')
 
 
+def vibration_orders(out_dir):
+    rows = read(DATA / 'mp3_order_spectrum.csv')
+    runs = (('adapter', 'improvised adapter', style.CAT[1]),
+            ('repaired', 'adapter repaired', style.CAT[3]),
+            ('newgear', 'new gear', style.CAT[0]),
+            ('newgear_nowheels', 'new gear, wheels off', style.CAT[6]))
+    speeds = (0.6, 1.0)
+    fig, axes = style.figure(len(runs), len(speeds), width=7.0, height=5.4,
+                             sharex='col', sharey=True)
+    for j, v in enumerate(speeds):
+        for i, (run, lbl, col) in enumerate(runs):
+            ax = axes[i, j]
+            sel = [r for r in rows if r['run'] == run and float(r['v_cmd_mps']) == v
+                   and r['pitch_amp_dps']]
+            o = np.array([float(r['order']) for r in sel])
+            amp = np.array([float(r['pitch_amp_dps']) for r in sel])
+            ax.fill_between(o, amp, color=col, alpha=0.25, lw=0)
+            ax.plot(o, amp, color=col, lw=1.0)
+            for k in range(1, 8):
+                ax.axvline(k, color=style.MUTED, lw=0.5, ls=(0, (2, 3)), zorder=0)
+            ax.set_xlim(0, o.max())
+            ax.grid(False)
+            if j == 0:
+                ax.set_ylabel(f'{lbl}\n[°/s]', fontsize=7.5)
+        axes[0, j].set_title(f'{v} m/s  ({float(sel[0]["axle_rad_s"]) / (2 * np.pi):.1f} '
+                             'wheel revolutions per second)', fontsize=8.5)
+        axes[-1, j].set_xlabel('order = frequency / wheel rotation frequency')
+        axes[-1, j].set_xticks(range(0, int(o.max()) + 1))
+    axes[0, 0].set_ylim(0, 3.6)
+    style.save(fig, out_dir, 'vibration_orders',
+               'Pitch-rate amplitude spectrum. Source: bags PWM_vorher, PWM_nachher, '
+               'PWM_neuesZahnrad(_ohneRaeder) via data/mp3_order_spectrum.csv  |  '
+               'plot_power_sensors.py')
+
+
+def discharge(out_dir):
+    rows = read(DATA / 'discharge.csv')
+    packs = (('race_450', '450 mAh race pack', style.CAT[0]),
+             ('endurance_1150', '1150 mAh endurance pack', style.CAT[1]))
+    fig, ax = style.figure(1, 1, width=7.0, height=3.2)
+    ax.axvspan(0, 3, color=style.GRID, alpha=0.6, lw=0)
+    ax.text(1.5, 14.47, 'one\nround', ha='center', va='bottom', fontsize=7.5,
+            color=style.INK_2)
+    ax.axhline(15.2, color=style.STATUS['serious'], lw=1.0, ls='--')
+    t_end = 0
+    for key, lbl, col in packs:
+        sel = [r for r in rows if r['pack'] == key]
+        if not sel:
+            continue
+        t = np.array([float(r['t_s']) for r in sel]) / 60
+        v = np.array([float(r['voltage_v']) for r in sel])
+        ax.plot(t, v, color=col, lw=style.LINE_W, label=lbl)
+        below = t[v < 15.2]
+        if len(below):
+            ax.plot(below[0], 15.2, 'o', color=col, ms=style.MARKER_S, mec=style.SURFACE)
+            ax.annotate(f'{below[0]:.1f} min', (below[0], 15.2), xytext=(-6, -13),
+                        textcoords='offset points', ha='right', fontsize=8, color=col)
+        t_end = max(t_end, t[-1])
+    ax.set_xlim(0, np.ceil(t_end + 0.5))
+    ax.set_ylim(14.4, 17.0)
+    ax.text(t_end, 15.23, 'low-voltage warning, 3.8 V/cell', ha='right', va='bottom',
+            fontsize=7.5, color=style.STATUS['serious'])
+    ax.set_xlabel('time [min], vehicle standing, all nodes running, motor off (1.10 A)')
+    ax.set_ylabel('pack voltage under load [V]')
+    ax.set_yticks(np.arange(14.5, 17.01, 0.5))
+    cell = ax.secondary_yaxis('right', functions=(lambda x: x / 4, lambda x: x * 4))
+    cell.set_ylabel('per cell [V]')
+    ax.set_title('Both packs reach the warning at the same share of their charge')
+    ax.legend(loc='upper right')
+    style.save(fig, out_dir, 'discharge',
+               'Source: bags Entladung_450, Entladung_1150 via data/discharge.csv (battery_curve.py)  |  '
+               'plot_power_sensors.py')
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--out-dir', default=str(FIGURES))
     a = ap.parse_args(argv)
     style.apply_style()
-    for fn in (power_budget, drive_current, imu_noise, gear_repair):
+    for fn in (power_budget, drive_current, discharge, imu_noise, gear_repair,
+               vibration_orders):
         fn(a.out_dir)
     return 0
 
