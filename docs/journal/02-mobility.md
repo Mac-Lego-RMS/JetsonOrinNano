@@ -1,18 +1,5 @@
 # Mobility and mechanical design
 
-<!--
-Owner: Clemens. Rubric criterion 1.
-4 points: clear explanation of chassis, drive and steering; diagrams; reproducible.
-6 points: torque and speed reasoning; trade-offs; why components were chosen;
-tests or iterations that changed the design and improved performance.
-Status 01.10.: Clemens' draft (Hardware.zip, commit de8f8ce) integrated, language
-and format aligned with the other chapters, cross-checked against chapters 2
-and 3. Driven steering angles replaced by the measured steering calibration.
-02.10.: front part restructured after review (plain headings, joints merged into
-the structural concept, CoG in its own section, comparison tables in one column
-order: earlier vehicle first, Napoleon last; shaded by docs/compare_columns.lua).
--->
-
 The 2026 vehicle, **Napoleon**, replaces the LEGO-Technic hybrid of the national
 final with a screw-jointed monocoque, an Ackermann steering linkage and a rigid
 rear axle. Three limitations of the old platform triggered the redesign: play in

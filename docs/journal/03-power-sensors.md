@@ -1,16 +1,5 @@
 # Power and sensor architecture
 
-<!--
-Owner: Jannik. Rubric criterion 2.
-4 points: wiring diagram; sensor placement and selection explained; reproducible.
-6 points: power budget; sensor trade-offs; placement justified with the field
-geometry; calibration method; failure points; iteration evidence.
-Evaluators look for: planned power distribution, justified sensor positions,
-consideration of noise, interference, shadows.
-Sources in the repo: schemes/ (MainPCB, schematic PDF), src/start_robot.sh
-(camera exposure / white balance rationale), src/camera_lidar_fusion/README.md.
--->
-
 **Evidence at a glance.** Where this chapter answers each point of the
 rubric for criterion 2:
 
@@ -662,10 +651,6 @@ it would put timing-critical work on the ESP32 for every byte.
 Early in development the protocol itself caused problems; the interface has been
 stable since.
 
-<!-- [FIGURE 10 / MP6] Two-channel oscilloscope capture of Data and TXEnable
-across one request/response cycle, with the transmit, turnaround and receive
-phases labelled. -->
-
 ### PCB implementation
 
 | | |
@@ -1214,20 +1199,3 @@ Recorded field failures: none electrical. One ESP32 was destroyed during
 bench testing by an incorrect connection. No brownouts and no Jetson resets have
 been observed in operation.
 
-<!--
-Open measurements
-| ID | Measurement | Equipment | Feeds |
-| --- | --- | --- | --- |
-| ~~MP1~~ | ~~Current draw per operating state~~ | Bench supply | **Done** — §2.8, R29 corrected |
-| ~~MP2~~ | ~~Motor current sense calibration~~ | Bench supply, duty sweep | **Done** — §2.9. Calibration abandoned: signal below ADC floor even at the traction limit; function covered by encoder and LiDAR |
-| ~~MP3~~ | ~~IMU noise against PWM duty~~ | Rosbag, wheels free | **Done** — §2.11. No PWM coupling; vibration only, and not on the yaw axis |
-| ~~MP3b~~ | ~~LiDAR scan quality against PWM duty~~ | Same sweeps, `/scan` | **Done** — §2.11. 1.5 mm at rest, ≤4.2 mm driving, no speed dependence |
-| MP4 | Pack discharge curves | IO1 telemetry, multimeter cross-check | §2.3 |
-| MP6 | Servo bus turnaround | 2-channel oscilloscope | §2.10 |
-| MP7 | Rail droop at motor start | Oscilloscope, repeating start | §2.6 |
-
-Available instrumentation is a 2-channel analogue oscilloscope, a bench power
-supply and a multimeter. Efficiency curves, thermal imaging and inrush current
-capture were not performed because they require an electronic load, a thermal
-camera and a current probe respectively.
--->

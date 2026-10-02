@@ -1,17 +1,5 @@
 # Software architecture and obstacle strategy
 
-<!--
-Owner: software. Rubric criterion 3.
-4 points: flowchart; modules and functions clearly explained; obstacle logic
-described and reproducible.
-6 points: state machine WITH rationale; justified algorithms; edge cases
-handled; testing and tuning process with the metrics used.
-Status 30.09.: every number below was checked against the code on main
-(ceebae5), including the review feedback from the two build chats. Metrics
-and figures come from the evaluation of all 71 bags (11.-29.09., repo e740c8a)
-with docs/analysis.
--->
-
 ## Architecture overview
 
 The software runs on two controllers. The **Jetson Orin Nano** runs all

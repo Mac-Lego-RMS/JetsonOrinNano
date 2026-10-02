@@ -1,16 +1,5 @@
 # Systems thinking and engineering decisions
 
-<!--
-Owner: all. Rubric criterion 4.
-4 points: subsystems mapped and their interactions explained; constraints
-mentioned.
-6 points: explicit constraints; trade-offs; iteration cycles; risks and failure
-modes with mitigation; "we chose X instead of Y because ..." based on data.
-Status 01.10.: software rows checked against the code on main; power and
-sensor rows from chapter 2, mechanics rows from chapter 1. Values marked ‡ are
-still being measured (see chapter 1, Validation status).
--->
-
 ## Subsystems and how they interact
 
 ```mermaid
