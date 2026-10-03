@@ -14,8 +14,43 @@
 #
 # Ctrl-b <digit> only takes ONE digit -- that is why the controller has a
 # single-digit number. The window list is at Ctrl-b w.
+#
+# Status LEDs on the ESP (all LEDs of the SK6812 chain):
+#   red     this script is running, robot is booting
+#   yellow  everything started, the controller in window 6 is not running yet
+#   green   round1_controller is running -- it sets that itself
 
 set -u
+
+# ------------------------------------------------------------------ #
+# 0. Status LEDs red -- as early as possible
+# Written straight to the ESP's UART, without ROS: at this point there is no
+# container yet, let alone the bridge. Frame 0x31 from
+# esp_firmware/docs/JETSON_BRIDGE.md: all LEDs, solid, brightness 64.
+#
+# For yellow the bridge (window 2) already has the port open. That is fine:
+# it does not open it exclusively, and the kernel never interleaves two
+# write() calls on a tty -- the frame arrives in one piece between two
+# bridge frames.
+# ------------------------------------------------------------------ #
+ESP_PORT=/dev/ttyTHS1
+
+esp_led() {   # esp_led R G B W
+    if [ ! -w "$ESP_PORT" ]; then
+        echo "NOTE: $ESP_PORT not writable -- status LEDs not set."
+        return 0
+    fi
+    # clocal first: without it, open() can block waiting for a carrier
+    # signal the ESP never sends -- and the robot would never boot.
+    stty -F "$ESP_PORT" 115200 cs8 -cstopb -parenb -crtscts clocal raw -echo 2>/dev/null
+    local frame
+    frame=$(printf '\\%03o' 0xA5 0x31 1 "$1" "$2" "$3" "$4" 64 0 0 0)
+    # timeout as a second safety net, for the same reason.
+    timeout 2 bash -c 'printf "$1" > "$2"' _ "$frame" "$ESP_PORT" \
+        || echo "NOTE: could not write the status LEDs to $ESP_PORT."
+}
+
+esp_led 255 0 0 0      # red
 
 # ------------------------------------------------------------------ #
 # Configuration
@@ -610,6 +645,9 @@ tmux send-keys -t "$SESSION:11" \
 # ------------------------------------------------------------------ #
 #run_window 7 obstacle "ros2 run robot_vision obstacle_run"
 #run_window 7 wallfollower "ros2 run wall_follower_robot wall_follower_logic"
+
+# Status LEDs yellow: stack is up, waiting for Enter in window 6.
+esp_led 255 160 0 0    # yellow
 
 echo
 echo "Everything started. Look inside with:  tmux attach -t $SESSION"

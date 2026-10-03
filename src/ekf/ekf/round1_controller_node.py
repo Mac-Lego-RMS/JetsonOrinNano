@@ -943,6 +943,20 @@ class Round1Controller(Node):
                 "as soon as the inputs are there. To unpark: "
                 "-p unpark:=true <<<")
 
+        # Status LEDs green = controller is running (start_robot.sh set red
+        # at boot and yellow once the stack was up). Only sent once the
+        # bridge's subscription is matched: a message published before
+        # discovery has finished is simply lost, and the LEDs would stay
+        # yellow although the robot is about to drive.
+        self.pub_pixel = self.create_publisher(String, '/esp_serial_bridge/pixel', 10)
+        self._pixel_timer = self.create_timer(0.2, self._pixel_running)
+
+    def _pixel_running(self):
+        if self.pub_pixel.get_subscription_count() == 0:
+            return
+        self.pub_pixel.publish(String(data='green'))
+        self._pixel_timer.cancel()
+
     def _corner_msg_type(self):
         from robot_msgs.msg import CornerGeometry
         return CornerGeometry
