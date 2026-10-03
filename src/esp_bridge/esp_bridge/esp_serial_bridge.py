@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import math
+import re
 import struct
 import sys
 import threading
@@ -140,6 +141,8 @@ read_available = _ts.read_available
 CMD_MOTOR = 0x10
 CMD_SERVO = 0x20
 CMD_LED = 0x30
+CMD_PIXEL = 0x31            # RGBW LEDs, all
+CMD_PIXEL_ONE = 0x32        # RGBW LEDs, one (index in front)
 CMD_CALIBRATE = 0x40        # identical to CMD_CAL with action "start"
 CMD_CAL = 0x41
 CMD_TORQUE = 0x50
@@ -186,6 +189,21 @@ CAL_ACTIONS = {
     "left": 0x04, "right": 0x05, "save": 0x06, "abort": 0x07,
     "free": 0x08, "hold": 0x09, "goto_center": 0x0A, "step": 0x0B,
     "status": 0x0C,
+}
+
+# RGBW LED chain (SK6812): animation modes and named colours, the same as on
+# the ESP's USB console ("px"). Colours are R, G, B, W - pure white uses the
+# separate white chip.
+PIXEL_MODES = {
+    "off": 0, "solid": 1, "blink": 2, "breathe": 3,
+    "rainbow": 4, "strobe": 5, "heart": 6,
+}
+PIXEL_COLOURS = {
+    "red": (255, 0, 0, 0), "green": (0, 255, 0, 0), "blue": (0, 0, 255, 0),
+    "white": (0, 0, 0, 255), "yellow": (255, 160, 0, 0),
+    "orange": (255, 60, 0, 0), "cyan": (0, 255, 255, 0),
+    "magenta": (255, 0, 255, 0), "purple": (120, 0, 255, 0),
+    "warm": (255, 80, 0, 180),
 }
 
 # The ESP counts travel in 1/10 degree of the output shaft, ROS in radians.
@@ -412,6 +430,24 @@ class EspLink:
 
     def led(self, on: bool) -> None:
         self.send(CMD_LED, bytes([1 if on else 0]))
+
+    def pixel(self, cmd: "PixelCommand") -> None:
+        """RGBW LEDs: ``cmd.led = None`` -> all (0x31), else one (0x32).
+
+        No reply - an LED index the chain does not have is silently
+        dropped by the ESP.
+        """
+        def byte(value: int) -> int:
+            return int(_clamp(int(value), 0, 255))
+
+        payload = bytes([byte(cmd.mode), byte(cmd.r), byte(cmd.g), byte(cmd.b),
+                         byte(cmd.w), byte(cmd.brightness)]) \
+            + struct.pack(">H", int(_clamp(int(cmd.period_ms), 0, 0xFFFF))) \
+            + bytes([byte(cmd.count)])
+        if cmd.led is None:
+            self.send(CMD_PIXEL, payload)
+        else:
+            self.send(CMD_PIXEL_ONE, bytes([byte(cmd.led)]) + payload)
 
     def trim(self, action: int) -> None:
         """0 = centre to the left, 1 = to the right, 2 = save."""
@@ -654,6 +690,124 @@ def parse_cal_state(payload: bytes) -> CalState:
 
 
 # ==========================================================================
+# RGBW LEDs - plain-text commands
+# ==========================================================================
+
+@dataclass
+class PixelCommand:
+    """One packet for the LED chain. ``led = None`` means all LEDs."""
+    led: Optional[int] = None
+    mode: int = PIXEL_MODES["solid"]
+    r: int = 0
+    g: int = 0
+    b: int = 0
+    w: int = 0
+    brightness: int = 64
+    period_ms: int = 0       # 0 = default of the mode on the ESP
+    count: int = 0           # 0 = persistent, n = one-shot over n periods
+
+
+def parse_pixel(text: str, brightness: int = 64) -> List[PixelCommand]:
+    """Plain text -> LED packets. Several commands separated by ``;``.
+
+    One command::
+
+        [<led>:] [<mode>] [<colour>] [bri=<0-255>] [ms=<period>] [x=<count>]
+
+    * ``<led>:`` only this LED (0 = nearest to the ESP), without it: all
+    * ``<mode>`` off, solid, blink, breathe, rainbow, strobe, heart
+    * ``<colour>`` a name (red, green, ... see PIXEL_COLOURS), ``#RRGGBB``,
+      ``#RRGGBBWW`` or ``rgbw=R,G,B[,W]``
+    * ``x=<n>`` makes it a one-shot: n periods, then the previous state
+      returns on the ESP by itself
+
+    Stateless on purpose: whatever is not given takes its default (mode
+    solid, colour white, brightness from the parameter, period of the mode).
+    So every message means the same no matter what was sent before - the
+    bridge does not know what the ESP console did in the meantime anyway.
+
+    Examples: ``red``, ``2: breathe blue ms=2000``,
+    ``0: strobe red ms=300 x=3``, ``0: red; 1: green; 2: blue; 3: white``.
+
+    Raises ``ValueError`` with a readable message on anything unknown.
+    """
+    commands: List[PixelCommand] = []
+    for part in text.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        cmd = PixelCommand(brightness=brightness)
+        colour: Optional[Tuple[int, int, int, int]] = None
+        mode: Optional[int] = None
+
+        if ":" in part:
+            head, part = part.split(":", 1)
+            head = head.strip().lower()
+            if head != "all":
+                if not head.isdigit():
+                    raise ValueError(f"LED index '{head}' is not a number")
+                cmd.led = int(head)
+
+        # rgbw= first: its value contains commas/spaces and would otherwise
+        # fall apart into several words.
+        match = re.search(r"rgbw\s*=\s*([0-9][0-9 ,]*)", part, re.IGNORECASE)
+        if match:
+            values = [int(n) for n in re.split(r"[ ,]+", match.group(1).strip())]
+            if len(values) not in (3, 4):
+                raise ValueError("rgbw= needs 3 or 4 numbers")
+            colour = tuple((values + [0])[:4])
+            part = part[:match.start()] + " " + part[match.end():]
+
+        for token in part.split():
+            low = token.lower()
+            if "=" in low:
+                key, value = low.split("=", 1)
+                if not value.isdigit():
+                    raise ValueError(f"'{token}': value is not a number")
+                if key in ("bri", "brightness"):
+                    cmd.brightness = int(value)
+                elif key in ("ms", "period"):
+                    cmd.period_ms = int(value)
+                elif key in ("x", "count"):
+                    cmd.count = int(value)
+                else:
+                    raise ValueError(f"unknown key '{key}' (bri, ms, x, rgbw)")
+            elif low in PIXEL_MODES:
+                mode = PIXEL_MODES[low]
+            elif low in PIXEL_COLOURS:
+                colour = PIXEL_COLOURS[low]
+            elif low.startswith("#") and len(low) in (7, 9):
+                try:
+                    v = int(low[1:], 16)
+                except ValueError:
+                    raise ValueError(f"'{token}' is not a hex colour") from None
+                if len(low) == 7:
+                    v <<= 8
+                colour = ((v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+            else:
+                raise ValueError(
+                    f"unknown word '{token}'. Modes: {', '.join(PIXEL_MODES)}; "
+                    f"colours: {', '.join(PIXEL_COLOURS)}, #RRGGBB[WW], rgbw=R,G,B[,W]")
+
+        cmd.mode = PIXEL_MODES["solid"] if mode is None else mode
+        cmd.r, cmd.g, cmd.b, cmd.w = colour if colour is not None else PIXEL_COLOURS["white"]
+        for name in ("brightness", "count"):
+            if not 0 <= getattr(cmd, name) <= 255:
+                raise ValueError(f"{name} must be 0..255")
+        if not 0 <= cmd.period_ms <= 0xFFFF:
+            raise ValueError("ms must be 0..65535")
+        if any(not 0 <= c <= 255 for c in (cmd.r, cmd.g, cmd.b, cmd.w)):
+            raise ValueError("colour values must be 0..255")
+        if cmd.led is not None and cmd.led > 255:
+            raise ValueError("LED index must be 0..255")
+        commands.append(cmd)
+
+    if not commands:
+        raise ValueError("empty LED command")
+    return commands
+
+
+# ==========================================================================
 # ROS 2 node
 # ==========================================================================
 
@@ -734,6 +888,9 @@ def _build_node_class():
             self.declare_parameter("odom_stop_s", 0.50)  # after that: stop the motor
 
             self.declare_parameter("steer_center_servo", -0.04)
+
+            # RGBW LEDs: brightness for ~/pixel when the text gives none.
+            self.declare_parameter("pixel_brightness", 64)
 
             self._p = lambda name: self.get_parameter(name).value
             self._cmd_vel_timeout = float(self._p("cmd_vel_timeout"))
@@ -837,6 +994,8 @@ def _build_node_class():
             sub(Int32, "~/motor", lambda m: self._drive(m.data))
             sub(Float32, "~/steer", lambda m: self.link.steer(m.data))
             sub(Bool, "~/led", lambda m: self.link.led(m.data))
+            sub(String, "~/pixel", self._on_pixel)
+            sub(Int32MultiArray, "~/pixel_raw", self._on_pixel_raw)
             sub(Float32, "~/move", self._on_move)
             sub(Int32, "~/trim", lambda m: self.link.trim(m.data))
             sub(Empty, "~/emergency", lambda _m: self._on_emergency())
@@ -1142,6 +1301,35 @@ def _build_node_class():
                     + ", ".join(sorted(CAL_ACTIONS)))
                 return
             self._run_cal(CAL_ACTIONS[name], 0)
+
+        def _on_pixel(self, msg: String) -> None:
+            """RGBW LEDs in plain text, syntax see ``parse_pixel``:
+                ros2 topic pub --once <node>/pixel std_msgs/String "data: '2: breathe blue'"
+            """
+            try:
+                commands = parse_pixel(msg.data,
+                                       int(self._p("pixel_brightness")))
+            except ValueError as exc:
+                self.get_logger().error(f"pixel: {exc}")
+                return
+            for cmd in commands:
+                self.link.pixel(cmd)
+
+        def _on_pixel_raw(self, msg: Int32MultiArray) -> None:
+            """[led, mode, r, g, b, w, brightness, period_ms, count],
+            led = -1 for all LEDs. For programs - no text parsing."""
+            data = [int(v) for v in msg.data]
+            if len(data) != 9:
+                self.get_logger().error(
+                    "pixel_raw: expected [led, mode, r, g, b, w, brightness, "
+                    f"period_ms, count], got {len(data)} values")
+                return
+            led, mode, r, g, b, w, bri, period, count = data
+            if not 0 <= mode < len(PIXEL_MODES):
+                self.get_logger().error(f"pixel_raw: unknown mode {mode}")
+                return
+            self.link.pixel(PixelCommand(None if led < 0 else led, mode,
+                                         r, g, b, w, bri, period, count))
 
         def _on_cal(self, msg: Int32MultiArray) -> None:
             """[action, arg] - action codes see CAL_ACTIONS."""
@@ -1479,6 +1667,34 @@ def _selftest() -> int:
     check("LED", link.sent[-1] == bytes([0xA5, 0x30, 0x01]))
     link.trim(2)
     check("Trim save", link.sent[-1] == bytes([0xA5, 0x60, 0x02]))
+
+    # The example packets from the spec, byte for byte.
+    for cmd in parse_pixel("strobe red bri=255 ms=300 x=3"):
+        link.pixel(cmd)
+    check("PIXEL all, one-shot",
+          link.sent[-1] == bytes([0xA5, 0x31, 0x05, 0xFF, 0x00, 0x00, 0x00,
+                                  0xFF, 0x01, 0x2C, 0x03]),
+          link.sent[-1].hex(" "))
+    for cmd in parse_pixel("2: strobe red bri=255 ms=300 x=3"):
+        link.pixel(cmd)
+    check("PIXEL_ONE LED 2",
+          link.sent[-1] == bytes([0xA5, 0x32, 0x02, 0x05, 0xFF, 0x00, 0x00, 0x00,
+                                  0xFF, 0x01, 0x2C, 0x03]),
+          link.sent[-1].hex(" "))
+    cmds = parse_pixel("0: red; 1: #00ff0010; 3: breathe rgbw=1,2,3", brightness=40)
+    check("PIXEL several, hex with W, rgbw=",
+          [(c.led, c.mode, c.r, c.g, c.b, c.w, c.brightness) for c in cmds]
+          == [(0, 1, 255, 0, 0, 0, 40), (1, 1, 0, 255, 0, 16, 40),
+              (3, 3, 1, 2, 3, 0, 40)], f"{cmds}")
+    only_mode = parse_pixel("rainbow")[0]
+    check("PIXEL mode alone -> all LEDs, white",
+          (only_mode.led, only_mode.mode, only_mode.w) == (None, 4, 255))
+    for bad in ("blurple", "x: red", "red bri=300", "foo=1", ""):
+        try:
+            parse_pixel(bad)
+            check(f"PIXEL rejects '{bad}'", False)
+        except ValueError:
+            check(f"PIXEL rejects '{bad}'", True)
 
     actual = link.set_telemetry_rate(0.05)
     check("Telemetry period 50 ms",

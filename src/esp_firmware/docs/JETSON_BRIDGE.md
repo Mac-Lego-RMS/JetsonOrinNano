@@ -750,11 +750,43 @@ and subtracted from the ROS time of reading — this also stays correct under
 | `~/steer` | `std_msgs/Float32` | −100…+100 |
 | `~/move` | `std_msgs/Float32` | degrees, **relative** to the current position |
 | `~/led` | `std_msgs/Bool` | |
+| `~/pixel` | `std_msgs/String` | RGBW LEDs in plain text, see below |
+| `~/pixel_raw` | `std_msgs/Int32MultiArray` | `[led, mode, r, g, b, w, brightness, period_ms, count]`, `led = -1` = all |
 | `~/trim` | `std_msgs/Int32` | 0 = left, 1 = right, 2 = save |
 | `~/emergency` | `std_msgs/Empty` | emergency stop |
 | `~/pid_set` | `std_msgs/Float32MultiArray` | `[id, value]` or all nine values |
 | `~/cal` | `std_msgs/Int32MultiArray` | `[action, arg]` |
 | `~/cal_action` | `std_msgs/String` | the same in plain text: `plus`, `left`, `save` … |
+
+#### RGBW LEDs from outside
+
+`~/pixel` takes one or more commands, separated by `;`:
+
+```
+[<led>:] [<mode>] [<colour>] [bri=<0-255>] [ms=<period>] [x=<count>]
+```
+
+* `<led>:` only this LED (`0` = nearest to the ESP); without it, or with
+  `all:`, all LEDs (`0x31`)
+* `<mode>`: `off solid blink breathe rainbow strobe heart` — default `solid`
+* `<colour>`: `red green blue white yellow orange cyan magenta purple warm`,
+  `#RRGGBB`, `#RRGGBBWW` or `rgbw=R,G,B[,W]` — default `white`
+* `bri=` default from the parameter `pixel_brightness` (64), `ms=` default of
+  the mode, `x=<n>` makes it a one-shot (section 3, `0x31`)
+
+Every message is **complete on its own**: what is not given takes its default,
+not the previous value. So the same message always means the same, no matter
+what was sent before.
+
+```bash
+ros2 topic pub --once /esp_serial_bridge/pixel std_msgs/String "data: 'rainbow'"
+ros2 topic pub --once /esp_serial_bridge/pixel std_msgs/String "data: '2: breathe blue ms=2000'"
+ros2 topic pub --once /esp_serial_bridge/pixel std_msgs/String "data: 'strobe red bri=255 ms=300 x=3'"
+ros2 topic pub --once /esp_serial_bridge/pixel std_msgs/String "data: '0: red; 1: green; 2: blue; 3: white'"
+```
+
+Invalid text is logged as an error and nothing is sent. The Foxglove layout
+has a tab "LEDs" with a text field and a few presets.
 
 ### What comes out
 
@@ -800,7 +832,7 @@ otherwise the caller never finds out whether it worked.
 
 `port`, `baud`, `servo_id`, `stamp_mode`, `sync_rounds`, `sync_interval`,
 `heartbeat_period`, `cmd_vel_timeout`, `battery_period`, `progress_period`,
-`telemetry_period`, `max_linear`, `max_angular`.
+`telemetry_period`, `max_linear`, `max_angular`, `pixel_brightness`.
 
 `telemetry_period` (default 0.05 s = 20 Hz) is the period at which the ESP
 sends position and speed on its own. Can be changed at runtime:

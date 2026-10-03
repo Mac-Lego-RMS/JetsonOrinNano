@@ -195,6 +195,30 @@
               "second": "Publish!cal"
             }
           }
+        },
+        {
+          "title": "LEDs",
+          "layout": {
+            "direction": "row",
+            "splitPercentage": 60,
+            "first": {
+              "direction": "column",
+              "splitPercentage": 55,
+              "first": "Publish!pixel",
+              "second": "Publish!pixelraw"
+            },
+            "second": {
+              "direction": "column",
+              "splitPercentage": 33.33,
+              "first": "Publish!pixelrainbow",
+              "second": {
+                "direction": "column",
+                "splitPercentage": 50.0,
+                "first": "Publish!pixelalarm",
+                "second": "Publish!pixeloff"
+              }
+            }
+          }
         }
       ]
     },
@@ -707,6 +731,56 @@
       "showFullMessageForDiff": false,
       "expansion": "all",
       "fontSize": 12
+    },
+    "Publish!pixel": {
+      "topicName": "/esp_serial_bridge/pixel",
+      "datatype": "std_msgs/msg/String",
+      "schemaName": "std_msgs/msg/String",
+      "buttonText": "LEDs setzen",
+      "buttonTooltip": "[<led>:] [off|solid|blink|breathe|rainbow|strobe|heart] [Farbe|#RRGGBB[WW]|rgbw=R,G,B,W] [bri=0-255] [ms=Periode] [x=Anzahl] - mehrere mit ;",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": \"0: red; 1: green; 2: blue; 3: white\"\n}"
+    },
+    "Publish!pixelraw": {
+      "topicName": "/esp_serial_bridge/pixel_raw",
+      "datatype": "std_msgs/msg/Int32MultiArray",
+      "schemaName": "std_msgs/msg/Int32MultiArray",
+      "buttonText": "LEDs roh setzen",
+      "buttonTooltip": "[led (-1 = alle), mode, r, g, b, w, helligkeit, periode_ms, anzahl]",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": [-1, 3, 0, 0, 255, 0, 64, 2000, 0]\n}"
+    },
+    "Publish!pixelrainbow": {
+      "topicName": "/esp_serial_bridge/pixel",
+      "datatype": "std_msgs/msg/String",
+      "schemaName": "std_msgs/msg/String",
+      "buttonText": "Regenbogen",
+      "buttonTooltip": "alle LEDs, Regenbogen \u00fcber die Kette",
+      "buttonColor": "#4e98e2",
+      "advancedView": true,
+      "value": "{\n  \"data\": \"rainbow\"\n}"
+    },
+    "Publish!pixelalarm": {
+      "topicName": "/esp_serial_bridge/pixel",
+      "datatype": "std_msgs/msg/String",
+      "schemaName": "std_msgs/msg/String",
+      "buttonText": "3x rot blitzen",
+      "buttonTooltip": "Einmal-Animation, danach kommt der vorige Zustand zur\u00fcck",
+      "buttonColor": "#e24e4e",
+      "advancedView": true,
+      "value": "{\n  \"data\": \"strobe red bri=255 ms=300 x=3\"\n}"
+    },
+    "Publish!pixeloff": {
+      "topicName": "/esp_serial_bridge/pixel",
+      "datatype": "std_msgs/msg/String",
+      "schemaName": "std_msgs/msg/String",
+      "buttonText": "Alle aus",
+      "buttonTooltip": "alle LEDs aus",
+      "buttonColor": "#808080",
+      "advancedView": true,
+      "value": "{\n  \"data\": \"off\"\n}"
     }
   },
   "globalVariables": {},
