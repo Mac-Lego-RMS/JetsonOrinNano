@@ -79,7 +79,8 @@ section 5.
 | `0x10` | MOTOR | 3 B | `dir(1)` + `uint16 speed` |
 | `0x20` | SERVO | 3 B | `id(1)` + `int16 steering` |
 | `0x30` | LED | 1 B | `0`=off, `≠0`=on |
-| `0x31` | PIXEL | 9 B | RGBW status LED: `mode` `R` `G` `B` `W` `brightness` `uint16 period` `count` |
+| `0x31` | PIXEL | 9 B | RGBW LEDs, **all**: `mode` `R` `G` `B` `W` `brightness` `uint16 period` `count` |
+| `0x32` | PIXEL_ONE | 10 B | RGBW LEDs, **one**: `index` + the 9 bytes of `0x31` |
 | `0x40` | CALIBRATE | 0 B | start manual calibration → response `0x42` |
 | `0x41` | CAL | 2 B | `action(1)` + `arg(1)` → response `0x42` |
 | `0x50` | TORQUE | 0 B | print servo load on the USB console |
@@ -249,13 +250,16 @@ still active, the old one is replaced and acknowledges this with `0x93` /
 status `0x02` before the new one starts. The bridge therefore gets a response
 for every ID, no matter in which order it sends them.
 
-### `0x31` PIXEL — RGBW status LED
+### `0x31` PIXEL / `0x32` PIXEL_ONE — RGBW status LEDs
 
-One SK6812 RGBW LED on GPIO40. The animation runs in its own task on core 0,
-so it keeps going smoothly while core 1 is busy with the live control.
+A chain of SK6812 RGBW LEDs on GPIO40, currently **4** (`PIXEL_COUNT` in
+`main.cpp`). LED `0` is the one nearest to the ESP. Every LED has its own
+state and animation. The animations run in their own task on core 0, so they
+keep going smoothly while core 1 is busy with the live control.
 
 ```
-A5 31 <mode> <R> <G> <B> <W> <brightness> <periodHi> <periodLo> <count>
+A5 31 <mode> <R> <G> <B> <W> <brightness> <periodHi> <periodLo> <count>          all LEDs
+A5 32 <index> <mode> <R> <G> <B> <W> <brightness> <periodHi> <periodLo> <count>  LED <index>
 ```
 
 | `mode` | Name | Pattern |
@@ -264,10 +268,12 @@ A5 31 <mode> <R> <G> <B> <W> <brightness> <periodHi> <periodLo> <count>
 | `1` | solid | constant colour |
 | `2` | blink | half period on, half off |
 | `3` | breathe | smooth fade in and out |
-| `4` | rainbow | hue cycle — `R G B W` are ignored |
+| `4` | rainbow | hue cycle, shifted by LED along the chain — `R G B W` are ignored |
 | `5` | strobe | 50 ms flash at the start of each period |
 | `6` | heart | double pulse |
 
+* `index` (`0x32` only): `0..PIXEL_COUNT-1`. A non-existent LED discards the
+  packet.
 * `R G B W`: `0..255` each. `W` is the separate white chip of the SK6812.
 * `brightness`: `0..255`, scales all four channels.
 * `period`: `uint16` in ms, `0` = default of the mode (blink/strobe 1000,
@@ -275,16 +281,18 @@ A5 31 <mode> <R> <G> <B> <W> <brightness> <periodHi> <periodLo> <count>
 * `count`:
   * `0` — **persistent** (the "base"). Stays until the next persistent
     command. Resending the same mode and period does not restart the
-    animation, so the bridge can refresh it cyclically.
+    animation, so the bridge can refresh it cyclically. If `0x31` changes
+    mode or period on any LED, all LEDs restart together and run in step.
   * `1..255` — **one-shot**: runs for `count × period`, then the base comes
     back by itself. Meant for events, e.g. "flash red 3×":
     `A5 31 05 FF 00 00 00 FF 01 2C 03` (strobe, red, 300 ms, 3×).
-    A new one-shot replaces a running one; a persistent command does
-    **not** cut it short. To end it early, send a one-shot with
-    `count=1` and `period=1`.
+    A new one-shot replaces a running one on the same LED; a persistent
+    command does **not** cut it short. To end it early, send a one-shot with
+    `count=1` and `period=1`. One LED blinking while the others keep their
+    colour: `A5 32 02 05 FF 00 00 00 FF 01 2C 03`.
 * An unknown `mode` (≥ 7) discards the packet.
 * No response. The power-on state is off, unless a default was saved on the
-  USB console with `px save`.
+  USB console with `px save` (stores all LEDs).
 
 ---
 
@@ -895,7 +903,7 @@ Deliberately left open, relevant for the bridge:
 * **No checksum, no length field.** A lost byte cascades until the next
   `0xA5`. The ESP's 100 ms timeout catches this; the bridge needs an
   equivalent safeguard.
-* **No acknowledgement for `0x10`, `0x20`, `0x30`, `0x31`, `0x60`, `0x80`.** Fire-and-forget.
+* **No acknowledgement for `0x10`, `0x20`, `0x30`, `0x31`, `0x32`, `0x60`, `0x80`.** Fire-and-forget.
   Whether a PID value arrived can only be cross-checked with `0x81`.
 * **`0x80` on its own is volatile.** Without a subsequent `0x83`, the values
   are back to the stored state after the next reset.

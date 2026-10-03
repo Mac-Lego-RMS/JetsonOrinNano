@@ -158,7 +158,8 @@ constexpr uint16_t DUTY_MAX = (1 << PWM_RES) - 1;   // 1023
 #define CMD_MOTOR       0x10   // 3B: dir, speedHi, speedLo
 #define CMD_SERVO       0x20   // 3B: id, pctHi, pctLo
 #define CMD_LED         0x30   // 1B: on/off
-#define CMD_PIXEL       0x31   // 9B: mode, R, G, B, W, brightness, uint16 period ms, count
+#define CMD_PIXEL       0x31   // 9B: mode, R, G, B, W, brightness, uint16 period ms, count (all LEDs)
+#define CMD_PIXEL_ONE   0x32   // 10B: LED index + the 9 bytes of CMD_PIXEL
 #define CMD_CALIBRATE   0x40   // 0B: starts the manual calibration
 #define CMD_CAL         0x41   // 2B: action, argument (manual calibration)
 #define CMD_TORQUE      0x50   // 0B
@@ -1375,7 +1376,7 @@ uint8_t calHandleAction(SCSCL* servo, uint8_t action, uint8_t arg) {
 }
 
 // ==========================================
-// 8c. RGBW STATUS LED (SK6812 on GPIO40) - task on Core 0
+// 8c. RGBW STATUS LEDS (SK6812 chain on GPIO40) - task on Core 0
 // ==========================================
 //
 // Why core 0: loop() on core 1 carries the live control from the Jetson and
@@ -1383,14 +1384,14 @@ uint8_t calHandleAction(SCSCL* servo, uint8_t action, uint8_t arg) {
 // output). An animation driven from there would stutter with every such
 // pause. The motor task on core 0 needs only a few microseconds per 10 ms
 // cycle, so core 0 has plenty of headroom. One frame here costs a few
-// microseconds of maths plus ~40 us of RMT transmission, during which the
-// task blocks on the driver instead of spinning - the motor task does not
-// notice it.
+// microseconds of maths plus ~40 us of RMT transmission per LED, during
+// which the task blocks on the driver instead of spinning - the motor task
+// does not notice it.
 //
-// Hand-over like the drive: core 1 only writes the setpoint via setPixel()
-// under a spinlock, the task copies it once per frame.
+// Hand-over like the drive: core 1 only writes the setpoints via setPixel()
+// under a spinlock, the task copies them once per frame.
 //
-// Two layers:
+// Every LED in the chain has its own state, in two layers:
 //   base     the persistent state (count = 0). Stays until replaced.
 //   one-shot a triggered animation (count > 0). Runs count periods on top of
 //            the base, then the base comes back by itself. Event signals
@@ -1398,16 +1399,17 @@ uint8_t calHandleAction(SCSCL* servo, uint8_t action, uint8_t arg) {
 // A new base does NOT cancel a running one-shot - a bridge that refreshes its
 // status colour every second would otherwise cut off every event flash.
 
-constexpr int      PIXEL_COUNT    = 1;      // LEDs in the chain, all show the same
-constexpr uint32_t PIXEL_FRAME_MS = 20;     // 50 Hz
-constexpr uint32_t PIXEL_REFRESH_MS = 1000; // resend even if unchanged (glitch recovery)
+constexpr int      PIXEL_COUNT      = 4;     // LEDs in the chain (max. 32)
+static_assert(PIXEL_COUNT >= 1 && PIXEL_COUNT <= 32, "g_pxShotMask holds 32 LEDs");
+constexpr uint32_t PIXEL_FRAME_MS   = 20;    // 50 Hz
+constexpr uint32_t PIXEL_REFRESH_MS = 1000;  // resend even if unchanged (glitch recovery)
 
 enum PixelMode : uint8_t {
     PX_OFF       = 0,
     PX_SOLID     = 1,
     PX_BLINK     = 2,   // 50 % on, 50 % off
     PX_BREATHE   = 3,   // smooth fade in and out
-    PX_RAINBOW   = 4,   // hue cycle, colour bytes are ignored
+    PX_RAINBOW   = 4,   // hue cycle, shifted along the chain; colour bytes ignored
     PX_STROBE    = 5,   // short flash at the start of each period
     PX_HEARTBEAT = 6,   // double pulse
     PX_MODE_COUNT
@@ -1425,13 +1427,13 @@ struct PixelAnim {
     uint8_t  count      = 0;      // 0 = persistent, n = one-shot over n periods
 };
 
-static PixelAnim     g_pxBase;
-static PixelAnim     g_pxShot;
-static uint32_t      g_pxBaseSeq = 0;      // ++ when mode/period change -> phase restarts
-static uint32_t      g_pxShotSeq = 0;      // ++ on every trigger -> one-shot starts over
+static PixelAnim     g_pxBase[PIXEL_COUNT];
+static PixelAnim     g_pxShot[PIXEL_COUNT];
+static uint32_t      g_pxBaseSeq[PIXEL_COUNT] = {0};   // ++ -> phase restarts
+static uint32_t      g_pxShotSeq[PIXEL_COUNT] = {0};   // ++ -> one-shot starts over
 static portMUX_TYPE  g_pxMux = portMUX_INITIALIZER_UNLOCKED;
-static volatile bool g_pxShotRunning = false;   // written by the task, for the status
-static volatile bool g_pxReady = false;         // RMT channel is up
+static volatile uint32_t g_pxShotMask = 0;   // bit i = one-shot running on LED i (task writes)
+static volatile bool g_pxReady = false;      // RMT channel is up
 
 TaskHandle_t PixelTaskHandle;
 
@@ -1450,41 +1452,57 @@ static inline uint16_t pixelPeriod(const PixelAnim& a) {
     return a.periodMs ? a.periodMs : pixelDefaultPeriod(a.mode);
 }
 
-// Set the LED. count = 0 replaces the base, count > 0 triggers a one-shot.
+// Set one LED (idx 0..PIXEL_COUNT-1) or all of them (idx < 0).
+// count = 0 replaces the base, count > 0 triggers a one-shot.
+//
 // The base phase is only restarted when mode or period change: a bridge that
 // resends the same blink every 100 ms would otherwise freeze it in its first
-// half period.
-void setPixel(const PixelAnim& a) {
+// half period. If it does change on any of the addressed LEDs, ALL of them
+// restart together - otherwise "all blink" would leave the LEDs that were
+// already blinking out of step with the rest.
+void setPixel(int idx, const PixelAnim& a) {
+    if (idx >= PIXEL_COUNT) return;
+    const int lo = (idx < 0) ? 0 : idx;
+    const int hi = (idx < 0) ? PIXEL_COUNT - 1 : idx;
+
     portENTER_CRITICAL(&g_pxMux);
     if (a.count) {
-        g_pxShot = a;
-        g_pxShotSeq++;
+        for (int i = lo; i <= hi; i++) { g_pxShot[i] = a; g_pxShotSeq[i]++; }
     } else {
-        if (a.mode != g_pxBase.mode || a.periodMs != g_pxBase.periodMs) g_pxBaseSeq++;
-        g_pxBase = a;
+        bool restart = false;
+        for (int i = lo; i <= hi; i++) {
+            if (a.mode != g_pxBase[i].mode || a.periodMs != g_pxBase[i].periodMs) restart = true;
+        }
+        for (int i = lo; i <= hi; i++) {
+            if (restart) g_pxBaseSeq[i]++;
+            g_pxBase[i] = a;
+        }
     }
     portEXIT_CRITICAL(&g_pxMux);
 }
 
-// End a running one-shot early, the base takes over immediately.
-void stopPixelShot() {
+// End running one-shots early (idx < 0 = all), the base takes over immediately.
+void stopPixelShot(int idx) {
+    if (idx >= PIXEL_COUNT) return;
+    const int lo = (idx < 0) ? 0 : idx;
+    const int hi = (idx < 0) ? PIXEL_COUNT - 1 : idx;
     portENTER_CRITICAL(&g_pxMux);
-    g_pxShot.count = 0;
-    g_pxShotSeq++;
+    for (int i = lo; i <= hi; i++) { g_pxShot[i].count = 0; g_pxShotSeq[i]++; }
     portEXIT_CRITICAL(&g_pxMux);
 }
 
-PixelAnim getPixelBase() {
+PixelAnim getPixelBase(int idx) {
     PixelAnim a;
+    if (idx < 0 || idx >= PIXEL_COUNT) idx = 0;
     portENTER_CRITICAL(&g_pxMux);
-    a = g_pxBase;
+    a = g_pxBase[idx];
     portEXIT_CRITICAL(&g_pxMux);
     return a;
 }
 
-// Colour of the pattern t milliseconds after its start, already scaled by
-// the brightness. out = R, G, B, W.
-static void pixelRender(const PixelAnim& a, uint32_t t, uint8_t out[4]) {
+// Colour of LED idx, t milliseconds after its pattern started, already scaled
+// by the brightness. out = R, G, B, W.
+static void pixelRender(const PixelAnim& a, int idx, uint32_t t, uint8_t out[4]) {
     const uint32_t per = pixelPeriod(a);
     const uint32_t ph  = t % per;             // position within the period
     uint8_t  c[4]  = {a.r, a.g, a.b, a.w};
@@ -1506,7 +1524,9 @@ static void pixelRender(const PixelAnim& a, uint32_t t, uint8_t out[4]) {
         }
         case PX_RAINBOW: {
             // Hue wheel in six 256-step segments, white channel stays off.
-            uint32_t h = ph * 1536u / per;
+            // Each LED is shifted by 1/PIXEL_COUNT of the wheel, so the
+            // colours run along the chain instead of all LEDs in lockstep.
+            uint32_t h = (ph * 1536u / per + (uint32_t)idx * 1536u / PIXEL_COUNT) % 1536u;
             uint8_t  x = (uint8_t)(h & 0xFF);
             switch (h >> 8) {
                 case 0:  c[0] = 255;     c[1] = x;       c[2] = 0;       break;
@@ -1541,17 +1561,18 @@ static void pixelRender(const PixelAnim& a, uint32_t t, uint8_t out[4]) {
     }
 }
 
-// Send one colour to all LEDs of the chain via RMT. SK6812 RGBW expects the
-// order G, R, B, W, MSB first. Timing at 10 MHz (100 ns per tick) from the
-// SK6812 datasheet: 0 = 0.3 us high / 0.9 us low, 1 = 0.6 / 0.6. The core's
-// rgbLedWrite() uses 0.4/0.8 and 0.8/0.4 (WS2812) - 0.8 us is already outside
-// the SK6812 tolerance for T1H, and it cannot drive the fourth channel anyway.
+// Send the whole chain via RMT. The first 32 bits go to the LED nearest to
+// the ESP, it passes the rest on. SK6812 RGBW expects the order G, R, B, W,
+// MSB first. Timing at 10 MHz (100 ns per tick) from the SK6812 datasheet:
+// 0 = 0.3 us high / 0.9 us low, 1 = 0.6 / 0.6. The core's rgbLedWrite() uses
+// 0.4/0.8 and 0.8/0.4 (WS2812) - 0.8 us is already outside the SK6812
+// tolerance for T1H, and it cannot drive the fourth channel anyway.
 // The >80 us reset pause comes for free from the frame interval.
-static void pixelWrite(const uint8_t rgbw[4]) {
+static void pixelWrite(const uint8_t rgbw[][4]) {
     static rmt_data_t sym[PIXEL_COUNT * 32];
-    const uint8_t grbw[4] = {rgbw[1], rgbw[0], rgbw[2], rgbw[3]};
     int k = 0;
     for (int led = 0; led < PIXEL_COUNT; led++) {
+        const uint8_t grbw[4] = {rgbw[led][1], rgbw[led][0], rgbw[led][2], rgbw[led][3]};
         for (int ch = 0; ch < 4; ch++) {
             for (int bit = 7; bit >= 0; bit--) {
                 bool one = grbw[ch] & (1 << bit);
@@ -1570,49 +1591,71 @@ void pixelTask(void* pvParameters) {
     // Set up the RMT channel HERE and not in setup(): the driver allocates its
     // interrupt on the core that creates the channel - so it stays on core 0
     // as well, away from the live control.
-    if (!rmtInit(PIN_PIXEL, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000)) {
+    //
+    // Memory: one block holds 48 symbols = 1.5 LEDs. Reserve enough blocks for
+    // the whole frame (4 LEDs = 128 symbols -> 3 blocks), then it goes out in
+    // one piece. Otherwise the driver refills by interrupt mid-transmission,
+    // and a late refill stretches a bit beyond the 80 us reset - the rest of
+    // the chain would then latch garbage. Only longer chains than 6 LEDs fall
+    // back to refilling (the S3 has 4 TX blocks, nothing else uses RMT).
+    constexpr int PX_RMT_BLOCKS = min(4, (PIXEL_COUNT * 32 + 47) / 48);
+    if (!rmtInit(PIN_PIXEL, RMT_TX_MODE, (rmt_reserve_memsize_t)PX_RMT_BLOCKS, 10000000)) {
         Serial.printf("ESP: RGBW LED - RMT init on IO%d failed, LED disabled.\n", PIN_PIXEL);
         vTaskDelete(nullptr);
         return;
     }
     g_pxReady = true;
 
-    uint32_t baseSeq = UINT32_MAX, shotSeq = 0;
-    uint32_t baseT0 = 0, shotT0 = 0;
-    bool     shotRunning = false;
-    uint8_t  last[4] = {0, 0, 0, 0};
+    uint32_t baseSeq[PIXEL_COUNT], shotSeq[PIXEL_COUNT] = {0};
+    uint32_t baseT0[PIXEL_COUNT] = {0}, shotT0[PIXEL_COUNT] = {0};
+    bool     shotRunning[PIXEL_COUNT] = {false};
+    for (int i = 0; i < PIXEL_COUNT; i++) baseSeq[i] = UINT32_MAX;
+
+    uint8_t  last[PIXEL_COUNT][4] = {{0}};
     uint32_t lastWrite = 0;
     bool     first = true;
 
     TickType_t wake = xTaskGetTickCount();
     for (;;) {
-        PixelAnim base, shot;
-        uint32_t  bs, ss;
+        PixelAnim base[PIXEL_COUNT], shot[PIXEL_COUNT];
+        uint32_t  bs[PIXEL_COUNT], ss[PIXEL_COUNT];
         portENTER_CRITICAL(&g_pxMux);
-        base = g_pxBase;  bs = g_pxBaseSeq;
-        shot = g_pxShot;  ss = g_pxShotSeq;
+        for (int i = 0; i < PIXEL_COUNT; i++) {
+            base[i] = g_pxBase[i];  bs[i] = g_pxBaseSeq[i];
+            shot[i] = g_pxShot[i];  ss[i] = g_pxShotSeq[i];
+        }
         portEXIT_CRITICAL(&g_pxMux);
 
-        uint32_t now = millis();
-        if (bs != baseSeq) { baseSeq = bs; baseT0 = now; }
-        if (ss != shotSeq) { shotSeq = ss; shotT0 = now; shotRunning = (shot.count > 0); }
+        // One timestamp for the whole frame: LEDs started together stay in step.
+        uint32_t now  = millis();
+        uint32_t mask = 0;
+        uint8_t  px[PIXEL_COUNT][4];
 
-        // One-shot over? Its duration is count x period, i.e. it always ends
-        // after a complete pattern, never in the middle of a flash.
-        if (shotRunning && now - shotT0 >= (uint32_t)pixelPeriod(shot) * shot.count) {
-            shotRunning = false;
+        for (int i = 0; i < PIXEL_COUNT; i++) {
+            if (bs[i] != baseSeq[i]) { baseSeq[i] = bs[i]; baseT0[i] = now; }
+            if (ss[i] != shotSeq[i]) {
+                shotSeq[i] = ss[i]; shotT0[i] = now; shotRunning[i] = (shot[i].count > 0);
+            }
+            // One-shot over? Its duration is count x period, i.e. it always
+            // ends after a complete pattern, never in the middle of a flash.
+            if (shotRunning[i] &&
+                now - shotT0[i] >= (uint32_t)pixelPeriod(shot[i]) * shot[i].count) {
+                shotRunning[i] = false;
+            }
+            if (shotRunning[i]) {
+                mask |= (1u << i);
+                pixelRender(shot[i], i, now - shotT0[i], px[i]);
+            } else {
+                pixelRender(base[i], i, now - baseT0[i], px[i]);
+            }
         }
-        g_pxShotRunning = shotRunning;
-
-        uint8_t px[4];
-        if (shotRunning) pixelRender(shot, now - shotT0, px);
-        else             pixelRender(base, now - baseT0, px);
+        g_pxShotMask = mask;
 
         // Only send on change - plus a periodic refresh, in case a motor
-        // spike has corrupted a bit and the LED shows a wrong colour.
-        if (first || memcmp(px, last, 4) != 0 || now - lastWrite >= PIXEL_REFRESH_MS) {
+        // spike has corrupted a bit and an LED shows a wrong colour.
+        if (first || memcmp(px, last, sizeof(px)) != 0 || now - lastWrite >= PIXEL_REFRESH_MS) {
             pixelWrite(px);
-            memcpy(last, px, 4);
+            memcpy(last, px, sizeof(px));
             lastWrite = now;
             first = false;
         }
@@ -1621,40 +1664,51 @@ void pixelTask(void* pvParameters) {
     }
 }
 
-// Power-on default in NVS (only the base, a one-shot is an event and is not
-// stored). Colour packed as 0xRRGGBBWW.
+// Power-on default in NVS: the base of every LED (a one-shot is an event and
+// is not stored). One blob of 8 bytes per LED: mode, R, G, B, W, brightness,
+// period hi/lo. If the chain length changes, the LEDs that are in both the
+// old and the new chain keep their stored state.
+constexpr size_t PX_NVS_REC = 8;
+
 bool savePixelDefault() {
-    PixelAnim a = getPixelBase();
-    bool ok = true;
-    ok &= prefs.putUChar("pxmode", a.mode) > 0;
-    ok &= prefs.putUInt("pxrgbw", ((uint32_t)a.r << 24) | ((uint32_t)a.g << 16) |
-                                  ((uint32_t)a.b << 8)  |  (uint32_t)a.w) > 0;
-    ok &= prefs.putUChar("pxbri", a.brightness) > 0;
-    ok &= prefs.putUShort("pxper", a.periodMs) > 0;
-    return ok;
+    uint8_t blob[PIXEL_COUNT * PX_NVS_REC];
+    for (int i = 0; i < PIXEL_COUNT; i++) {
+        PixelAnim a = getPixelBase(i);
+        uint8_t* p = &blob[i * PX_NVS_REC];
+        p[0] = a.mode; p[1] = a.r; p[2] = a.g; p[3] = a.b; p[4] = a.w;
+        p[5] = a.brightness;
+        p[6] = (uint8_t)(a.periodMs >> 8); p[7] = (uint8_t)a.periodMs;
+    }
+    return prefs.putBytes("pxdef", blob, sizeof(blob)) == sizeof(blob);
 }
 
 void loadPixelDefault() {
-    if (!prefs.isKey("pxmode")) return;   // never saved -> LED stays off
-    PixelAnim a;
-    a.mode = prefs.getUChar("pxmode", PX_OFF);
-    if (a.mode >= PX_MODE_COUNT) a.mode = PX_OFF;
-    uint32_t c = prefs.getUInt("pxrgbw", 0);
-    a.r = (uint8_t)(c >> 24); a.g = (uint8_t)(c >> 16);
-    a.b = (uint8_t)(c >> 8);  a.w = (uint8_t)c;
-    a.brightness = prefs.getUChar("pxbri", a.brightness);
-    a.periodMs   = prefs.getUShort("pxper", 0);
-    setPixel(a);
+    if (!prefs.isKey("pxdef")) return;   // never saved -> LEDs stay off
+    uint8_t blob[32 * PX_NVS_REC];
+    size_t len = prefs.getBytes("pxdef", blob, sizeof(blob));
+    int n = min((int)(len / PX_NVS_REC), PIXEL_COUNT);
+    for (int i = 0; i < n; i++) {
+        const uint8_t* p = &blob[i * PX_NVS_REC];
+        if (p[0] >= PX_MODE_COUNT) continue;
+        PixelAnim a;
+        a.mode = p[0]; a.r = p[1]; a.g = p[2]; a.b = p[3]; a.w = p[4];
+        a.brightness = p[5];
+        a.periodMs   = (uint16_t)((p[6] << 8) | p[7]);
+        setPixel(i, a);
+    }
 }
 
 void printPixelState() {
-    PixelAnim a = getPixelBase();
-    Serial.printf("RGBW LED IO%d (%d x SK6812)%s\n", PIN_PIXEL, PIXEL_COUNT,
-                  g_pxReady ? "" : "  !! RMT not running");
-    Serial.printf("  base: %s  rgbw=%u,%u,%u,%u  bri=%u  period=%u ms%s\n",
-                  PX_MODE_NAMES[a.mode], a.r, a.g, a.b, a.w, a.brightness,
-                  pixelPeriod(a), a.periodMs ? "" : " (default)");
-    if (g_pxShotRunning) Serial.println("  one-shot running ('px stop' ends it)");
+    Serial.printf("RGBW LEDs IO%d (%d x SK6812, LED 0 = nearest to the ESP)%s\n",
+                  PIN_PIXEL, PIXEL_COUNT, g_pxReady ? "" : "  !! RMT not running");
+    uint32_t mask = g_pxShotMask;
+    for (int i = 0; i < PIXEL_COUNT; i++) {
+        PixelAnim a = getPixelBase(i);
+        Serial.printf("  [%d] %-7s rgbw=%u,%u,%u,%u  bri=%u  period=%u ms%s%s\n", i,
+                      PX_MODE_NAMES[a.mode], a.r, a.g, a.b, a.w, a.brightness,
+                      pixelPeriod(a), a.periodMs ? "" : " (default)",
+                      (mask & (1u << i)) ? "  + one-shot running" : "");
+    }
 }
 
 // ==========================================
@@ -1735,6 +1789,7 @@ static const char* cmdName(uint8_t cmd) {
         case CMD_SERVO:         return "SERVO";
         case CMD_LED:           return "LED";
         case CMD_PIXEL:         return "PIXEL";
+        case CMD_PIXEL_ONE:     return "PIXEL_ONE";
         case CMD_CALIBRATE:     return "CALIBRATE";
         case CMD_CAL:           return "CAL";
         case CMD_CAL_RSP:       return "CAL_RSP";
@@ -2170,12 +2225,16 @@ private:
                 Serial.printf("  %s", buffer[0] ? "on" : "off");
                 break;
             case CMD_PIXEL:
-                Serial.printf("  %s rgbw=%u,%u,%u,%u bri=%u %u ms",
-                              buffer[0] < PX_MODE_COUNT ? PX_MODE_NAMES[buffer[0]] : "???",
-                              buffer[1], buffer[2], buffer[3], buffer[4], buffer[5],
-                              (buffer[6] << 8) | buffer[7]);
-                if (buffer[8]) Serial.printf(" x%u (one-shot)", buffer[8]);
+            case CMD_PIXEL_ONE: {
+                const uint8_t* b = buffer;
+                if (currentCmd == CMD_PIXEL_ONE) Serial.printf("  [%u]", *b++);
+                else                             Serial.print("  [all]");
+                Serial.printf(" %s rgbw=%u,%u,%u,%u bri=%u %u ms",
+                              b[0] < PX_MODE_COUNT ? PX_MODE_NAMES[b[0]] : "???",
+                              b[1], b[2], b[3], b[4], b[5], (b[6] << 8) | b[7]);
+                if (b[8]) Serial.printf(" x%u (one-shot)", b[8]);
                 break;
+            }
             case CMD_TRIM:
                 Serial.printf("  %s", buffer[0] == 0 ? "left" :
                                       buffer[0] == 1 ? "right" : "save");
@@ -2218,6 +2277,7 @@ private:
             case CMD_SERVO:      return 3;
             case CMD_LED:        return 1;
             case CMD_PIXEL:      return 9;
+            case CMD_PIXEL_ONE:  return 10;
             case CMD_TRIM:       return 1;
             case CMD_PID_SET:    return 5;
             case CMD_MOVE:       return 5;
@@ -2368,20 +2428,28 @@ private:
             digitalWrite(PIN_LED, buffer[0] ? HIGH : LOW);
             break;
 
-        // RGBW status LED. Only hands the setpoint over to the pixel task on
-        // core 0 - nothing here waits for the LED.
-        case CMD_PIXEL: {
-            if (buffer[0] >= PX_MODE_COUNT) break;   // unknown mode, discard
+        // RGBW status LEDs: 0x31 for all, 0x32 for one (index in front).
+        // Only hands the setpoint over to the pixel task on core 0 - nothing
+        // here waits for the LEDs.
+        case CMD_PIXEL:
+        case CMD_PIXEL_ONE: {
+            int idx = -1;
+            const uint8_t* b = buffer;
+            if (currentCmd == CMD_PIXEL_ONE) {
+                idx = *b++;
+                if (idx >= PIXEL_COUNT) break;        // LED does not exist, discard
+            }
+            if (b[0] >= PX_MODE_COUNT) break;        // unknown mode, discard
             PixelAnim a;
-            a.mode       = buffer[0];
-            a.r          = buffer[1];
-            a.g          = buffer[2];
-            a.b          = buffer[3];
-            a.w          = buffer[4];
-            a.brightness = buffer[5];
-            a.periodMs   = (buffer[6] << 8) | buffer[7];
-            a.count      = buffer[8];
-            setPixel(a);
+            a.mode       = b[0];
+            a.r          = b[1];
+            a.g          = b[2];
+            a.b          = b[3];
+            a.w          = b[4];
+            a.brightness = b[5];
+            a.periodMs   = (b[6] << 8) | b[7];
+            a.count      = b[8];
+            setPixel(idx, a);
             break;
         }
 
@@ -2526,11 +2594,12 @@ void printHelp() {
     Serial.println("  tel      drive telemetry  tel<ms> set interval (tel0 = off)");
     Serial.println("  sw       speed window     sw<n> in multiples of 10 ms");
     Serial.println("  o        toggle LED (button reports as [TX] BUTTON)");
-    Serial.println("--- RGBW LED (SK6812, IO40) ---");
+    Serial.println("--- RGBW LEDs (SK6812 chain, IO40) ---");
     Serial.println("  px       status   px 255 0 0 [w] / px #ff0000 / px red  colour");
     Serial.println("  px blink|breathe|rainbow|strobe|heart|solid|off [ms] [count]");
     Serial.println("           count > 0 = one-shot, then back   px bri<0-255>");
     Serial.println("  px stop  end one-shot   px save  power-on default");
+    Serial.println("  px<n> .. only LED n, e.g. px2 red / px0 blink 300 3 (no space!)");
     Serial.println("--- Battery ---");
     Serial.println("  v        measure now       vc<factor>  calibrate divider");
     Serial.println("  vd       pin diagnosis (battery off): checks the divider at the ADC input");
@@ -2562,17 +2631,31 @@ static const PixelColorName PX_COLORS[] = {
     {"purple",  120,   0, 255,   0}, {"warm",  255, 80,   0, 180},
 };
 
-// "px ..." - RGBW LED from the console. Arguments separated by spaces or commas:
+// "px ..." - RGBW LEDs from the console. Arguments separated by spaces or commas:
 //   px                         status
 //   px <r> <g> <b> [w]         colour 0..255     px #RRGGBB[WW]  same in hex
 //   px red|green|...           named colour
 //   px <mode> [ms] [count]     animation with the current colour; count > 0 =
 //                              one-shot, afterwards the previous state returns
 //   px bri<0-255>  px stop  px save
+// Without a number everything applies to all LEDs. A number written directly
+// after "px" selects one LED: "px2 red", "px0 breathe 2000". It has to be
+// glued on - "px 2 ..." would be indistinguishable from a colour "px 255 0 0".
 // A colour keeps the running animation (breathe stays breathe, only bluer) -
 // only from off or rainbow, where the colour would be invisible, it switches
-// to solid.
+// to solid. For all LEDs, LED 0 is the reference for what is kept.
 void handlePixelCommand(String arg) {
+    int idx = -1;
+    if (arg.length() > 0 && isDigit(arg.charAt(0))) {
+        int end = 0;
+        while (end < (int)arg.length() && isDigit(arg.charAt(end))) end++;
+        idx = arg.substring(0, end).toInt();
+        arg = arg.substring(end);
+        if (idx >= PIXEL_COUNT) {
+            Serial.printf("?? LED %d does not exist (0..%d)\n", idx, PIXEL_COUNT - 1);
+            return;
+        }
+    }
     arg.replace(",", " ");
     arg.trim();
 
@@ -2590,22 +2673,24 @@ void handlePixelCommand(String arg) {
         Serial.println("  px <r> <g> <b> [w] | px #RRGGBB[WW] | px red/green/blue/white/...");
         Serial.println("  px <off|solid|blink|breathe|rainbow|strobe|heart> [ms] [count]");
         Serial.println("  px bri<0-255> | px stop (end one-shot) | px save (power-on default)");
+        Serial.printf ("  one LED: number right after px, e.g. px2 red, px0 blink 300 3 (0..%d)\n",
+                       PIXEL_COUNT - 1);
         return;
     }
 
-    PixelAnim a = getPixelBase();
+    PixelAnim a = getPixelBase(idx);
     a.count = 0;
     auto colourSet = [&]() {
         if (a.mode == PX_OFF || a.mode == PX_RAINBOW) a.mode = PX_SOLID;
     };
 
     if (tok[0] == "save") {
-        Serial.println(savePixelDefault() ? "-> LED state saved as power-on default"
+        Serial.println(savePixelDefault() ? "-> LED states saved as power-on default"
                                           : "-> ERROR while saving (NVS)");
         return;
     }
     if (tok[0] == "stop") {
-        stopPixelShot();
+        stopPixelShot(idx);
         Serial.println("-> one-shot ended");
         return;
     }
@@ -2661,8 +2746,10 @@ void handlePixelCommand(String arg) {
         }
     }
 
-    setPixel(a);
-    Serial.printf("-> LED %s rgbw=%u,%u,%u,%u bri=%u period=%u ms",
+    setPixel(idx, a);
+    if (idx < 0) Serial.print("-> all LEDs ");
+    else         Serial.printf("-> LED %d ", idx);
+    Serial.printf("%s rgbw=%u,%u,%u,%u bri=%u period=%u ms",
                   PX_MODE_NAMES[a.mode], a.r, a.g, a.b, a.w, a.brightness, pixelPeriod(a));
     if (a.count) Serial.printf(" x%u (one-shot, %lu ms)", a.count,
                                (unsigned long)pixelPeriod(a) * a.count);
