@@ -9,13 +9,13 @@ commands over UART; the ESP closes the loops that need hard timing.
 - **Steering:** Waveshare SC09 servo on a half-duplex bus, calibration of
   center and end stops stored in flash
 - **Battery:** 4S pack voltage with an undervoltage warning to the Jetson
-- **Start button** and status LED
+- **Start button**, status LED and an SK6812 RGBW LED with animations
 - **Jetson link:** binary protocol with optional send timestamps for clock
   sync, specified in [`docs/JETSON_BRIDGE.md`](docs/JETSON_BRIDGE.md) — the
   counterpart is the ROS 2 package [`esp_bridge`](../esp_bridge)
 
-Core 1 handles commands, steering and the battery; core 0 runs only the
-motor control task every 10 ms.
+Core 1 handles commands, steering and the battery; core 0 runs the motor
+control task every 10 ms and the RGBW LED animations at 50 Hz.
 
 ## Layout
 
@@ -56,6 +56,7 @@ pio run -e esp32-s3-uart0 -t upload
 | Servo bus RX / TX | 18 / 17 |
 | Jetson UART RX / TX | 10 / 11 |
 | LED / button | 13 / 9 |
+| RGBW LED (SK6812) data | 40 |
 | Battery divider (100k / 22k) | 1 |
 
 ## Debug console
@@ -70,6 +71,7 @@ Type `h` on the USB console for the full command list. The most used ones:
 | `cal` … `calsave` | manual steering calibration |
 | `v` `vc<factor>` | battery voltage, calibrate the divider |
 | `dbg1` / `ts` / `tel<ms>` | Jetson link statistics, clock sync, telemetry rate |
+| `px red` / `px breathe 2000` / `px save` | RGBW LED colour, animation, power-on default |
 
 ## History
 
